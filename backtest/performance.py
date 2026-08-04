@@ -1,7 +1,8 @@
 """backtest.performance — chỉ số hiệu suất, so sánh benchmark, output báo cáo.
 
-Sharpe/Sortino annualize bằng √365, KHÔNG phải √252 — crypto giao dịch
-365 ngày/năm, không có ngày nghỉ thị trường (xem CLAUDE.md bất biến #9).
+Sharpe/Sortino annualize bằng căn bậc hai của 365, KHÔNG dùng quy ước
+ngày-giao-dịch-trong-năm của equities — crypto giao dịch 365 ngày/năm,
+không có ngày nghỉ thị trường (xem CLAUDE.md bất biến #9).
 """
 
 from __future__ import annotations

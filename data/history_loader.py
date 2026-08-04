@@ -132,6 +132,20 @@ class HistoryLoader:
         cache_path = self._cache_path(symbol, bar_offset_hours)
         cached = self._read_cache(cache_path)
 
+        # Mở rộng cache theo CẢ hai hướng: về sau (bar mới kể từ lần tải
+        # trước) và về trước (nếu `start` yêu cầu sớm hơn dữ liệu đang có
+        # trong cache — ví dụ lần đầu chỉ tải một khoảng ngắn để test, sau
+        # đó gọi lại với `start` xa hơn). Bỏ chiều nào cũng âm thầm trả về
+        # ít dữ liệu hơn những gì caller yêu cầu mà không báo lỗi.
+        new_pieces: list[pd.DataFrame] = [cached] if cached is not None else []
+
+        if cached is not None and not cached.empty and start < cached.index.min():
+            backfill_end = cached.index.min() - _BAR_DELTA
+            if start <= backfill_end:
+                backfill = self._fetch_range(symbol, start, backfill_end, bar_offset_hours)
+                if not backfill.empty:
+                    new_pieces.append(backfill)
+
         fetch_start = start
         if cached is not None and not cached.empty:
             fetch_start = max(start, cached.index.max() + _BAR_DELTA)
@@ -139,10 +153,13 @@ class HistoryLoader:
         if fetch_start <= end:
             fresh = self._fetch_range(symbol, fetch_start, end, bar_offset_hours)
             if not fresh.empty:
-                combined = pd.concat([cached, fresh]) if cached is not None else fresh
-                combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-                self._write_cache(combined, cache_path)
-                cached = combined
+                new_pieces.append(fresh)
+
+        if len(new_pieces) > 1 or (len(new_pieces) == 1 and cached is None):
+            combined = pd.concat(new_pieces)
+            combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+            self._write_cache(combined, cache_path)
+            cached = combined
 
         if cached is None or cached.empty:
             return cached if cached is not None else pd.DataFrame()
