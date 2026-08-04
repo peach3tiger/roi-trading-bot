@@ -1,0 +1,13 @@
+hmmlearn
+pybit                 # SDK chính thức Bybit v5
+ccxt                  # fallback đa sàn + tải dữ liệu lịch sử
+pandas
+numpy
+scipy
+scikit-learn
+ta
+pyyaml
+python-dotenv
+websockets
+rich
+pyarrow               # cache OHLCV dạng parquet

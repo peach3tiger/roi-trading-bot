@@ -1,0 +1,30 @@
+# Bí mật — không bao giờ commit
+.env
+config/credentials.yaml
+
+# Dữ liệu & model
+data/cache/
+*.pkl
+*.parquet
+feature_ablation.csv
+
+# Trạng thái runtime
+trading_halted.lock
+state_snapshot.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# OS
+.DS_Store

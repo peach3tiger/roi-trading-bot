@@ -1,0 +1,73 @@
+# Toàn bộ tham số của hệ thống, nhóm theo section.
+# Không magic number trong code — nếu một con số có thể cần chỉnh, nó
+# thuộc về file này (xem CLAUDE.md bất biến #14).
+
+exchange:
+  name: bybit
+  category: spot              # spot | linear (linear = perps, Phase 10)
+  testnet: true                # LUÔN true khi bắt đầu
+  symbol: BTCUSDT
+  quote_asset: USDT
+  timeframe: "1D"              # bar đóng 00:00 UTC
+  recv_window_ms: 5000
+
+costs:
+  taker_fee_pct: 0.10          # Bybit spot VIP0, XÁC MINH LẠI trước khi live
+  maker_fee_pct: 0.10
+  slippage_pct: 0.03
+  assume_taker: true           # bảo thủ: giả định luôn khớp taker
+
+hmm:
+  n_candidates: [3, 4, 5, 6, 7]
+  n_init: 10
+  covariance_type: full
+  min_train_bars: 730          # 2 năm × 365 ngày
+  zscore_lookback: 365         # KHÔNG phải 252
+  retrain_interval_days: 7
+  stability_bars: 3
+  flicker_window: 20
+  flicker_threshold: 4
+
+features:
+  tier1_ohlcv: true              # bắt buộc
+  tier2_derivatives: false       # bật sau khi tier1 đã validate
+  tier3_temporal: false          # cẩn trọng — dễ overfit
+  use_trade_count_not_volume: true
+
+trend_gate:
+  enabled: true
+  sma_period: 200
+  slope_lookback: 30
+  buffer_pct: 2.0                # dải chết quanh SMA200
+  confirm_bars: 5                # chậm hơn HMM (3) một cách có chủ đích
+  cap_bull_structure: 1.00
+  cap_transition: 0.60
+  cap_bear_structure: 0.30
+
+strategy:
+  min_confidence: 0.55
+  rebalance_threshold_pct: 25  # KHÔNG phải 10
+  max_allocation: 1.00         # spot: không vượt 1.0
+  low_vol_allocation: 0.95
+  mid_vol_allocation_trend_ok: 0.95
+  mid_vol_allocation_trend_broken: 0.60
+  high_vol_allocation: 0.50    # thấp hơn equities (0.60)
+  uncertainty_size_multiplier: 0.5
+
+risk:
+  max_position_pct: 100        # một tài sản duy nhất
+  max_risk_per_trade_pct: 1.0
+  min_order_value_usdt: 5      # > mức tối thiểu 1 USDT của sàn, có biên
+  circuit_breaker:
+    daily_dd_reduce_pct: 4.0
+    daily_dd_halt_pct: 6.0
+    weekly_dd_reduce_pct: 10.0
+    weekly_dd_halt_pct: 14.0
+    peak_dd_halt_pct: 20.0
+    day_boundary_utc: "00:00"
+
+backtest:
+  is_bars: 365                 # in-sample 1 năm
+  oos_bars: 182                # out-of-sample 6 tháng
+  step_bars: 182
+  fill_delay_bars: 1
