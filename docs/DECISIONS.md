@@ -103,15 +103,17 @@ tier lớn nhất (0.95, low-vol bull) chỉ chiếm 34.8% số bar; 739 lần r
 
 ## §4.9 — Tiêu chí đi tiếp (8 tiêu chí, spec dòng 720–734)
 
-Đánh giá trên cấu hình pruned-8, `reports/pruned8_base` (+ `reports/pruned8_eth`
-cho tiêu chí 7). **Kiểm đếm: 4 PASS / 2 FAIL / 2 CHƯA CHẠY.**
+Đánh giá trên cấu hình pruned-8, `uncertainty_mode="halve"` (baseline,
+không đổi gì) — `reports/pruned8_base` (+ `reports/pruned8_eth` cho tiêu
+chí 7, `reports/pruned8_period2022` cho tiêu chí 5,
+`reports/pruned8_bar_offset` cho tiêu chí 6). **Kiểm đếm: 6 PASS / 2 FAIL /
+0 CHƯA CHẠY — cả 8 tiêu chí đã tính bằng số thật.**
 
-> Lưu ý: một lần trao đổi trước ghi "3 PASS / 2 FAIL / 3 chưa chạy" — con số
-> đó chưa được tính ra bằng dữ liệu thật tại thời điểm nói (lệnh tính khi đó
-> lỗi `ModuleNotFoundError: pandas` do quên activate venv, không có bảng nào
-> thực sự được đưa ra trước đó). Bảng dưới đây là lần đầu tính đủ cả 8 tiêu
-> chí bằng số thật; nếu 4/2/2 mâu thuẫn với kỳ vọng, cần đối chiếu lại thay
-> vì lấy 3/2/3 làm chuẩn.
+> Lưu ý lịch sử: một lần trao đổi trước ghi "3 PASS / 2 FAIL / 3 chưa
+> chạy" — con số đó chưa từng được tính ra bằng dữ liệu thật (lệnh tính
+> khi đó lỗi `ModuleNotFoundError: pandas` do quên activate venv). Bảng
+> dưới là bảng đầy đủ đầu tiên, và nay đã chạy nốt tiêu chí 5/6 (tiêu chí 7
+> đã có sẵn từ trước, dùng lại không chạy thêm vì cấu hình không đổi).
 
 | # | Tiêu chí | Số liệu | Kết quả |
 |---|---|---|---|
@@ -119,16 +121,17 @@ cho tiêu chí 7). **Kiểm đếm: 4 PASS / 2 FAIL / 2 CHƯA CHẠY.**
 | 2 | Calmar > buy-and-hold | 0.5996 vs 0.5217 | PASS |
 | 3 | Sharpe > vol-target tĩnh ít nhất +0.2 | 0.9411 vs 0.9142, chênh **+0.027** | **FAIL** (cần +0.2) |
 | 4 | Ngoài 2 độ lệch chuẩn của random allocation | z = (0.9411−0.6251)/0.1065 = **2.97σ** | PASS |
-| 5 | 2022 không lỗ nặng hơn buy-and-hold | CHƯA CHẠY lại trên pruned-8 (chỉ có số từ baseline 14-feature: chiến lược −29.3% vs BH −65.4%, pass trên cấu hình cũ) | **CHƯA CHẠY** |
-| 6 | Sharpe 4 lần bar-offset chênh ≤ 0.3 | CHƯA CHẠY lại trên pruned-8 (chỉ có sweep offset trên 14-feature) | **CHƯA CHẠY** |
+| 5 | 2022 không lỗ nặng hơn buy-and-hold | chiến lược **−28.80%** vs BH **−65.42%** (`reports/pruned8_period2022`) | PASS |
+| 6 | Sharpe 4 lần bar-offset chênh ≤ 0.3 | offset0=0.9411, offset6=0.8404, offset12=1.0574, offset18=0.8801 — spread **0.217** (`reports/pruned8_bar_offset`) | PASS |
 | 7 | ETH không tune: Sharpe > 0.5 | 0.9278 | PASS |
 | 8 | Phí < 30% lợi nhuận gộp | 11.68% (fee 4445.04 + slippage 1333.51 = 5778.55 USDT / gross 49489.51 USDT) | PASS |
 
 **Không đủ 8/8 — theo CLAUDE.md bất biến #12, chưa được xây tầng thực thi
-(Phase 5 / risk manager).** Hai fail (1, 3) không phải biên nhỏ có thể tranh
-cãi: cần thêm +0.06 Sharpe cho tiêu chí 1, và +0.173 chênh lệch cho tiêu chí
-3 — còn khá xa. Hai tiêu chí chưa chạy (5, 6) cần rerun trên pruned-8 trước
-khi có thể tuyên bố bất kỳ điều gì về chúng.
+(Phase 5 / risk manager).** Nhưng khoảng cách còn lại đã thu hẹp đáng kể so
+với bản đánh giá trước: chỉ còn 2 fail (1, 3), cả hai cùng phản ánh một vấn
+đề — Sharpe thô (0.941) tốt nhưng chưa đạt 1.0, và biên vượt benchmark khắt
+khe nhất (vol-target tĩnh) còn mỏng (+0.027 so với yêu cầu +0.2). 6 tiêu
+chí còn lại đều pass rõ ràng, không phải biên sát nút.
 
 ## Thí nghiệm: uncertainty-mode (2026-08-05)
 
@@ -203,5 +206,7 @@ kỳ (Calmar/max DD), không phải bằng chứng cục bộ theo bucket.
   file này (`docs/DECISIONS.md` không tồn tại trước bản này). Nếu đây là
   tên cấu hình đã thống nhất ở đâu đó ngoài repo, cần ghi định nghĩa chính
   xác vào đây khi nhắc lại.
-- Tiêu chí 5, 6 cần rerun trên `--feature-subset` pruned-8 (`--period 2022`,
-  `--bar-offset 0,6,12,18`) trước khi §4.9 có thể đóng.
+- §4.9 còn 2 fail (1, 3), cả hai đều là khoảng cách Sharpe/biên-vượt-benchmark,
+  không phải bug hay bất ổn cấu trúc. Hướng nào để thu hẹp — thêm return
+  signal (chỉ `log_return_5` đã xác nhận resolvable qua ablation), tăng
+  `is_bars`, đổi rebalance threshold — chưa được quyết định, để phiên sau.
