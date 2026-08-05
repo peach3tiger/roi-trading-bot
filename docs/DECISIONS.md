@@ -183,6 +183,19 @@ ba đều còn xa ngưỡng 0.2).
 default của `StrategyOrchestrator`, thí nghiệm này chỉ nhằm kiểm chứng giả
 thuyết, quyết định giữ/đổi để ở phiên sau.
 
+### QUYẾT ĐỊNH (2026-08-05)
+
+Đã kiểm chứng xong giả thuyết uncertainty-mode (A/B/C ở trên). Bỏ `halve`
+cải thiện cục bộ trên bar confidence thấp (<50%) và giảm phí, nhưng làm
+max drawdown sâu thêm 5.6pp và Calmar xấu đi ở mức toàn kỳ.
+
+**Kết luận: cơ chế `halve` làm việc phòng vệ đuôi thật, không phải lỗi
+thiết kế. GIỮ NGUYÊN `uncertainty_mode="halve"`.** Không tối ưu lại dựa
+trên bảng bucket cục bộ — bảng đó đo đúng một lát cắt (371 bar), không đo
+được vai trò phòng vệ đuôi ở cấp toàn kỳ mà `halve` đang thực hiện. Coi
+câu hỏi này là đã đóng, không mở lại trừ khi có bằng chứng mới ở cấp toàn
+kỳ (Calmar/max DD), không phải bằng chứng cục bộ theo bucket.
+
 ## Câu hỏi mở cho phiên sau
 
 - `(full,5)`, `(full,11)`, `(diag,7)` được nhắc tới trong một yêu cầu chẩn
@@ -192,7 +205,3 @@ thuyết, quyết định giữ/đổi để ở phiên sau.
   xác vào đây khi nhắc lại.
 - Tiêu chí 5, 6 cần rerun trên `--feature-subset` pruned-8 (`--period 2022`,
   `--bar-offset 0,6,12,18`) trước khi §4.9 có thể đóng.
-- Thí nghiệm giả thuyết uncertainty-mode (2026-08-05, xem phần dưới nếu đã
-  điền) — kiểm chứng liệu giảm nửa allocation ở bar confidence thấp có phải
-  phản ứng đúng, dựa trên phát hiện: trên 371 bar <50% confidence, chiến
-  lược kém buy-and-hold 0.715 Sharpe.
