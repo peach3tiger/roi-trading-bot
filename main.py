@@ -63,10 +63,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-start",
         type=str,
-        default=DEFAULT_DATA_START,
+        default=None,
         help=(
-            "Ngày bắt đầu TẢI dữ liệu (khác --start, là ngày bắt đầu ĐÁNH GIÁ). "
-            f"Mặc định {DEFAULT_DATA_START}"
+            "Ngày bắt đầu TẢI dữ liệu — khác --start (ngày bắt đầu ĐÁNH GIÁ). "
+            "Mặc định: --period tải từ "
+            f"{DEFAULT_DATA_START}; các trường hợp khác tải từ chính --start."
         ),
     )
     return parser
@@ -112,6 +113,52 @@ def resolve_date_range(args: argparse.Namespace) -> tuple[datetime, datetime]:
     if end <= start:
         raise ValueError(f"--end ({end:%Y-%m-%d}) phải sau --start ({start:%Y-%m-%d})")
     return start, end
+
+
+def resolve_data_start(
+    args: argparse.Namespace,
+    eval_start: datetime,
+    settings: dict[str, Any],
+    is_bars: int,
+) -> datetime:
+    """Ngày TẢI dữ liệu — khác ngày ĐÁNH GIÁ, và hai cái này từng bị gộp làm một.
+
+    Feature cần `zscore_lookback` bar warmup, rồi window IS đầu tiên cần thêm
+    `is_bars` bar nữa, TRƯỚC bar đánh giá đầu tiên. Nếu chỉ tải đúng khoảng cần
+    đánh giá thì `features` rỗng và `_plan_windows` trả về [] — đó chính là lý
+    do `--period 2022` crash.
+
+    Ba trường hợp, cố ý khác nhau:
+
+    * `--data-start` chỉ định rõ → dùng đúng thế, có kiểm tra đủ warmup.
+    * `--period` → tải từ `DEFAULT_DATA_START`. "Đánh giá trên 2022" chỉ có
+      nghĩa khi model được train trên dữ liệu TRƯỚC 2022.
+    * còn lại (`--start`/mặc định) → tải TỪ CHÍNH `--start`. Giữ nguyên ngữ
+      nghĩa cũ cho quét độ nhạy start-date: ở đó việc dịch cả lưới cửa sổ
+      CHÍNH LÀ biến cần đo, nên tự động lùi ngày tải sẽ phá mất phép đo.
+    """
+    required_warmup = settings["hmm"]["zscore_lookback"] + is_bars
+
+    if args.data_start:
+        data_start = _parse_date(args.data_start, field="--data-start")
+    elif args.period:
+        data_start = _parse_date(DEFAULT_DATA_START, field="--data-start")
+    else:
+        return eval_start
+
+    if data_start > eval_start:
+        raise ValueError(
+            f"--data-start ({data_start:%Y-%m-%d}) phải trước --start ({eval_start:%Y-%m-%d})"
+        )
+
+    gap_days = (eval_start - data_start).days
+    if gap_days < required_warmup:
+        raise ValueError(
+            f"--data-start {data_start:%Y-%m-%d} chỉ cách ngày đánh giá "
+            f"{eval_start:%Y-%m-%d} {gap_days} ngày, cần ít nhất {required_warmup} "
+            f"(zscore_lookback {settings['hmm']['zscore_lookback']} + is_bars {is_bars})."
+        )
+    return data_start
 
 
 def parse_bar_offsets(raw: str | None) -> list[int]:
