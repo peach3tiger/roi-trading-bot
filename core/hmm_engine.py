@@ -103,6 +103,7 @@ class BICCandidateResult:
     log_likelihood: float
     converged: bool
     n_iter: int
+    n_params: int
 
 
 @dataclass
@@ -164,15 +165,16 @@ class HMMRegimeEngine:
     # ------------------------------------------------------------------
 
     def select_and_train(self, features: pd.DataFrame) -> list[RegimeInfo]:
-        """Thử mọi n_components trong n_candidates, chọn BIC thấp nhất.
-
-        hmmlearn không có tham số `n_init` — tự implement bằng vòng lặp
-        random restart: mỗi ứng viên chạy `n_init` lần khởi tạo ngẫu
-        nhiên khác nhau (EM dễ kẹt local optimum), giữ lại lần có
-        log-likelihood cao nhất, rồi mới tính BIC của ứng viên đó.
+        """Thử mọi n_components trong n_candidates, chọn BIC thấp nhất, và
+        gán nhãn regime cho model thắng cuộc.
 
         Log toàn bộ BIC của mọi ứng viên và cái nào được chọn — bắt buộc,
         đây là bằng chứng chọn model có kỷ luật (xem CLAUDE.md bất biến #13).
+
+        Gán nhãn (`_build_regime_infos`) chỉ định nghĩa cho n_components
+        trong `_REGIME_LABELS` (3-7, đúng dải trong settings.yaml/spec).
+        Muốn quét BIC ở dải rộng hơn để khảo sát/đối chiếu (không cần
+        nhãn) — dùng `scan_bic()` trực tiếp.
         """
         if len(features) < self.min_train_bars:
             raise ValueError(
@@ -180,9 +182,36 @@ class HMMRegimeEngine:
             )
 
         self.feature_names = list(features.columns)
+        self.model, self.bic_results = self.scan_bic(features)
+        self.training_date = datetime.now(timezone.utc)
+        self.data_hash = self._compute_data_hash(features)
+        self.regime_infos = self._build_regime_infos()
+        self._label_by_state = {info.regime_id: info.regime_name for info in self.regime_infos}
+
+        # Model mới → mọi trạng thái suy luận trực tuyến cũ (cache alpha,
+        # bộ đếm ổn định, lịch sử flicker) không còn hợp lệ.
+        self._reset_online_state()
+
+        return self.regime_infos
+
+    def scan_bic(self, features: pd.DataFrame) -> tuple[GaussianHMM, list[BICCandidateResult]]:
+        """Thử mọi n_components trong n_candidates, trả về model có BIC
+        thấp nhất kèm bảng BIC đầy đủ — KHÔNG gán nhãn, KHÔNG mutate
+        trạng thái của engine (`self.model`, `self.bic_results`,...).
+
+        Tách riêng khỏi `select_and_train` để dùng cho khảo sát/ablation
+        (ví dụ quét n_components rộng hơn dải đã có nhãn, hoặc so sánh
+        covariance_type khác) mà không đụng tới model đang phục vụ suy
+        luận trực tuyến.
+
+        hmmlearn không có tham số `n_init` — tự implement bằng vòng lặp
+        random restart: mỗi ứng viên chạy `n_init` lần khởi tạo ngẫu
+        nhiên khác nhau (EM dễ kẹt local optimum), giữ lại lần có
+        log-likelihood cao nhất, rồi mới tính BIC của ứng viên đó.
+        """
         X = features.to_numpy()
 
-        self.bic_results = []
+        bic_results: list[BICCandidateResult] = []
         best_model: GaussianHMM | None = None
         best_bic = np.inf
 
@@ -206,20 +235,24 @@ class HMMRegimeEngine:
 
             assert best_restart is not None
             bic = best_restart.bic(X)
+            n_params = sum(best_restart._get_n_fit_scalars_per_param().values())  # noqa: SLF001
             result = BICCandidateResult(
                 n_components=n_components,
                 bic=bic,
                 log_likelihood=best_restart_score,
                 converged=bool(best_restart.monitor_.converged),
                 n_iter=best_restart.monitor_.iter,
+                n_params=n_params,
             )
-            self.bic_results.append(result)
+            bic_results.append(result)
             logger.info(
-                "HMM candidate n_components=%d bic=%.2f log_likelihood=%.2f "
-                "converged=%s n_iter=%d (best of %d restarts)",
+                "HMM candidate n_components=%d covariance_type=%s bic=%.2f "
+                "log_likelihood=%.2f n_params=%d converged=%s n_iter=%d (best of %d restarts)",
                 n_components,
+                self.covariance_type,
                 bic,
                 best_restart_score,
+                n_params,
                 result.converged,
                 result.n_iter,
                 self.n_init,
@@ -231,22 +264,13 @@ class HMMRegimeEngine:
 
         assert best_model is not None
         logger.info(
-            "HMM model được chọn: n_components=%d (BIC=%.2f thấp nhất)",
+            "BIC thấp nhất: n_components=%d covariance_type=%s (BIC=%.2f)",
             best_model.n_components,
+            self.covariance_type,
             best_bic,
         )
 
-        self.model = best_model
-        self.training_date = datetime.now(timezone.utc)
-        self.data_hash = self._compute_data_hash(features)
-        self.regime_infos = self._build_regime_infos()
-        self._label_by_state = {info.regime_id: info.regime_name for info in self.regime_infos}
-
-        # Model mới → mọi trạng thái suy luận trực tuyến cũ (cache alpha,
-        # bộ đếm ổn định, lịch sử flicker) không còn hợp lệ.
-        self._reset_online_state()
-
-        return self.regime_infos
+        return best_model, bic_results
 
     def _build_regime_infos(self) -> list[RegimeInfo]:
         """Đọc trực tiếp means_/covars_ của model đã fit — KHÔNG per-bar
