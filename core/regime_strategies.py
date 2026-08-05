@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Optional, cast
+from typing import Literal, Optional, cast
 
 import pandas as pd
 from ta.volatility import AverageTrueRange
@@ -243,9 +243,20 @@ class StrategyOrchestrator:
     khi so sánh với `target_allocation_pct` (vốn ở dạng phân số 0..1).
     """
 
-    def __init__(self, min_confidence: float, rebalance_threshold_pct: Decimal) -> None:
+    def __init__(
+        self,
+        min_confidence: float,
+        rebalance_threshold_pct: Decimal,
+        uncertainty_mode: Literal["halve", "hold_previous", "none"] = "halve",
+    ) -> None:
         self.min_confidence = min_confidence
         self.rebalance_threshold_pct = rebalance_threshold_pct
+        # "halve" la hanh vi mac dinh/lich su (khong doi hanh vi cho moi caller
+        # cu). "hold_previous" va "none" chi ton tai de kiem chung mot gia
+        # thuyet cu the (xem docs/DECISIONS.md, thi nghiem uncertainty-mode
+        # 2026-08-05) — khong phai tham so du dinh dua vao settings.yaml de
+        # quet.
+        self.uncertainty_mode = uncertainty_mode
 
     def rank_regimes_by_volatility(self, regime_infos: list[RegimeInfo]) -> dict[int, float]:
         """Sắp regime_infos theo expected_volatility tăng dần, trả position trong [0,1].
@@ -306,12 +317,20 @@ class StrategyOrchestrator:
             )
 
         is_uncertain = regime_state.probability < self.min_confidence or is_flickering
-        if is_uncertain:
+        if is_uncertain and self.uncertainty_mode == "halve":
             signal = replace(
                 signal,
                 target_allocation_pct=signal.target_allocation_pct / Decimal("2"),
                 reasoning=signal.reasoning + _UNCERTAINTY_SUFFIX,
             )
+        elif is_uncertain and self.uncertainty_mode == "hold_previous":
+            signal = replace(
+                signal,
+                target_allocation_pct=current_allocation,
+                reasoning=signal.reasoning + " [UNCERTAINTY — held previous bar's allocation]",
+            )
+        # "none": bo hoan toan buoc nay, target_allocation_pct giu nguyen gia
+        # tri strategy con lai da tinh, khong phan biet uncertain/confident.
 
         threshold_fraction = self.rebalance_threshold_pct / Decimal("100")
         delta = abs(signal.target_allocation_pct - current_allocation)
