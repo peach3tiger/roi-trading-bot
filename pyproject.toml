@@ -3,6 +3,16 @@ minversion = "7.0"
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-ra"
+# EM đôi khi không hội tụ ở MỘT VÀI trong n_init lần khởi tạo ngẫu nhiên —
+# vô hại, select_and_train() luôn chọn lần restart có log-likelihood cao
+# nhất trong số hội tụ tốt (xác nhận trực tiếp ở Phase 3: mọi model được
+# CHỌN đều converged=True). Không liên quan tới numpy/scipy nói chung nên
+# không che giấu lỗi số học thật ở chỗ khác.
+filterwarnings = [
+    "ignore:Model is not converging:UserWarning",
+    "ignore:.*encountered in matmul:RuntimeWarning:sklearn",
+    "ignore:.*encountered in matmul:RuntimeWarning:hmmlearn",
+]
 
 [tool.ruff]
 line-length = 110
