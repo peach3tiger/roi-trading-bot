@@ -199,6 +199,79 @@ trên bảng bucket cục bộ — bảng đó đo đúng một lát cắt (371 
 câu hỏi này là đã đóng, không mở lại trừ khi có bằng chứng mới ở cấp toàn
 kỳ (Calmar/max DD), không phải bằng chứng cục bộ theo bucket.
 
+## TIỀN ĐĂNG KÝ — thí nghiệm Tầng 2 (2026-08-05, chưa chạy)
+
+Ghi lại **trước khi chạy bất kỳ backtest nào** cho thí nghiệm này — đúng
+tinh thần cảnh báo của spec §4.9: "Quyết định tiêu chí sau khi nhìn kết quả
+là hình thức tự lừa dối phổ biến nhất trong xây dựng hệ thống giao dịch."
+Phiên này chỉ ghi đăng ký, **không chạy code, không implement
+`compute_tier2_features`, không đổi gì khác.**
+
+### Feature đề xuất thêm (Tầng 2, §2.3 spec)
+
+5 cột: `funding_rate` (làm mượt 3 chu kỳ), `funding_zscore_90`,
+`oi_change_24h`, `perp_spot_basis`, `taker_buy_ratio`. Cộng với 8 cột Tầng 1
+hiện có (pruned-8) → bộ 13 cột khi test đầy đủ.
+
+`data/derivatives_loader.py` đã tồn tại (Phase 2, chưa từng dùng) —
+`DerivativesLoader.load_funding_rate`/OI qua Bybit v5, category=linear,
+không cần API key. `compute_tier2_features` trong
+`data/feature_engineering.py` hiện **`raise NotImplementedError`** — đây là
+việc cần làm đầu tiên khi bắt đầu chạy, chưa làm trong phiên đăng ký này.
+
+### Ràng buộc bắt buộc
+
+1. **So sánh đúng cửa sổ, không so sánh chéo.** Dữ liệu funding/OI trên
+   Bybit chỉ có từ khoảng 04/2020 (ghi trong docstring của
+   `derivatives_loader.py`, chưa xác nhận số ngày chính xác — bước đầu tiên
+   khi chạy là gọi `get_funding_rate_available_range()` để lấy mốc thật,
+   không đoán). Cửa sổ backtest cho thí nghiệm Tầng 2 do đó ngắn hơn hẳn
+   cửa sổ 2018-02-09→2026-08-04 đang dùng cho `reports/pruned8_base`
+   (Sharpe 0.9411). **Trước khi đánh giá Tầng 2, PHẢI chạy lại baseline
+   pruned-8 (8 cột Tầng 1, không đổi gì khác — `uncertainty_mode="halve"`,
+   is_bars/oos_bars/step_bars giữ nguyên) trên ĐÚNG cửa sổ ngắn đó.** Số
+   0.9411 là của cửa sổ dài — so Tầng 2 (cửa sổ ngắn) với nó là so sai, kết
+   luận rút ra sẽ vô nghĩa. Baseline-cùng-cửa-sổ này là mốc so sánh duy nhất
+   hợp lệ cho ngưỡng thành công bên dưới.
+2. **Ablation từng feature Tầng 2** theo CLAUDE.md bất biến #13 — chạy
+   `--ablation` trên bộ 13 cột, ghi `feature_ablation.csv`. `log_return_1`
+   vẫn được `SKIPPED_STRUCTURAL_REQUIRED` như bộ 8 (bắt buộc cho
+   `_build_regime_infos`, không đổi). Áp lại đúng cảnh báo đã ghi ở phần
+   ablation Tầng 1 phía trên: BIC giữa hai model khác số feature **không so
+   sánh trực tiếp được**, và một lần chạy ablation duy nhất không phân biệt
+   được tín hiệu thật với nhiễu — xem mục ngưỡng nhiễu bên dưới trước khi
+   diễn giải `delta_sharpe` của từng feature riêng lẻ.
+
+### Ngưỡng thành công — chốt trước khi chạy
+
+- **Sharpe cải thiện ≥ 0.20 so với baseline pruned-8 cùng cửa sổ ngắn**
+  (không so với 0.9411). Dưới 0.20 là nhiễu, không được diễn giải là cải
+  thiện. Lưu ý: ngưỡng này CHẶT HƠN chữ nghĩa CLAUDE.md #13 (nguyên văn
+  "cải thiện Sharpe OOS ≥ 0.1") — chủ động nâng lên 0.20 vì noise floor đo
+  được từ sweep 8 mốc bắt đầu của Tầng 1 (std ≈ 0.089/lần chạy đơn) cho
+  thấy 0.1 chỉ hơn 1 độ lệch chuẩn nhiễu, không đủ an toàn để kết luận tín
+  hiệu thật. 0.20 ≈ 2.2× noise floor đó — nhưng noise floor đó đo trên cửa
+  sổ DÀI; cửa sổ ngắn hơn (ít năm hơn) nhiều khả năng có noise floor khác
+  (có thể cao hơn, vì ít window walk-forward độc lập hơn). Chưa đo lại noise
+  floor cho cửa sổ ngắn trong đăng ký này — nếu muốn kết luận chắc hơn, có
+  thể cần một sweep mốc bắt đầu riêng cho cửa sổ ngắn, nhưng đó là mở rộng
+  phạm vi ngoài yêu cầu hiện tại, chưa tự ý làm.
+- **Phải giữ được tiêu chí 5, 6, 7, 8** (chạy lại cả bốn trên cấu hình mới
+  — `--period 2022` trong phạm vi cửa sổ ngắn cho phép, `--bar-offset
+  0,6,12,18`, `--symbol ETHUSDT` không tune, `cost_pct_of_gross_profit`).
+  Tiêu chí 1–4 tiếp tục đánh giá trên baseline-cùng-cửa-sổ vs Tầng-2, không
+  đổi định nghĩa.
+- **Nếu không đạt ngưỡng Sharpe ≥ 0.20:** kết luận Tầng 2 không mang thêm
+  thông tin đáng kể so với nhiễu đo lường, ghi lại đúng như vậy vào
+  `docs/DECISIONS.md`, và **dừng việc tìm cần gạt** (không thử thêm biến
+  thể Tầng 2 khác, không hạ ngưỡng sau khi đã thấy kết quả).
+
+### Trạng thái
+
+Đã đăng ký, **chưa chạy**. Bước tiếp theo khi được yêu cầu: implement
+`compute_tier2_features`, xác nhận mốc dữ liệu funding thật qua
+`get_funding_rate_available_range()`, chạy baseline-cùng-cửa-sổ trước tiên.
+
 ## Câu hỏi mở cho phiên sau
 
 - `(full,5)`, `(full,11)`, `(diag,7)` được nhắc tới trong một yêu cầu chẩn
