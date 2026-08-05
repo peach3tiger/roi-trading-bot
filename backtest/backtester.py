@@ -91,12 +91,19 @@ class WalkForwardBacktester:
         trend_gate: StructuralTrendGate,
         cost_model: CostModel,
         config: WalkForwardConfig,
+        feature_config: FeatureConfig = FeatureConfig(),
     ) -> None:
         self.hmm_engine = hmm_engine
         self.strategy_orchestrator = strategy_orchestrator
         self.trend_gate = trend_gate
         self.cost_model = cost_model
         self.config = config
+        # Mặc định FeatureConfig() nếu không truyền — giữ tương thích ngược
+        # với mọi caller cũ (tests/test_backtester.py, script trước đó).
+        # Trước bản này, `run()` tự dựng FeatureConfig() bên trong, bỏ qua
+        # bất kỳ config nào từ settings.yaml (kể cả use_trade_count_not_volume)
+        # — main.py.build_feature_config() tồn tại nhưng chưa từng được gọi.
+        self.feature_config = feature_config
 
     def run(self, symbol: str, ohlcv: pd.DataFrame, start: datetime, end: datetime) -> BacktestResult:
         """Cửa sổ trượt IS/OOS: train HMM trên IS, đi qua OOS từng bar bằng
@@ -104,7 +111,7 @@ class WalkForwardBacktester:
         > ngưỡng, ghi một 'trade' mỗi lần allocation thay đổi.
         """
         ohlcv = ohlcv.sort_index()
-        features = compute_tier1_features(ohlcv, FeatureConfig())
+        features = compute_tier1_features(ohlcv, self.feature_config)
 
         # Trần trend gate KHÔNG phụ thuộc HMM/cửa sổ walk-forward — tính một
         # lần trên TOÀN BỘ lịch sử giá thô rồi tra bảng theo bar, thay vì gọi

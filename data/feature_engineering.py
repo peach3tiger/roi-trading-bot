@@ -32,6 +32,12 @@ class FeatureConfig:
     use_trade_count_not_volume: bool = True
     tier2_derivatives: bool = False
     tier3_temporal: bool = False
+    # None = giữ nguyên cả 14 cột Tầng 1 (mặc định, khớp spec). Đặt tên cột cụ
+    # thể để chạy ablation/feature-pruning — vd. bộ 8 cột "độc lập" tìm được
+    # bằng greedy correlation pruning (|r|>0.5) trong phiên trước Phase 6, để
+    # kiểm chứng giả thuyết mất ổn định walk-forward đến từ dư thừa feature
+    # (covariance_type=full có số tham số tăng BẬC HAI theo số feature).
+    feature_subset: tuple[str, ...] | None = None
 
 
 def rolling_zscore(series: pd.Series, lookback: int) -> pd.Series:
@@ -157,6 +163,13 @@ def compute_tier1_features(ohlcv: pd.DataFrame, config: FeatureConfig) -> pd.Dat
 
     raw["trade_count_zscore_50"] = compute_trade_count_zscore(activity, mean_window=50)
     raw["trade_count_sma10_slope"] = compute_sma_slope(activity, sma_period=10, slope_lookback=10)
+
+    if config.feature_subset is not None:
+        # Lọc TRƯỚC khi z-score/dropna, không phải sau: cột bị loại (vd.
+        # distance_to_sma200_pct, warmup 200 bar) không được phép kéo dài
+        # warmup của các cột còn lại qua dropna() nếu bản thân nó không còn
+        # nằm trong output.
+        raw = raw[list(config.feature_subset)]
 
     normalized = raw.apply(lambda col: rolling_zscore(col, config.zscore_lookback))
     return normalized.dropna()

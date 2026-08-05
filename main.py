@@ -58,6 +58,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--bar-offset", type=str, help="Danh sách offset giờ UTC để kiểm tra độ nhạy mốc đóng bar"
     )
     parser.add_argument("--ablation", action="store_true", help="Quét feature từng cái một")
+    parser.add_argument(
+        "--feature-subset",
+        type=str,
+        default=None,
+        help="Danh sách tên cột Tầng 1 dùng thay vì cả 14 cột mặc định (ablation/pruning thủ công)",
+    )
     parser.add_argument("--config", type=str, default=str(DEFAULT_SETTINGS_PATH), help="Đường dẫn settings")
     parser.add_argument("--output-dir", type=str, default="reports", help="Thư mục xuất báo cáo")
     parser.add_argument(
@@ -171,6 +177,42 @@ def parse_bar_offsets(raw: str | None) -> list[int]:
     return offsets
 
 
+# Tên cột Tầng 1 thật — trùng với những gì compute_tier1_features() tạo ra.
+# Khai báo lại ở đây (thay vì import từ data.feature_engineering) để
+# --feature-subset báo lỗi ngay lúc parse argv, không phải giữa chừng
+# window đầu tiên của một lần chạy dài.
+_VALID_TIER1_FEATURES = frozenset(
+    {
+        "log_return_1",
+        "log_return_5",
+        "log_return_20",
+        "realized_vol_20",
+        "vol_ratio_5_20",
+        "adx_14",
+        "sma50_slope",
+        "rsi_zscore_14",
+        "distance_to_sma200_pct",
+        "roc_10",
+        "roc_20",
+        "atr_norm_14",
+        "trade_count_zscore_50",
+        "trade_count_sma10_slope",
+    }
+)
+
+
+def parse_feature_subset(raw: str | None) -> tuple[str, ...] | None:
+    """`None` = giữ nguyên cả 14 cột (mặc định). Dùng cho ablation/feature-pruning
+    thủ công — xem ghi chú ở `FeatureConfig.feature_subset`."""
+    if not raw:
+        return None
+    names = tuple(part.strip() for part in raw.split(",") if part.strip())
+    invalid = [n for n in names if n not in _VALID_TIER1_FEATURES]
+    if invalid:
+        raise ValueError(f"--feature-subset có tên cột không hợp lệ: {invalid}")
+    return names
+
+
 # ----------------------------------------------------------------------
 # Component builders — chỗ DUY NHẤT dịch settings.yaml thành object
 # ----------------------------------------------------------------------
@@ -210,7 +252,12 @@ def build_hmm_engine(settings: dict[str, Any], *, min_train_bars: int | None = N
     )
 
 
-def build_feature_config(settings: dict[str, Any]) -> Any:
+def build_feature_config(settings: dict[str, Any], *, feature_subset: tuple[str, ...] | None = None) -> Any:
+    """Trước bản này, `WalkForwardBacktester.run()` tự dựng `FeatureConfig()`
+    mặc định bên trong — hàm này tồn tại nhưng chưa từng được `run_backtest`
+    gọi tới, nên `use_trade_count_not_volume`/`tier2_derivatives`/
+    `tier3_temporal` trong settings.yaml chưa từng có tác dụng thật.
+    """
     from data.feature_engineering import FeatureConfig
 
     return FeatureConfig(
@@ -218,6 +265,7 @@ def build_feature_config(settings: dict[str, Any]) -> Any:
         use_trade_count_not_volume=settings["features"]["use_trade_count_not_volume"],
         tier2_derivatives=settings["features"]["tier2_derivatives"],
         tier3_temporal=settings["features"]["tier3_temporal"],
+        feature_subset=feature_subset,
     )
 
 
@@ -305,6 +353,7 @@ def run_backtest(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
     ccxt_symbol = symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
 
     wf_config = build_walk_forward_config(settings)
+    feature_config = build_feature_config(settings, feature_subset=parse_feature_subset(args.feature_subset))
 
     data_start = resolve_data_start(args, start, settings, wf_config.is_bars)
 
@@ -320,6 +369,7 @@ def run_backtest(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
             trend_gate=build_trend_gate(settings, enabled=not args.no_trend_gate),
             cost_model=build_cost_model(settings),
             config=wf_config,
+            feature_config=feature_config,
         )
         result = backtester.run(symbol, ohlcv, start, end)
 
