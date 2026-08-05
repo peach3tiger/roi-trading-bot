@@ -37,6 +37,27 @@ _SUPPORTED_TIMEFRAMES = {"1D", "1d"}
 _BAR_DELTA = timedelta(days=1)
 
 
+def _timezone_param_for_offset(bar_offset_hours: int) -> str:
+    """Tham số `timeZone` để Binance mở bar 1d đúng tại `bar_offset_hours`:00 UTC.
+
+    Xác định bằng thực nghiệm: với input `v` (số nguyên giờ, có dấu),
+    Binance mở bar tại giờ UTC = `(-v) mod 24`. Đảo lại: `v = (-bar_offset_hours)
+    mod 24`, sau đó đưa `v` về dải Binance chấp nhận (~-12..+14) bằng cách
+    trừ 24 nếu `v >= 12`.
+
+    Bug thật đã gặp: version trước dùng thẳng `f"-{bar_offset_hours}:00"` —
+    đúng với offset 6/12 (rơi vào dải -12..0) nhưng SAI với offset 18: cho
+    ra "-18:00", nằm ngoài dải hợp lệ, Binance trả lỗi retCode -1130 thay
+    vì trả bar. Giá trị đúng cho offset 18 là "6:00" (dương).
+    """
+    if bar_offset_hours == 0:
+        return "0:00"
+    v = (-bar_offset_hours) % 24
+    if v >= 12:
+        v -= 24
+    return f"{v}:00"
+
+
 class DataIntegrityError(Exception):
     """Dữ liệu OHLCV không đạt kiểm tra toàn vẹn — không được dùng để backtest."""
 
@@ -272,7 +293,7 @@ class HistoryLoader:
         nhiều so với tự gộp từ granularity nhỏ hơn.
         """
         binance_symbol = symbol.replace("/", "")
-        time_zone = "0:00" if bar_offset_hours == 0 else f"-{bar_offset_hours}:00"
+        time_zone = _timezone_param_for_offset(bar_offset_hours)
 
         all_rows: list[list] = []
         cursor_ms = int(start.timestamp() * 1000)
