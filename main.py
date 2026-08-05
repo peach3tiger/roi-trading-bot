@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -384,16 +385,195 @@ def run_backtest(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
     return results
 
 
+def _run_one_config(
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+    subset: tuple[str, ...],
+    ohlcv: Any,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    out_dir: Path,
+) -> dict[str, Any]:
+    """Một lần walk-forward với đúng `subset` feature, trả về metric + BIC trung bình."""
+    from backtest.backtester import WalkForwardBacktester
+    from backtest.performance import write_reports
+
+    wf_config = build_walk_forward_config(settings)
+    backtester = WalkForwardBacktester(
+        hmm_engine=build_hmm_engine(settings, min_train_bars=wf_config.is_bars),
+        strategy_orchestrator=build_orchestrator(settings),
+        trend_gate=build_trend_gate(settings, enabled=not args.no_trend_gate),
+        cost_model=build_cost_model(settings),
+        config=wf_config,
+        feature_config=build_feature_config(settings, feature_subset=subset),
+    )
+    result = backtester.run(symbol, ohlcv, start, end)
+    benchmarks = write_reports(
+        result, ohlcv, build_cost_model(settings), wf_config.instrument_rules, str(out_dir)
+    )
+    ms = result.model_selection
+    return {
+        "metrics": benchmarks["strategy"],
+        "mean_bic": float(ms["selected_bic"].mean()) if not ms.empty else None,
+        "mean_samples_per_param": float(ms["samples_per_param"].mean()) if not ms.empty else None,
+        "n_windows": len(ms),
+    }
+
+
+def run_ablation(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
+    """Bỏ từng feature một, đo tác động lên Sharpe OOS. Xuất `feature_ablation.csv`.
+
+    Tiêu chí giữ lại của CLAUDE.md #13 phát biểu theo chiều THÊM feature: giữ
+    nếu "cải thiện Sharpe OOS >= 0.1 và không làm xấu BIC". Ablation là chiều
+    ngược lại, nên đóng góp của một feature = Sharpe(đủ bộ) - Sharpe(bỏ nó ra).
+    Đóng góp >= 0.1 thì feature xứng đáng ở lại.
+
+    **Cảnh báo đọc cột BIC.** BIC của hai model có SỐ FEATURE khác nhau không so
+    sánh trực tiếp được: log-likelihood tính trên không gian dữ liệu khác chiều,
+    nên giá trị tuyệt đối trôi theo số chiều chứ không chỉ theo độ khớp. Cột
+    `delta_mean_bic` để tham khảo xu hướng, KHÔNG phải để phán quyết. Cột phán
+    quyết là `delta_sharpe` — Sharpe OOS đo trên cùng một chuỗi equity USDT nên
+    so sánh được giữa mọi cấu hình. `samples_per_param` cũng so sánh được và là
+    chỉ số phụ đáng tin hơn BIC ở đây.
+    """
+    # Toàn bộ kiểm tra đầu vào chạy TRƯỚC mọi import nặng: ablation là 9–15 lần
+    # walk-forward liên tiếp, hỏng đầu vào mà báo lỗi sau khi đã tải dữ liệu là
+    # lãng phí hàng chục phút cho một lỗi gõ sai tên cột.
+    subset = parse_feature_subset(args.feature_subset) or tuple(sorted(_VALID_TIER1_FEATURES))
+    if len(subset) < 3:
+        raise ValueError(f"Ablation cần ít nhất 3 feature, bộ hiện tại có {len(subset)}")
+
+    offsets = parse_bar_offsets(args.bar_offset)
+    if len(offsets) > 1:
+        raise ValueError("--ablation chạy một bar-offset duy nhất; bỏ bớt --bar-offset")
+
+    # core/hmm_engine.py cần cột này để gán nhãn regime (_build_regime_infos) —
+    # xem chú thích chi tiết ở nhánh SKIPPED_STRUCTURAL_REQUIRED bên dưới.
+    from core.hmm_engine import _RETURN_FEATURE_NAME
+
+    start, end = resolve_date_range(args)
+    symbol = args.symbol or settings["exchange"]["symbol"]
+    ccxt_symbol = symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
+    wf_config = build_walk_forward_config(settings)
+    data_start = resolve_data_start(args, start, settings, wf_config.is_bars)
+
+    from data.history_loader import HistoryLoader
+
+    ohlcv = HistoryLoader().load(ccxt_symbol, "1D", data_start, end, bar_offset_hours=offsets[0])
+    out_root = Path(args.output_dir)
+
+    logger = logging.getLogger(__name__)
+    logger.info("Ablation: %d feature -> %d lần chạy walk-forward", len(subset), len(subset) + 1)
+
+    baseline = _run_one_config(
+        args, settings, subset, ohlcv, symbol, start, end, out_root / "ablation_baseline"
+    )
+    base_sharpe = baseline["metrics"]["sharpe"]
+
+    rows: list[dict[str, Any]] = [
+        {
+            "dropped_feature": "(none - baseline)",
+            "n_features": len(subset),
+            "sharpe": base_sharpe,
+            "delta_sharpe": 0.0,
+            "calmar": baseline["metrics"]["calmar"],
+            "total_return": baseline["metrics"]["total_return"],
+            "max_drawdown_pct": baseline["metrics"]["max_drawdown_pct"],
+            "mean_bic": baseline["mean_bic"],
+            "delta_mean_bic": 0.0,
+            "mean_samples_per_param": baseline["mean_samples_per_param"],
+            "verdict": "baseline",
+        }
+    ]
+
+    for i, feature in enumerate(subset, 1):
+        if feature == _RETURN_FEATURE_NAME:
+            # core/hmm_engine.py::_build_regime_infos đọc means_[:, return_idx]
+            # của đúng cột này để XẾP HẠNG các state theo mean return va gan
+            # nhãn bull/bear -- day khong phai "mot feature trong nhieu feature"
+            # theo nghia HMM hoc duoc, ma la truc ma toan bo so do gan nhan
+            # dua vao. Bo no ra khong do duoc "tin hieu return co giup Sharpe
+            # khong" -- no chi lam _build_regime_infos crash (ValueError: not
+            # in list), vi khong con cot nao de tinh return_idx. Ghi nhan
+            # SKIPPED thay vi chay mot cau hinh vo nghia hoac dung crash de
+            # bao "DROP_CANDIDATE" (sai — day la feature bat buoc ve cau truc).
+            logger.info(
+                "Ablation %d/%d: BO QUA %s (bat buoc cho HMMRegimeEngine gan nhan regime, "
+                "khong the ablate)",
+                i,
+                len(subset),
+                feature,
+            )
+            rows.append(
+                {
+                    "dropped_feature": feature,
+                    "n_features": len(subset) - 1,
+                    "sharpe": None,
+                    "delta_sharpe": None,
+                    "calmar": None,
+                    "total_return": None,
+                    "max_drawdown_pct": None,
+                    "mean_bic": None,
+                    "delta_mean_bic": None,
+                    "mean_samples_per_param": None,
+                    "verdict": "SKIPPED_STRUCTURAL_REQUIRED",
+                }
+            )
+            continue
+
+        reduced = tuple(f for f in subset if f != feature)
+        logger.info("Ablation %d/%d: bỏ %s", i, len(subset), feature)
+        run = _run_one_config(
+            args, settings, reduced, ohlcv, symbol, start, end, out_root / f"ablation_drop_{feature}"
+        )
+        contribution = base_sharpe - run["metrics"]["sharpe"]
+        rows.append(
+            {
+                "dropped_feature": feature,
+                "n_features": len(reduced),
+                "sharpe": run["metrics"]["sharpe"],
+                "delta_sharpe": contribution,
+                "calmar": run["metrics"]["calmar"],
+                "total_return": run["metrics"]["total_return"],
+                "max_drawdown_pct": run["metrics"]["max_drawdown_pct"],
+                "mean_bic": run["mean_bic"],
+                "delta_mean_bic": (
+                    run["mean_bic"] - baseline["mean_bic"]
+                    if run["mean_bic"] is not None and baseline["mean_bic"] is not None
+                    else None
+                ),
+                "mean_samples_per_param": run["mean_samples_per_param"],
+                # >= 0.1: bỏ ra làm Sharpe tụt đủ nhiều -> feature có đóng góp thật.
+                "verdict": "KEEP" if contribution >= 0.1 else "DROP_CANDIDATE",
+            }
+        )
+
+    import pandas as pd
+
+    table = pd.DataFrame(rows)
+    out_root.mkdir(parents=True, exist_ok=True)
+    csv_path = out_root / "feature_ablation.csv"
+    table.to_csv(csv_path, index=False)
+    logger.info("Đã ghi %s", csv_path)
+
+    return {"csv": str(csv_path), "rows": rows}
+
+
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    if args.ablation or args.sweep:
-        # Chưa implement. Raise rõ ràng thay vì chạy backtest thường và trả về
-        # kết quả trông hợp lệ cho một câu hỏi hoàn toàn khác.
-        raise NotImplementedError(
-            "--ablation/--sweep chưa được implement (Phase 7 test d, §4.9 tiêu chí 4)."
-        )
+    if args.sweep:
+        raise NotImplementedError("--sweep chưa được implement (quét tham số, §4.7).")
+
+    if args.ablation:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        settings = load_settings(args.config)
+        results = run_ablation(args, settings)
+        json.dump(results, sys.stdout, indent=2, default=str)
+        sys.stdout.write("\n")
+        return
 
     if args.backtest or args.compare:
         settings = load_settings(args.config)
