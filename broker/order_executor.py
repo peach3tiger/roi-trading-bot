@@ -18,11 +18,18 @@ from broker.base import ExchangeClient, OrderResult
 class SignalLike(Protocol):
     """Hình dạng tối thiểu cần từ một signal — tránh phụ thuộc trực tiếp
     vào core.regime_strategies.Signal, giữ tầng broker độc lập với tầng
-    strategy (đối xứng với CLAUDE.md bất biến #4 áp cho risk_manager)."""
+    strategy (đối xứng với CLAUDE.md bất biến #4 áp cho risk_manager).
 
-    symbol: str
-    target_allocation_pct: Decimal
-    timestamp: datetime
+    `@property` chỉ đọc, không phải thuộc tính thường — Signal thật là
+    frozen dataclass, xem ghi chú tương tự ở core/risk_manager.py.
+    """
+
+    @property
+    def symbol(self) -> str: ...
+    @property
+    def target_allocation_pct(self) -> Decimal: ...
+    @property
+    def timestamp(self) -> datetime: ...
 
 
 class OrderExecutor:

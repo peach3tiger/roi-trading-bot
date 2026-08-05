@@ -23,12 +23,22 @@ from typing import Optional, Protocol
 
 class SignalLike(Protocol):
     """Hình dạng tối thiểu mà risk_manager cần từ một signal — tránh phụ
-    thuộc trực tiếp vào core.regime_strategies.Signal (bất biến #4)."""
+    thuộc trực tiếp vào core.regime_strategies.Signal (bất biến #4).
 
-    symbol: str
-    direction: str
-    target_allocation_pct: Decimal
-    stop_loss: Optional[Decimal]
+    Khai báo bằng `@property` (chỉ đọc) thay vì thuộc tính thường: Signal
+    thật là frozen dataclass (thuộc tính chỉ đọc), còn Protocol với thuộc
+    tính thường ngầm định có thể ghi — khai báo sai khiến mypy coi
+    Signal KHÔNG khớp cấu trúc dù dữ liệu hoàn toàn tương thích.
+    """
+
+    @property
+    def symbol(self) -> str: ...
+    @property
+    def direction(self) -> str: ...
+    @property
+    def target_allocation_pct(self) -> Decimal: ...
+    @property
+    def stop_loss(self) -> Optional[Decimal]: ...
 
 
 class BreakerLevel(Enum):
