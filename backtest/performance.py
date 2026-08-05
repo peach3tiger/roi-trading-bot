@@ -385,6 +385,8 @@ def write_reports(
     result.trade_log.to_csv(out / "trade_log.csv")
     result.regime_history.to_csv(out / "regime_history.csv")
     pd.DataFrame([result.cost_report.as_dict()]).to_csv(out / "cost_report.csv", index=False)
+    if not result.model_selection.empty:
+        result.model_selection.to_csv(out / "model_selection.csv")
 
     initial_equity = result.metadata["config"].initial_equity
     rebalance_threshold_pct = result.metadata["config"].rebalance_threshold_pct

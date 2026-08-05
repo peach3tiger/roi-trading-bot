@@ -2,11 +2,39 @@
 
 Không có bước "chờ thị trường mở" — thị trường crypto 24/7, toàn bộ logic
 giờ giao dịch bị loại bỏ khỏi hệ thống này (xem CLAUDE.md bất biến #10).
+
+**Nguồn sự thật của tham số.** Trước file này chưa có chỗ nào đọc
+`config/settings.yaml`: mọi giá trị sống dưới dạng default trong dataclass,
+tức là hai nguồn sự thật song song và không có gì bắt chúng khớp nhau
+(CLAUDE.md bất biến #14). `load_settings()` + các `build_*` dưới đây là chỗ
+duy nhất dựng component từ YAML, để `--sweep` ở Phase 7 chỉ phải sửa một nơi.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import sys
+from dataclasses import replace
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+DEFAULT_SETTINGS_PATH = Path("config/settings.yaml")
+
+# Ngày bắt đầu TẢI dữ liệu mặc định. 2018-02-09 chứ không phải 2018-01-01: chuỗi
+# daily kline timeZone=-6:00 của Binance thiếu hẳn 2018-02-08, nên mọi lần chạy
+# bắt đầu từ ngày kế tiếp để bốn bar-offset dùng chung một khoảng thời gian.
+# Ghi nhận, không vá — không bịa ra một bar không tồn tại ở nguồn.
+DEFAULT_DATA_START = "2018-02-09"
+
+# `_REGIME_LABELS` trong core/hmm_engine.py chỉ định nghĩa nhãn cho 3–7 state.
+# `select_and_train` sẽ raise ngoài dải này, nên CLI chặn sớm với thông báo rõ
+# ràng thay vì để nổ giữa window đầu tiên của một lần chạy dài.
+_MAX_LABELLED_STATES = 7
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -30,31 +58,258 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--bar-offset", type=str, help="Danh sách offset giờ UTC để kiểm tra độ nhạy mốc đóng bar"
     )
     parser.add_argument("--ablation", action="store_true", help="Quét feature từng cái một")
+    parser.add_argument("--config", type=str, default=str(DEFAULT_SETTINGS_PATH), help="Đường dẫn settings")
+    parser.add_argument("--output-dir", type=str, default="reports", help="Thư mục xuất báo cáo")
+    parser.add_argument(
+        "--data-start",
+        type=str,
+        default=DEFAULT_DATA_START,
+        help=(
+            "Ngày bắt đầu TẢI dữ liệu (khác --start, là ngày bắt đầu ĐÁNH GIÁ). "
+            f"Mặc định {DEFAULT_DATA_START}"
+        ),
+    )
     return parser
 
 
-def startup() -> None:
-    """Load config, kết nối sàn, đồng bộ giờ, cache InstrumentRules,
-    load/train HMM, khởi tạo risk manager + position tracker (đối soát),
-    kiểm tra state_snapshot.json và trading_halted.lock, mở WebSocket feed.
+# ----------------------------------------------------------------------
+# Config
+# ----------------------------------------------------------------------
+
+
+def load_settings(path: str | Path = DEFAULT_SETTINGS_PATH) -> dict[str, Any]:
+    with Path(path).open(encoding="utf-8") as fh:
+        settings: dict[str, Any] = yaml.safe_load(fh)
+    return settings
+
+
+def _parse_date(value: str, *, field: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError(f"{field} phải theo định dạng YYYY-MM-DD, nhận: {value!r}") from exc
+
+
+def resolve_date_range(args: argparse.Namespace) -> tuple[datetime, datetime]:
+    """`--period 2022` là lối tắt cho `--start 2022-01-01 --end 2022-12-31`.
+
+    Ưu tiên `--period` khi có cả hai, và nói ra thay vì âm thầm chọn một bên —
+    một lần chạy kiểm định chạy sai khoảng thời gian là kết quả sai mà trông
+    vẫn hợp lệ.
     """
-    raise NotImplementedError
+    if args.period:
+        if args.start or args.end:
+            raise ValueError("Dùng --period HOẶC --start/--end, không dùng cả hai")
+        year = int(args.period)
+        return (
+            datetime(year, 1, 1, tzinfo=timezone.utc),
+            datetime(year, 12, 31, tzinfo=timezone.utc),
+        )
+
+    default_start = datetime(2018, 1, 1, tzinfo=timezone.utc)
+    start = _parse_date(args.start, field="--start") if args.start else default_start
+    end = _parse_date(args.end, field="--end") if args.end else datetime.now(timezone.utc)
+    if end <= start:
+        raise ValueError(f"--end ({end:%Y-%m-%d}) phải sau --start ({start:%Y-%m-%d})")
+    return start, end
 
 
-def main_loop() -> None:
-    """Vòng lặp chính mỗi khi bar đóng — chạy vĩnh viễn, thị trường 24/7."""
-    raise NotImplementedError
+def parse_bar_offsets(raw: str | None) -> list[int]:
+    if not raw:
+        return [0]
+    offsets = [int(part.strip()) for part in raw.split(",") if part.strip()]
+    invalid = [o for o in offsets if o not in (0, 6, 12, 18)]
+    if invalid:
+        raise ValueError(f"--bar-offset chỉ nhận 0/6/12/18, nhận: {invalid}")
+    return offsets
 
 
-def shutdown() -> None:
-    """SIGINT/SIGTERM: đóng WebSocket, KHÔNG đóng vị thế, ghi state_snapshot.json."""
-    raise NotImplementedError
+# ----------------------------------------------------------------------
+# Component builders — chỗ DUY NHẤT dịch settings.yaml thành object
+# ----------------------------------------------------------------------
+
+
+def build_hmm_engine(settings: dict[str, Any], *, min_train_bars: int | None = None) -> Any:
+    """Dựng HMMRegimeEngine từ settings.
+
+    `min_train_bars` override được là có chủ đích: `settings.yaml` đặt 730 như
+    ngưỡng an toàn cho training LIVE (2 năm dữ liệu thật trước khi tin một
+    model), nhưng §4.1 định nghĩa IS = 365 bar cho walk-forward. Truyền thẳng
+    730 vào backtester sẽ raise ngay window đầu tiên — xem cảnh báo đầu
+    backtest/backtester.py.
+    """
+    # Kiểm tra dải TRƯỚC khi import: config sai phải báo lỗi được kể cả trong
+    # môi trường chưa cài hmmlearn, và không phải chờ tới giữa window đầu tiên.
+    hmm = settings["hmm"]
+    n_candidates = list(hmm["n_candidates"])
+    too_many = [n for n in n_candidates if n > _MAX_LABELLED_STATES]
+    if too_many:
+        raise ValueError(
+            f"n_candidates {too_many} vượt dải có nhãn (3–{_MAX_LABELLED_STATES}) trong "
+            "_REGIME_LABELS. Muốn quét rộng hơn để khảo sát BIC thì dùng "
+            "HMMRegimeEngine.scan_bic() trực tiếp — nó không cần nhãn."
+        )
+
+    from core.hmm_engine import HMMRegimeEngine
+
+    return HMMRegimeEngine(
+        n_candidates=n_candidates,
+        n_init=hmm["n_init"],
+        covariance_type=hmm["covariance_type"],
+        min_train_bars=min_train_bars if min_train_bars is not None else hmm["min_train_bars"],
+        stability_bars=hmm["stability_bars"],
+        flicker_window=hmm["flicker_window"],
+        flicker_threshold=hmm["flicker_threshold"],
+    )
+
+
+def build_feature_config(settings: dict[str, Any]) -> Any:
+    from data.feature_engineering import FeatureConfig
+
+    return FeatureConfig(
+        zscore_lookback=settings["hmm"]["zscore_lookback"],
+        use_trade_count_not_volume=settings["features"]["use_trade_count_not_volume"],
+        tier2_derivatives=settings["features"]["tier2_derivatives"],
+        tier3_temporal=settings["features"]["tier3_temporal"],
+    )
+
+
+def build_trend_gate(settings: dict[str, Any], *, enabled: bool = True) -> Any:
+    """`--no-trend-gate` dựng gate với mọi cap = 1.00 thay vì trả None.
+
+    Tầng chỉ được GIẢM tỷ trọng (bất biến #2); một gate trần 1.00 là phần tử
+    trung hoà của min(), nên tắt gate không cần nhánh `if` nào trong vòng lặp
+    mô phỏng — và không có nhánh nào thì không có nhánh nào bị sai.
+    """
+    from core.trend_gate import StructuralTrendGate, TrendGateConfig
+
+    tg = settings["trend_gate"]
+    config = TrendGateConfig(
+        sma_period=tg["sma_period"],
+        slope_lookback=tg["slope_lookback"],
+        buffer_pct=Decimal(str(tg["buffer_pct"])),
+        confirm_bars=tg["confirm_bars"],
+        cap_bull_structure=Decimal(str(tg["cap_bull_structure"])),
+        cap_transition=Decimal(str(tg["cap_transition"])),
+        cap_bear_structure=Decimal(str(tg["cap_bear_structure"])),
+    )
+    if not enabled:
+        config = replace(
+            config,
+            cap_bull_structure=Decimal("1.00"),
+            cap_transition=Decimal("1.00"),
+            cap_bear_structure=Decimal("1.00"),
+        )
+    return StructuralTrendGate(config)
+
+
+def build_cost_model(settings: dict[str, Any]) -> Any:
+    from backtest.cost_model import CostModel
+
+    costs = settings["costs"]
+    return CostModel(
+        taker_fee_pct=Decimal(str(costs["taker_fee_pct"])),
+        maker_fee_pct=Decimal(str(costs["maker_fee_pct"])),
+        slippage_pct=Decimal(str(costs["slippage_pct"])),
+        assume_taker=costs["assume_taker"],
+    )
+
+
+def build_walk_forward_config(settings: dict[str, Any]) -> Any:
+    from backtest.backtester import WalkForwardConfig
+
+    bt = settings["backtest"]
+    return WalkForwardConfig(
+        is_bars=bt["is_bars"],
+        oos_bars=bt["oos_bars"],
+        step_bars=bt["step_bars"],
+        fill_delay_bars=bt["fill_delay_bars"],
+        rebalance_threshold_pct=Decimal(str(settings["strategy"]["rebalance_threshold_pct"])),
+    )
+
+
+def build_orchestrator(settings: dict[str, Any]) -> Any:
+    from core.regime_strategies import StrategyOrchestrator
+
+    return StrategyOrchestrator(
+        min_confidence=settings["strategy"]["min_confidence"],
+        rebalance_threshold_pct=Decimal(str(settings["strategy"]["rebalance_threshold_pct"])),
+    )
+
+
+# ----------------------------------------------------------------------
+# Backtest
+# ----------------------------------------------------------------------
+
+
+def run_backtest(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
+    """Một lần chạy walk-forward cho mỗi bar-offset, xuất báo cáo mỗi lần.
+
+    Nhiều offset ghi vào thư mục con riêng: tiêu chí 6 của §4.9 so sánh Sharpe
+    GIỮA các offset, nên ghi đè lên nhau sẽ xoá mất chính thứ cần đo.
+    """
+    from backtest.backtester import WalkForwardBacktester
+    from backtest.performance import write_reports
+    from data.history_loader import HistoryLoader
+
+    start, end = resolve_date_range(args)
+    offsets = parse_bar_offsets(args.bar_offset)
+    symbol = args.symbol or settings["exchange"]["symbol"]
+    ccxt_symbol = symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
+
+    wf_config = build_walk_forward_config(settings)
+
+    data_start = resolve_data_start(args, start, settings, wf_config.is_bars)
+
+    loader = HistoryLoader()
+    results: dict[str, Any] = {}
+
+    for offset in offsets:
+        ohlcv = loader.load(ccxt_symbol, "1D", data_start, end, bar_offset_hours=offset)
+
+        backtester = WalkForwardBacktester(
+            hmm_engine=build_hmm_engine(settings, min_train_bars=wf_config.is_bars),
+            strategy_orchestrator=build_orchestrator(settings),
+            trend_gate=build_trend_gate(settings, enabled=not args.no_trend_gate),
+            cost_model=build_cost_model(settings),
+            config=wf_config,
+        )
+        result = backtester.run(symbol, ohlcv, start, end)
+
+        out_dir = Path(args.output_dir)
+        if len(offsets) > 1:
+            out_dir = out_dir / f"offset{offset}"
+        benchmarks = write_reports(
+            result, ohlcv, build_cost_model(settings), wf_config.instrument_rules, str(out_dir)
+        )
+        results[f"offset{offset}"] = benchmarks
+
+    return results
 
 
 def main() -> None:
     parser = build_arg_parser()
-    parser.parse_args()
-    raise NotImplementedError
+    args = parser.parse_args()
+
+    if args.ablation or args.sweep:
+        # Chưa implement. Raise rõ ràng thay vì chạy backtest thường và trả về
+        # kết quả trông hợp lệ cho một câu hỏi hoàn toàn khác.
+        raise NotImplementedError(
+            "--ablation/--sweep chưa được implement (Phase 7 test d, §4.9 tiêu chí 4)."
+        )
+
+    if args.backtest or args.compare:
+        settings = load_settings(args.config)
+        results = run_backtest(args, settings)
+        json.dump(results, sys.stdout, indent=2, default=str)
+        sys.stdout.write("\n")
+        return
+
+    if args.stress_test:
+        raise NotImplementedError("--stress-test: dùng backtest/stress_test.py trực tiếp cho tới Phase 8")
+
+    # Live loop: Phase 10 trong đánh số prompts/.
+    raise NotImplementedError("Live loop chưa được implement — dùng --backtest")
 
 
 if __name__ == "__main__":

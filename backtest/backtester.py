@@ -71,6 +71,10 @@ class BacktestResult:
     regime_history: pd.DataFrame
     cost_report: CostReport
     metadata: dict = field(default_factory=dict)
+    # Một dòng mỗi window: BIC chọn ra n_components nào, và chọn với biên bao
+    # nhiêu. Xem `_record_model_selection` để biết vì sao cột `bic_margin`
+    # là cột đáng đọc nhất ở đây.
+    model_selection: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
@@ -124,11 +128,17 @@ class WalkForwardBacktester:
         equity_rows: list[dict] = []
         trade_rows: list[dict] = []
         regime_rows: list[dict] = []
+        model_selection_rows: list[dict] = []
 
-        for is_start, is_end, oos_start, oos_new_end in windows:
+        for window_idx, (is_start, is_end, oos_start, oos_new_end) in enumerate(windows):
             is_features = features.iloc[is_start:is_end]
             self.hmm_engine.select_and_train(is_features)
             regime_infos = self.hmm_engine.regime_infos
+            model_selection_rows.append(
+                self._record_model_selection(
+                    window_idx, features.index[is_start], features.index[is_end - 1], len(is_features)
+                )
+            )
 
             for i in range(is_end, oos_new_end):
                 ts = features.index[i]
@@ -211,11 +221,16 @@ class WalkForwardBacktester:
         gross_profit = equity_curve["equity"].iloc[-1] - self.config.initial_equity
         cost_report = self.cost_model.total_cost_report(trade_log, gross_profit=gross_profit)
 
+        model_selection = pd.DataFrame(model_selection_rows)
+        if not model_selection.empty:
+            model_selection = model_selection.set_index("window_idx")
+
         return BacktestResult(
             equity_curve=equity_curve,
             trade_log=trade_log,
             regime_history=regime_history,
             cost_report=cost_report,
+            model_selection=model_selection,
             metadata={
                 "symbol": symbol,
                 "start": start,
@@ -309,6 +324,49 @@ class WalkForwardBacktester:
                 "notional": notional,
             }
         )
+
+    def _record_model_selection(
+        self,
+        window_idx: int,
+        is_start_ts: pd.Timestamp,
+        is_end_ts: pd.Timestamp,
+        n_is_bars: int,
+    ) -> dict:
+        """Ghi lại BIC đã chọn n_components nào ở window này, và với biên bao nhiêu.
+
+        Lý do tồn tại: nếu cực tiểu BIC nông — tức `bic_margin` giữa ứng viên
+        thắng và á quân nhỏ — thì một nhiễu loạn nhỏ trong dữ liệu IS đủ để lật
+        lựa chọn sang n_components khác, kéo theo định nghĩa regime khác và
+        allocation khác. Đó là đường truyền khả dĩ từ "dịch start date 7 ngày"
+        tới "total return đổi một bậc độ lớn". Không có cột này thì tính bất ổn
+        của model selection là vô hình: `regime_history` chỉ ghi state đã chọn,
+        không ghi việc lựa chọn đó suýt soát tới mức nào.
+
+        `samples_per_param` là chỉ số hỗ trợ: `covariance_type="full"` làm số
+        tham số tăng bậc hai theo số feature (CLAUDE.md bất biến #13), nên một
+        model thắng BIC vẫn có thể được ước lượng quá mỏng để ổn định.
+        """
+        results = sorted(self.hmm_engine.bic_results, key=lambda r: r.bic)
+        best = results[0]
+        runner_up = results[1] if len(results) > 1 else None
+
+        return {
+            "window_idx": window_idx,
+            "is_start": is_start_ts,
+            "is_end": is_end_ts,
+            "n_is_bars": n_is_bars,
+            "selected_n_components": best.n_components,
+            "selected_bic": best.bic,
+            "selected_n_params": best.n_params,
+            "converged": best.converged,
+            "n_iter": best.n_iter,
+            "runner_up_n_components": runner_up.n_components if runner_up else None,
+            "runner_up_bic": runner_up.bic if runner_up else None,
+            # Biên càng nhỏ, lựa chọn càng dễ lật khi dữ liệu IS xê dịch.
+            "bic_margin": (runner_up.bic - best.bic) if runner_up else None,
+            "samples_per_param": n_is_bars / best.n_params if best.n_params else None,
+            "bic_curve": {r.n_components: round(r.bic, 2) for r in results},
+        }
 
     def _compute_target_qty(
         self,
