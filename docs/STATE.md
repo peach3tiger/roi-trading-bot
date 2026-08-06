@@ -6,7 +6,7 @@
 ## Đang ở đâu
 
 - Phase 1–8 xong. Phase 9 (broker) chuyển từ Bybit sang **Binance qua
-  ccxt** (2026-08-06, xem `docs/DECISIONS.md`). 193 passed / 4 skipped.
+  ccxt** (2026-08-06, xem `docs/DECISIONS.md`). 207 passed / 0 skipped.
 - Forward test chạy từ 2026-08-06, cấu hình đóng băng, launchd hằng ngày.
   Mốc đánh giá: 2026-11-06 / 2027-02-06 / 2027-08-06. Không đụng tới trong
   phiên này.
@@ -20,25 +20,31 @@ Chặn ở tầng tài khoản GitHub. Đã xác nhận trước đó bằng g�
 155ms), vấn đề nằm ngoài cả hai lớp (sàn, code). Không debug thêm ở
 hướng "sửa CCXTClient"/"sửa health_check" cho việc này — không phải chỗ
 hỏng. Mọi việc cần key Binance testnet thật (nghiệm thu submit_order/
-cancel_order/idempotency qua mạng, mục 1 cũ trong danh sách treo) **tạm
-dừng**, không phải ưu tiên hiện tại — xem "Việc còn treo" bên dưới, thứ
-tự đã đổi để tránh nó.
+cancel_order/idempotency qua mạng) **tạm dừng**, không phải ưu tiên hiện
+tại — xem "Việc còn treo" bên dưới, thứ tự đã đổi để tránh nó.
 
 ## Việc còn treo, theo thứ tự ưu tiên (cập nhật — tránh nhánh bị chặn testnet)
 
-1. ~~`tests/test_forward_golden.py`~~ — **ĐÃ CÓ, đã xanh.** Được giao lại
-   là "chưa có, quan trọng nhất" nhưng kiểm tra trực tiếp (file tồn tại,
-   `git log` cho thấy đã commit ở `479495d`, có trên `origin/main`, chạy
-   `pytest tests/test_forward_golden.py` PASS) không khớp — đã báo lại
-   thay vì âm thầm build lại. Không có việc gì để làm ở mục này; đã nằm
-   trong danh sách 5 test bắt buộc ở CLAUDE.md #15 từ trước phiên này.
-2. **4 test skip trong `test_hmm.py`** — ưu tiên thật hiện tại.
-   `hmm_engine.py` là thứ forward test phụ thuộc trực tiếp; `test_look_ahead`
-   xanh chỉ chứng minh không có look-ahead bias, KHÔNG phủ BIC selection,
-   gán nhãn regime, hay bộ lọc ổn định (`stability_bars`/flicker). Độ phủ
-   thật thấp hơn con số "193 passed" gợi ý.
+1. ~~`tests/test_forward_golden.py`~~ — đã có từ trước phiên này, không
+   phải việc thật (đã kiểm tra lại và báo lại khi được giao nhầm là
+   "chưa có, quan trọng nhất").
+2. ~~4 test skip trong `test_hmm.py`~~ — **XONG.** 14 test thay 4 skip
+   (BIC selection, gán nhãn theo return-rank, vol-rank độc lập, bộ lọc ổn
+   định/hysteresis, flicker rate). **Phát hiện + sửa 1 bug thật trong lúc
+   viết test** (không phải đọc code):
+   `HMMRegimeEngine._extract_variances()` đọc sai vị trí variance cho
+   `covariance_type` khác `"full"` — `diag`/`tied`/`spherical` sai (chỉ
+   `full` tình cờ đúng), vì `model.covars_` của hmmlearn 0.3.3 LUÔN trả
+   full matrix bất kể covariance_type, khác giả định cũ. Không lộ ra vì
+   production chỉ chạy `covariance_type: full` (settings.yaml) — sẽ lộ
+   ngay khi ablation thử loại khác. Đã sửa: bỏ nhánh theo loại, luôn đọc
+   đường chéo ma trận full. Chi tiết đầy đủ: `docs/DECISIONS.md`, mục
+   "Lấp 4 test skip trong test_hmm.py". Tự kiểm chứng bằng mutation
+   (CLAUDE.md #16): 11/14 test đỏ đúng theo 5 mutation, 3 không liên quan
+   vẫn xanh, đã revert.
 3. **Lỗi mypy trong `tests/test_forward_logger.py`** (8 lỗi, pre-existing,
-   không ai xử lý qua nhiều phiên) — nợ kỹ thuật tồn đọng.
+   không ai xử lý qua nhiều phiên) — ưu tiên thật hiện tại, nợ kỹ thuật
+   tồn đọng.
 4. **`prompts/phase-10-main-loop.md`** — xây được và test được bằng
    `--dry-run`, KHÔNG cần sàn thật. Chỉ phần nghiệm thu đặt lệnh thật mới
    cần testnet (bị chặn, xem trên) — không chặn việc xây main loop.
@@ -65,9 +71,8 @@ HẲN (không còn đọc, kể cả làm dự phòng) — thiếu biến nào t
 
 ## Việc tiếp theo
 
-test_hmm.py (4 skip) -> mypy test_forward_logger.py -> Phase 10 main loop
-(`--dry-run`, không cần testnet) -> [testnet hết bị chặn] -> nghiệm thu
-CCXTClient qua mạng thật.
+mypy test_forward_logger.py -> Phase 10 main loop (`--dry-run`, không cần
+testnet) -> [testnet hết bị chặn] -> nghiệm thu CCXTClient qua mạng thật.
 
 ## Quy tắc đã học, không lặp lại
 
@@ -85,3 +90,9 @@ CCXTClient qua mạng thật.
   CLAUDE.md #16 (đột biến trước khi tin test) áp dụng tương tự cho việc
   tin một báo cáo trạng thái: xác minh trước khi hành động, không phải
   sau.
+- Thư viện ngoài có thể đổi hành vi giữa các phiên bản theo cách âm thầm
+  đúng-ngữ-pháp-sai-ngữ-nghĩa (hmmlearn's `covars_` luôn trả full matrix
+  bất kể `covariance_type`, khác giả định code cũ) — code không lỗi cú
+  pháp, không raise, chỉ âm thầm tính sai. Viết test đọc lại GIÁ TRỊ THẬT
+  từ một lần fit thật, không chỉ test "không crash", là cách duy nhất bắt
+  được loại lỗi này.

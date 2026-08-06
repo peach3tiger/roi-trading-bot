@@ -317,19 +317,37 @@ class HMMRegimeEngine:
         return sorted(infos, key=lambda info: info.regime_id)
 
     def _extract_variances(self, feature_idx: int) -> np.ndarray:
-        """Variance của một feature cụ thể theo từng state, theo đúng
-        shape của `covars_` ứng với `covariance_type` của model."""
+        """Variance của một feature cụ thể theo từng state.
+
+        SỬA 2026-08-07 (bug thật, phát hiện bằng test viết cho
+        `tests/test_hmm.py`, không phải đọc code): `self.model.covars_`
+        (property công khai của hmmlearn) LUÔN trả về ma trận covariance
+        ĐẦY ĐỦ dạng `(n_components, n_features, n_features)` bất kể
+        `covariance_type` — hmmlearn tự "phồng" `diag`/`tied`/`spherical`
+        về dạng full trước khi trả ra (xem `hmmlearn/utils.py::fill_covars`,
+        và `hmmlearn/hmm.py::GaussianHMM.covars_` property). Xác nhận bằng
+        fit thật cả 4 loại (hmmlearn 0.3.3): `covars_.shape` luôn
+        `(n_components, n_features, n_features)`, kể cả khi giá trị nội bộ
+        `_covars_` (private, không phải thứ hàm này đọc) có shape gọn hơn
+        theo từng loại.
+
+        Bản CŨ giả định `covars_` giữ nguyên shape gọn theo
+        `covariance_type` (đúng với vài phiên bản hmmlearn cũ hơn, không
+        đúng với bản đang dùng) — nhánh `full` (đọc `covars[s, i, i]`)
+        tình cờ đúng vì đó chính xác là shape thật của `covars_`; ba nhánh
+        còn lại (`diag`/`tied`/`spherical`) đọc SAI vị trí phần tử, âm
+        thầm trả về variance sai (vd. `diag` từng đọc nguyên một HÀNG của
+        ma trận full thay vì phần tử đường chéo). Không lộ ra vì
+        `settings.yaml: hmm.covariance_type: full` là cấu hình production
+        duy nhất từng chạy — sẽ lộ ngay khi thử `covariance_type` khác
+        trong ablation (CLAUDE.md bất biến #13 khuyến khích thử nghiệm
+        này).
+
+        Vì `covars_` luôn đầy đủ, không còn cần nhánh theo
+        `covariance_type` — luôn đọc đúng phần tử đường chéo."""
         assert self.model is not None
         covars = self.model.covars_
-        if self.covariance_type == "full":
-            return np.asarray([covars[s, feature_idx, feature_idx] for s in range(self.model.n_components)])
-        if self.covariance_type == "diag":
-            return np.asarray(covars[:, feature_idx])
-        if self.covariance_type == "tied":
-            value = covars[feature_idx, feature_idx]
-            return np.full(self.model.n_components, value)
-        # spherical: một variance dùng chung cho mọi feature của mỗi state
-        return np.asarray(covars)
+        return np.asarray([covars[s, feature_idx, feature_idx] for s in range(self.model.n_components)])
 
     # ------------------------------------------------------------------
     # Forward algorithm (pure, không cache) — nền tảng toán học

@@ -694,3 +694,62 @@ là file người vận hành tự quản lý, không phải phạm vi sửa c�
 này. `tests/test_health_check.py` thêm test xác nhận đúng việc bỏ
 fallback: set `BYBIT_API_KEY`/`BYBIT_API_SECRET` (không set `EXCHANGE_*`)
 phải vẫn FAIL.
+
+---
+
+## Lấp 4 test skip trong test_hmm.py — phát hiện bug thật ở `_extract_variances` (2026-08-07)
+
+`tests/test_hmm.py` có 4 test `pytest.skip("TODO: Phase 2")` từ lúc
+`core/hmm_engine.py` còn là stub — module đó đã implement đầy đủ từ lâu,
+test chưa bao giờ viết lại. Viết 14 test thay 4 skip (BIC selection, gán
+nhãn regime theo return-rank, vol-rank độc lập, bộ lọc ổn định/hysteresis,
+flicker rate) — không đi qua `predict_regime_filtered()` cho phần
+stability/flicker (gọi thẳng `_update_stability()`, state machine thuần
+không đụng `self.model`) vì ép forward algorithm đi đúng một chuỗi
+argmax mong muốn qua nhiều bar liên tiếp đòi hỏi tinh chỉnh means_/
+covars_/transmat_ rất mong manh, dễ flaky.
+
+**Bug thật phát hiện lúc viết test** (không phải đọc code):
+`HMMRegimeEngine._extract_variances()` giả định `self.model.covars_`
+giữ nguyên shape gọn theo `covariance_type` (`(n_components, n_features)`
+cho `diag`, `(n_features, n_features)` cho `tied`, v.v.) — SAI với
+hmmlearn 0.3.3 (phiên bản đang dùng, xác nhận bằng fit thật cả 4 loại,
+không suy luận từ tài liệu): property công khai `covars_` LUÔN trả về ma
+trận ĐẦY ĐỦ `(n_components, n_features, n_features)` bất kể
+`covariance_type` (hmmlearn tự "phồng" `diag`/`tied`/`spherical` về full
+qua `hmmlearn/utils.py::fill_covars` trước khi trả ra — `_covars_`
+private mới giữ shape gọn, không phải thứ hàm này đọc). Kết quả: nhánh
+`full` (đọc `covars[s,i,i]`) tình cờ đúng vì đó đúng là shape thật;
+`diag` đọc sai (lấy nguyên một HÀNG của ma trận full thay vì phần tử
+đường chéo — trộn lẫn cả covariance chéo vào "variance"); `tied` đọc sai
+vị trí hoàn toàn (`covars[feature_idx, feature_idx]` trên mảng 3D thực
+chất đang lấy chỉ số THEO COMPONENT, không phải theo feature);
+`spherical` trả nguyên ma trận 3D thay vì một số vô hướng.
+
+Không lộ ra trước giờ vì `settings.yaml: hmm.covariance_type: full` là
+cấu hình production DUY NHẤT từng chạy qua — bug nằm ở ba nhánh
+`diag`/`tied`/`spherical`, sẽ lộ ngay khi ablation thử `covariance_type`
+khác (CLAUDE.md bất biến #13 khuyến khích đúng việc này). Hậu quả nếu
+không phát hiện: `vol_rank` (xếp hạng volatility giữa các regime) sai âm
+thầm → `recommended_strategy_type` (LOW_VOL/MID_VOL/HIGH_VOL) và
+`max_allocation_pct` trong `RegimeInfo` sai theo, không có exception nào
+báo hiệu.
+
+**Sửa:** vì `covars_` luôn đầy đủ bất kể `covariance_type`, bỏ hẳn nhánh
+theo loại — luôn đọc `covars[s, feature_idx, feature_idx]`. Đơn giản hơn
+bản cũ (không cần biết `covariance_type` để đọc đúng), và đúng cho cả 4
+loại — xác nhận bằng test mới `test_extract_variances_matches_covars_diagonal_for_every_covariance_type`
+(parametrize cả 4 loại, fit thật, so với `model.covars_[s,i,i]` tính độc
+lập).
+
+**Tự kiểm chứng theo CLAUDE.md #16** (mutation trước khi tin): mutate 5
+chỗ (revert fix `_extract_variances`, đảo BIC chọn cao nhất thay vì thấp
+nhất, bỏ sort theo return khi gán nhãn, bỏ chờ `stability_bars`, bỏ cắt
+`flicker_window`) — đúng 11/14 test đỏ khớp từng mutation (3 test không
+liên quan tới mutation nào vẫn xanh đúng, bao gồm nhánh `full` của
+`_extract_variances` — không bị mutation A đụng tới, đúng như dự đoán).
+Revert lại bản gốc + fix thật trước khi chạy full suite.
+
+207 passed / 0 skipped (trước: 193 passed / 4 skipped — 4 skip đã lấp
+hết). ruff + mypy sạch (trừ 8 lỗi pre-existing ở `test_forward_logger.py`,
+không liên quan, chưa xử lý).
