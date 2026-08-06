@@ -675,3 +675,22 @@ field `exchange.sandbox` như gợi ý ban đầu — giữ nguyên `exchange.te
 tham số/field không cần trùng tên phương thức ccxt dùng nội bộ. Thêm field
 trùng nghĩa chỉ để khớp gợi ý ban đầu sẽ tạo hai nguồn sự thật cho cùng
 một khái niệm.
+
+**Bổ sung cùng ngày: bỏ fallback `BYBIT_*` trong `ops/health_check.py`.**
+Fallback đọc tên biến cũ (`BYBIT_API_KEY`/`BYBIT_API_SECRET`/`BYBIT_TESTNET`)
+ở trên có mục đích rõ: `.env` có sẵn từ trước migration không bị hỏng
+ngay lập tức. Sau khi xác nhận migration hoạt động đúng, fallback đó tự
+nó là một cách để cấu hình sai (gõ nhầm/quên đổi tên biến) lặng lẽ vẫn
+"hoạt động" bằng key/flag của sàn đã ngừng dùng — đúng loại lỗi mà một
+health check tồn tại để bắt, không phải để tạo ra. Bỏ hẳn fallback: chỉ
+đọc `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET`/`EXCHANGE_TESTNET`; thiếu
+biến nào trong hai biến credential thì `exchange_authenticated` FAIL và
+nêu đúng tên biến còn thiếu (không còn thông báo chung chung liệt kê cả
+hai bất kể biến nào thật sự thiếu). `.env.example` bỏ mọi dòng nhắc tới
+`BYBIT_*`. `.env` thật (không commit) vẫn còn `BYBIT_API_KEY`/
+`BYBIT_API_SECRET`/`BYBIT_TESTNET` ở trên — giờ hoàn toàn không có tác
+dụng (trước là "dự phòng", giờ là dead config), không xoá tự động vì đó
+là file người vận hành tự quản lý, không phải phạm vi sửa của thay đổi
+này. `tests/test_health_check.py` thêm test xác nhận đúng việc bỏ
+fallback: set `BYBIT_API_KEY`/`BYBIT_API_SECRET` (không set `EXCHANGE_*`)
+phải vẫn FAIL.

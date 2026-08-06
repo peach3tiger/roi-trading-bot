@@ -38,11 +38,17 @@ Tóm tắt việc đã làm:
 - `config/settings.yaml`: `exchange.name: binance`. `exchange.testnet` giữ
   nguyên tên (không thêm field `sandbox` trùng nghĩa).
 - `ops/health_check.py` đọc `exchange.name` từ config thay vì hardcode
-  Bybit; env var `BYBIT_API_KEY/SECRET/TESTNET` -> `EXCHANGE_API_KEY/SECRET/TESTNET`
-  (đọc được cả tên cũ làm fallback). `ops/RUNBOOK.md` cập nhật theo (mục
-  "Mất WebSocket" -> "Mất dữ liệu giá (REST polling thất bại)", mục "Xác
-  thực Bybit thất bại" -> "Xác thực sàn thất bại", tổng quát hoá).
+  Bybit; env var `BYBIT_API_KEY/SECRET/TESTNET` -> `EXCHANGE_API_KEY/SECRET/TESTNET`.
+  Fallback đọc tên `BYBIT_*` cũ đã bỏ (2026-08-06, ngay sau khi thêm) —
+  chỉ đọc `EXCHANGE_*`, thiếu biến nào thì `exchange_authenticated` FAIL
+  và nêu đúng tên biến đó, không đoán/không im lặng dùng giá trị cũ.
+  `ops/RUNBOOK.md` cập nhật theo (mục "Mất WebSocket" -> "Mất dữ liệu giá
+  (REST polling thất bại)", mục "Xác thực Bybit thất bại" -> "Xác thực
+  sàn thất bại", tổng quát hoá).
 - Test mới/viết lại: `tests/test_ccxt_client.py` (31 test, mới),
+  `tests/test_health_check.py` (15 test, mới — trọng tâm là FAIL đúng lúc:
+  thiếu key/key sai/đổi sàn/aggregate không xanh nhờ đa số/fallback BYBIT_*
+  đã bỏ hẳn),
   `tests/test_market_data.py`, `tests/test_position_tracker.py` (viết lại
   theo REST polling).
 

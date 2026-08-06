@@ -86,9 +86,13 @@ def _is_testnet() -> bool:
     # Đổi tên 2026-08-06 (BYBIT_TESTNET -> EXCHANGE_TESTNET) cùng đợt đổi
     # sàn Bybit -> Binance qua ccxt — tên biến không còn buộc vào một sàn
     # cụ thể, đúng tinh thần `exchange.name` đọc từ settings.yaml (xem
-    # _exchange_id() bên dưới). Đọc cả tên cũ làm fallback: .env có sẵn từ
-    # trước migration vẫn hoạt động cho tới khi người vận hành cập nhật.
-    value = os.environ.get("EXCHANGE_TESTNET", os.environ.get("BYBIT_TESTNET", "true"))
+    # _exchange_id() bên dưới). KHÔNG còn fallback đọc BYBIT_TESTNET —
+    # .env cũ phải tự cập nhật sang tên mới, không có đường ngầm nào giữ
+    # cho tên cũ tiếp tục hoạt động im lặng. Mặc định "true" khi biến này
+    # KHÔNG được set (không phải khi thiếu credential) — CLAUDE.md bất
+    # biến #6: testnet là mặc định an toàn, không phải một giá trị bắt
+    # buộc phải khai báo.
+    value = os.environ.get("EXCHANGE_TESTNET", "true")
     return value.strip().lower() != "false"
 
 
@@ -175,15 +179,24 @@ def check_exchange_authenticated(config_path: Path) -> CheckResult:
         return CheckResult("exchange_authenticated", "FAIL", f"ccxt không hỗ trợ sàn {exchange_id!r}")
 
     # Đổi tên 2026-08-06 (BYBIT_API_KEY/SECRET -> EXCHANGE_API_KEY/SECRET)
-    # cùng đợt đổi sàn — xem _is_testnet(). Fallback tên cũ cho .env có
-    # sẵn từ trước migration.
-    api_key = os.environ.get("EXCHANGE_API_KEY", os.environ.get("BYBIT_API_KEY", ""))
-    api_secret = os.environ.get("EXCHANGE_API_SECRET", os.environ.get("BYBIT_API_SECRET", ""))
-    if not api_key or not api_secret:
+    # cùng đợt đổi sàn — xem _is_testnet(). KHÔNG còn fallback đọc
+    # BYBIT_API_KEY/BYBIT_API_SECRET — .env cũ phải tự cập nhật sang tên
+    # mới, không có đường ngầm nào giữ cho tên cũ tiếp tục hoạt động.
+    api_key = os.environ.get("EXCHANGE_API_KEY", "")
+    api_secret = os.environ.get("EXCHANGE_API_SECRET", "")
+    missing_vars = [
+        name
+        for name, value in (("EXCHANGE_API_KEY", api_key), ("EXCHANGE_API_SECRET", api_secret))
+        if not value
+    ]
+    if missing_vars:
+        # Nêu ĐÚNG tên biến còn thiếu (không phải luôn liệt kê cả hai bất
+        # kể biến nào thật sự thiếu) — thông báo mơ hồ buộc người vận hành
+        # phải tự đoán/kiểm tra lại cả hai thay vì sửa đúng chỗ ngay.
         return CheckResult(
             "exchange_authenticated",
             "FAIL",
-            "Thiếu EXCHANGE_API_KEY/EXCHANGE_API_SECRET trong env — không xác thực được (không log giá trị)",
+            f"Thiếu biến môi trường: {', '.join(missing_vars)} — không xác thực được (không log giá trị)",
         )
 
     testnet = _is_testnet()

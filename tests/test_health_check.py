@@ -114,16 +114,53 @@ def test_missing_api_key_fails_without_calling_exchange(
     assert calls == [], "thiếu key thì không có gì để xác thực — không được gọi ra sàn"
 
 
-def test_missing_only_secret_still_fails() -> None:
-    """Có key nhưng thiếu secret — vẫn phải FAIL, không được chạy nửa vời."""
-    import os
+def test_missing_only_secret_still_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Có key nhưng thiếu secret — vẫn phải FAIL, không được chạy nửa vời,
+    và thông báo phải nêu ĐÚNG biến còn thiếu (EXCHANGE_API_SECRET), không
+    liệt kê cả EXCHANGE_API_KEY (biến đó đã có)."""
+    monkeypatch.setenv("EXCHANGE_API_KEY", "some_key")
 
-    os.environ["EXCHANGE_API_KEY"] = "some_key"
-    try:
-        result = health_check.check_exchange_authenticated(Path("config/settings.yaml"))
-        assert result.status == "FAIL"
-    finally:
-        del os.environ["EXCHANGE_API_KEY"]
+    result = health_check.check_exchange_authenticated(Path("config/settings.yaml"))
+
+    assert result.status == "FAIL"
+    assert "EXCHANGE_API_SECRET" in result.detail
+    assert "EXCHANGE_API_KEY" not in result.detail, (
+        "EXCHANGE_API_KEY đã có giá trị — không được liệt kê nó là biến thiếu"
+    )
+
+
+def test_missing_only_key_names_only_that_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Đối xứng với test trên — thiếu key, có secret, thông báo chỉ nêu
+    EXCHANGE_API_KEY."""
+    monkeypatch.setenv("EXCHANGE_API_SECRET", "some_secret")
+
+    result = health_check.check_exchange_authenticated(Path("config/settings.yaml"))
+
+    assert result.status == "FAIL"
+    assert "EXCHANGE_API_KEY" in result.detail
+    assert "EXCHANGE_API_SECRET" not in result.detail
+
+
+def test_bybit_env_vars_no_longer_work_as_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chốt lại việc bỏ fallback: set CHỈ BYBIT_API_KEY/BYBIT_API_SECRET
+    (không set EXCHANGE_*) phải vẫn FAIL — nếu ai lỡ thêm lại fallback,
+    test này phải bắt được ngay."""
+    monkeypatch.setenv("BYBIT_API_KEY", "old_key")
+    monkeypatch.setenv("BYBIT_API_SECRET", "old_secret")
+
+    result = health_check.check_exchange_authenticated(Path("config/settings.yaml"))
+
+    assert result.status == "FAIL"
+    assert "EXCHANGE_API_KEY" in result.detail
+    assert "EXCHANGE_API_SECRET" in result.detail
+
+
+def test_bybit_testnet_env_var_no_longer_affects_is_testnet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BYBIT_TESTNET=false không còn được đọc — _is_testnet() phải trả về
+    mặc định (True), không bị điều khiển bởi tên biến cũ."""
+    monkeypatch.setenv("BYBIT_TESTNET", "false")
+
+    assert health_check._is_testnet() is True
 
 
 # ----------------------------------------------------------------------

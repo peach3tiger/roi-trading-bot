@@ -68,8 +68,8 @@ container thoát vì lỗi "TỪ CHỐI: lệnh chứa...", đó là guard này 
 | `LOG_DIR` | `logs/` | thư mục log xoay vòng (`monitoring/logger.py`) |
 | `STATE_DIR` | `state/` (mặc định script) / `/app/state` (container) | `trading_halted.lock`, `state_snapshot.json` |
 | `REQUIRE_HMM_MODEL` | `true` | `false` để health check chỉ WARN thay vì FAIL khi chưa có model — dùng lúc bring-up trước khi Phase 10 train lần đầu |
-| `EXCHANGE_TESTNET` | `true` | health check ping testnet hay mainnet — **luôn để `true`** trừ khi đã qua đủ mốc ở CLAUDE.md bất biến #12. Đổi tên từ `BYBIT_TESTNET` ngày 2026-08-06 (đổi sàn Bybit -> Binance, xem `docs/DECISIONS.md`) — `ops/health_check.py` vẫn đọc được tên cũ làm fallback |
-| `EXCHANGE_API_KEY` / `EXCHANGE_API_SECRET` | *(rỗng)* | credential cho `exchange_authenticated` check — sàn thật đọc từ `config/settings.yaml: exchange.name`, không hardcode. Đổi tên từ `BYBIT_API_KEY`/`BYBIT_API_SECRET` cùng đợt trên |
+| `EXCHANGE_TESTNET` | `true` | health check ping testnet hay mainnet — **luôn để `true`** trừ khi đã qua đủ mốc ở CLAUDE.md bất biến #12. Đổi tên từ `BYBIT_TESTNET` ngày 2026-08-06 (đổi sàn Bybit -> Binance, xem `docs/DECISIONS.md`); KHÔNG còn đọc tên cũ — `.env` phải dùng đúng tên này |
+| `EXCHANGE_API_KEY` / `EXCHANGE_API_SECRET` | *(rỗng, BẮT BUỘC cho `exchange_authenticated`)* | credential cho `exchange_authenticated` check — sàn thật đọc từ `config/settings.yaml: exchange.name`, không hardcode. Đổi tên từ `BYBIT_API_KEY`/`BYBIT_API_SECRET` cùng đợt trên, KHÔNG còn đọc tên cũ; thiếu biến nào thì `exchange_authenticated` FAIL và nêu đúng tên biến đó |
 
 ---
 
