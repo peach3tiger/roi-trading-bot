@@ -294,23 +294,49 @@ sắp có — tại thời điểm sửa đổi này, thí nghiệm Tầng 2 (ab
 dừng giữa chừng trước khi in ra bất kỳ kết quả nào, nên sửa đổi này chốt
 trước khi thấy số Tầng 2 đầu tiên, đúng tinh thần tiền đăng ký.
 
-**Ngưỡng cuối cùng: [ĐANG ĐO — điền ngay sau khi có kết quả bar-offset
-sweep của baseline cửa sổ ngắn, trước khi chạy lại bất kỳ cấu hình Tầng 2
-nào].**
+**Đo xong.** Baseline pruned-8 cùng cửa sổ ngắn (2020-08-05→2026-08-04), 4
+mốc offset (`reports/tier2_shortwin_baseline_offsets`):
+
+| offset | Sharpe |
+|---|---|
+| 0 | 0.7543 |
+| 6 | 0.7095 |
+| 12 | 0.8915 |
+| 18 | 1.2004 |
+
+Biên độ = 1.2004 − 0.7095 = **0.4909**.
+
+**Ngưỡng cuối cùng cho thí nghiệm Tầng 2: max(0.20, 0.4909) = 0.4909.**
+
+### PHÁT HIỆN QUAN TRỌNG — độc lập với Tầng 2, phải xử lý trước
+
+Biên độ 0.4909 này **chính là số của tiêu chí 6**, và **0.4909 > 0.3** —
+ngưỡng tiêu chí 6 tự nó. Nghĩa là: **baseline pruned-8 cửa sổ NGẮN tự nó
+FAIL tiêu chí 6**, trong khi cửa sổ DÀI pass thoải mái (biên độ 0.217).
+Đây không phải vấn đề của Tầng 2 — Tầng 2 chưa chạy dòng nào — đây là bất
+ổn walk-forward tái xuất hiện khi thu hẹp cửa sổ, độc lập với việc thêm
+feature gì.
+
+Hệ quả: bất kỳ kết quả Tầng 2 nào đo trên cửa sổ ngắn này đều đứng trên một
+nền không ổn định sẵn. Một cải thiện Sharpe "vượt ngưỡng 0.4909" có thể chỉ
+là cưỡi lên đúng loại bất ổn window-alignment đã thấy ở Tầng 1 (phiên
+trước), không phải tín hiệu Tầng 2 thật — và một kết quả "dưới ngưỡng"
+cũng khó diễn giải vì bản thân ngưỡng đã bị thổi phồng bởi bất ổn đó.
+**Tạm dừng trước khi chạy ablation Tầng 2, chờ quyết định cách xử lý phát
+hiện này** — không tự ý chọn hướng đi tiếp.
 
 ### Trạng thái
 
-- Baseline pruned-8 cùng cửa sổ ngắn (offset0, 2020-08-05→2026-08-04):
-  **xong** — Sharpe 0.7543, Calmar 0.5991, max DD -29.72%
-  (`reports/tier2_shortwin_baseline`). Đây là mốc so sánh cho cả ngưỡng
-  Sharpe lẫn tiêu chí 1–4.
+- Baseline pruned-8 cùng cửa sổ ngắn, cả 4 offset: **xong**
+  (`reports/tier2_shortwin_baseline`, `reports/tier2_shortwin_baseline_offsets`).
+  Đây là mốc so sánh cho ngưỡng Sharpe, tiêu chí 1–4, VÀ đã đồng thời phát
+  hiện tiêu chí 6 fail trên cửa sổ ngắn — xem mục trên.
 - `compute_tier2_features` + `compute_all_features` + wiring qua
   `DerivativesLoader`/`main.py`/`backtest/backtester.py`: **đã implement**,
   lint/mypy/pytest xanh, đã smoke-test bằng dữ liệu thật (căn index đúng,
   z-score hợp lý).
-- Ablation Tầng 2 (13 cột): **đã dừng giữa chừng theo yêu cầu, chưa có kết
-  quả nào được in ra** — sẽ chạy lại sau khi ngưỡng ở trên được điền số
-  cuối cùng.
+- Ablation Tầng 2 (13 cột): **TẠM DỪNG** — chưa có kết quả nào được in ra,
+  chờ quyết định về phát hiện tiêu chí 6 fail ở trên trước khi chạy tiếp.
 - Bước tiếp theo: chạy baseline cửa sổ ngắn ở offset 6/12/18 (đã có offset0
   từ báo cáo trên), tính biên độ, điền ngưỡng cuối cùng vào mục ngay trên,
   rồi mới chạy lại ablation Tầng 2.
