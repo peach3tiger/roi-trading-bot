@@ -49,3 +49,13 @@ Sửa key testnet → nghiệm thu Phase 9 mục 3–6 → golden test → Phase
   Thanh khoản testnet là nhân tạo (spread đo được 0.00015% so với mainnet ~0.01–0.02%).
 - Không bao giờ log giá trị key/secret, kể cả một phần.
 - Không bao giờ hai tiến trình cùng khả năng đặt lệnh trên một tài khoản.
+
+## Bổ sung 2026-08-06
+
+8. Không chỗ nào gọi `load_dotenv()` dù `python-dotenv` có trong requirements.
+   `BybitClient.__init__` nhận api_key/api_secret dạng chuỗi thô, không có đường
+   nào tự đọc `.env`. Cần một điểm nạp duy nhất (main.py hoặc config loader),
+   và fail rõ ràng nếu thiếu biến — không im lặng chạy với chuỗi rỗng.
+
+Ghi nhận: retry logic KHÔNG retry lỗi 401 — phần này của mục 3 đã đúng sẵn
+cho lớp lỗi HTTP. Vẫn cần đảo blacklist→whitelist cho các retCode.
