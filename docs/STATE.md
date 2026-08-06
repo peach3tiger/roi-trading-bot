@@ -90,13 +90,38 @@ phải chưa xây:**
 - submit_order/close_position/modify_stop thật qua mạng — cần
   `EXCHANGE_API_KEY`/`SECRET` thật (mục "Testnet đang bị chặn" dưới).
 
+## `tests/test_forward_golden.py` — được giao lại lần 2 là "chưa có", VẪN đã có (2026-08-07)
+
+Kiểm tra lại (file tồn tại, `git log` cho thấy đã commit ở `479495d`, có
+trên remote, `pytest` PASS, đã có trong CLAUDE.md #15 dòng 138) — khớp y
+hệt lần kiểm tra trước. Không có gì để xây thêm. Việc THẬT làm thêm lần
+này: kiểm chứng bằng mutation đúng yêu cầu CLAUDE.md #16 — sửa
+`core/regime_strategies.py::_EMA_PERIOD` (50 → 40), chạy lại golden test,
+FAIL đúng ngay bar đầu tiên có strategy LowVol/MidVol chạm EMA
+(`hmm_allocation` lệch `0.95` → `0.60` tại `bar_index=153`), sau đó revert
+sạch (`git diff --stat` rỗng). Xác nhận thật: test này bắt được đúng loại
+thay đổi nó được thiết kế để bắt.
+
+## Git remote — đã đổi tài khoản, ĐÃ GIẢI QUYẾT (2026-08-07)
+
+`origin` đổi từ `tuananh12022/roi-trading-bot` (SSH) sang
+`peach3tiger/roi-trading-bot` (HTTPS, credential trong keychain macOS) —
+không phải tôi đổi, đã xảy ra giữa phiên. Từng gặp `Permission denied
+(publickey)` khi remote còn ở dạng SSH trỏ tài khoản mới (key SSH cục bộ
+không được tài khoản đó cấp quyền). Đã đổi URL sang HTTPS theo hướng dẫn
+trực tiếp từ người dùng — `git push origin main` giờ chạy được, không cần
+prompt (keychain tự cấp credential). Toàn bộ commit của phiên này (tới
+Phase 10) đã có trên remote, xác nhận bằng `git push` trả "Everything
+up-to-date".
+
 ## Testnet đang bị chặn — KHÔNG PHẢI lỗi Binance, KHÔNG PHẢI lỗi code
 
-Chặn ở tầng tài khoản GitHub. Đã xác nhận bằng gọi thật:
-`exchange_reachable` OK (mạng/API Binance testnet sống bình thường,
-155-178ms qua nhiều lần chạy), vấn đề nằm ngoài cả hai lớp (sàn, code).
-Không debug thêm ở hướng "sửa CCXTClient"/"sửa health_check"/"sửa main.py"
-cho việc này — không phải chỗ hỏng.
+Chặn ở tầng tài khoản GitHub (khác — hoặc liên quan tới — việc đổi tài
+khoản git ở trên, chưa xác nhận có cùng nguyên nhân). Đã xác nhận bằng
+gọi thật: `exchange_reachable` OK (mạng/API Binance testnet sống bình
+thường, 155-178ms qua nhiều lần chạy), vấn đề nằm ngoài cả hai lớp (sàn,
+code). Không debug thêm ở hướng "sửa CCXTClient"/"sửa health_check"/"sửa
+main.py" cho việc này — không phải chỗ hỏng.
 
 ## Việc còn treo, theo thứ tự ưu tiên
 
