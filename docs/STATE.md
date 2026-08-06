@@ -5,82 +5,69 @@
 
 ## Đang ở đâu
 
-- Phase 1–8 xong. Phase 9 (broker) viết lại từ Bybit sang **Binance qua
-  ccxt** ngày 2026-08-06 — xem "Đổi sàn" dưới đây. 178 passed / 4 skipped.
+- Phase 1–8 xong. Phase 9 (broker) chuyển từ Bybit sang **Binance qua
+  ccxt** (2026-08-06, xem `docs/DECISIONS.md`). 193 passed / 4 skipped.
 - Forward test chạy từ 2026-08-06, cấu hình đóng băng, launchd hằng ngày.
-  Mốc đánh giá: 2026-11-06 / 2027-02-06 / 2027-08-06. KHÔNG bị ảnh hưởng
-  bởi đổi sàn — `forward/logger.py` không dùng `broker/`.
-- Cổng: `CLAUDE.md` #12 sửa ngày 2026-08-06 — xây tầng thực thi ở **testnet**
-  được, **mainnet** bị chặn tới 2027-08-06.
+  Mốc đánh giá: 2026-11-06 / 2027-02-06 / 2027-08-06. Không đụng tới trong
+  phiên này.
+- Cổng: `CLAUDE.md` #12 — xây tầng thực thi ở **testnet** được, **mainnet**
+  bị chặn tới 2027-08-06.
 
-## Đổi sàn Bybit -> Binance (ccxt) — 2026-08-06
+## Testnet đang bị chặn — KHÔNG PHẢI lỗi Binance, KHÔNG PHẢI lỗi code
 
-Bybit chặn theo khu vực (`retCode 10024`) từ môi trường vận hành — không
-kết nối được cả testnet lẫn mainnet, kể cả public endpoint. Chi tiết đầy
-đủ + lý do kỹ thuật: `docs/DECISIONS.md`, mục "Đổi sàn Bybit -> Binance
-(ccxt)".
+Chặn ở tầng tài khoản GitHub. Đã xác nhận trước đó bằng gọi thật:
+`exchange_reachable` OK (mạng/API Binance testnet sống bình thường,
+155ms), vấn đề nằm ngoài cả hai lớp (sàn, code). Không debug thêm ở
+hướng "sửa CCXTClient"/"sửa health_check" cho việc này — không phải chỗ
+hỏng. Mọi việc cần key Binance testnet thật (nghiệm thu submit_order/
+cancel_order/idempotency qua mạng, mục 1 cũ trong danh sách treo) **tạm
+dừng**, không phải ưu tiên hiện tại — xem "Việc còn treo" bên dưới, thứ
+tự đã đổi để tránh nó.
 
-Tóm tắt việc đã làm:
-- `broker/ccxt_client.py::CCXTClient` — implementation đầy đủ, thay
-  `broker/bybit_client.py` (giữ lại, đánh dấu deprecated trong docstring,
-  không xoá — bằng chứng quyết định).
-- `broker/base.py::ExchangeClient` bỏ `subscribe_klines`/`subscribe_executions`
-  — chuyển hẳn WebSocket -> REST polling.
-- `data/market_data.py` — bỏ heartbeat/`is_feed_alive`/cache, `get_latest_kline()`
-  giờ luôn REST trực tiếp.
-- `broker/position_tracker.py` — bỏ `on_execution()` (đường push không
-  còn tồn tại), thêm `poll()` (cùng logic `reconcile_on_startup()`, gọi
-  định kỳ từ main loop — Phase 10 chưa xây, main loop sẽ cần gọi
-  `position_tracker.poll()` mỗi vòng).
-- `broker/order_executor.py` — **0 thay đổi logic**, xác nhận bằng test
-  cũ pass nguyên vẹn + đọc lại từng lệnh gọi ABC. 1 dòng comment sửa (tên
-  cơ chế cũ đã xoá).
-- `config/settings.yaml`: `exchange.name: binance`. `exchange.testnet` giữ
-  nguyên tên (không thêm field `sandbox` trùng nghĩa).
-- `ops/health_check.py` đọc `exchange.name` từ config thay vì hardcode
-  Bybit; env var `BYBIT_API_KEY/SECRET/TESTNET` -> `EXCHANGE_API_KEY/SECRET/TESTNET`.
-  Fallback đọc tên `BYBIT_*` cũ đã bỏ (2026-08-06, ngay sau khi thêm) —
-  chỉ đọc `EXCHANGE_*`, thiếu biến nào thì `exchange_authenticated` FAIL
-  và nêu đúng tên biến đó, không đoán/không im lặng dùng giá trị cũ.
-  `ops/RUNBOOK.md` cập nhật theo (mục "Mất WebSocket" -> "Mất dữ liệu giá
-  (REST polling thất bại)", mục "Xác thực Bybit thất bại" -> "Xác thực
-  sàn thất bại", tổng quát hoá).
-- Test mới/viết lại: `tests/test_ccxt_client.py` (31 test, mới),
-  `tests/test_health_check.py` (15 test, mới — trọng tâm là FAIL đúng lúc:
-  thiếu key/key sai/đổi sàn/aggregate không xanh nhờ đa số/fallback BYBIT_*
-  đã bỏ hẳn),
-  `tests/test_market_data.py`, `tests/test_position_tracker.py` (viết lại
-  theo REST polling).
+## Việc còn treo, theo thứ tự ưu tiên (cập nhật — tránh nhánh bị chặn testnet)
 
-**Chưa có credential Binance thật** — `.env` có `EXCHANGE_API_KEY`/
-`EXCHANGE_API_SECRET` để trống, key Bybit cũ trong `.env` giờ vestigial
-(đã biết không hợp lệ từ trước, xem lịch sử Phase 9). `check_exchange_reachable`
-xác nhận OK qua mạng thật (155ms, testnet.binance.vision);
-`check_exchange_authenticated` FAIL đúng lý do (thiếu key, không phải bug)
-— chưa nghiệm thu được phần cần auth thật (submit_order/cancel_order/
-get_open_orders/get_balance/get_positions qua mạng) cho tới khi có key
-Binance testnet thật.
-
-## Việc còn treo, theo thứ tự ưu tiên
-
-1. **Điền `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` (Binance testnet) vào
-   `.env`** rồi chạy lại checklist nghiệm thu cần mạng thật cho
-   `CCXTClient` (submit_order thật, cancel_order thật, idempotency qua
-   `clientOrderId` trùng — retCode/error thật của Binance chưa xác nhận,
-   chỉ có Bybit's 401/10003 đã biết từ trước) — cùng mức độ nghiêm ngặt đã
-   làm với Bybit ở Phase 9 ("xác nhận bằng output thật, không suy luận").
-2. Phase 10 (main loop) — khi viết, nhớ gọi `position_tracker.poll()` mỗi
-   vòng (đường cập nhật vị thế duy nhất bây giờ, không còn push).
-3. 4 test skip trong `test_hmm.py`.
-4. Lỗi mypy trong `test_forward_logger.py` (8 lỗi, không liên quan đổi
-   sàn — pre-existing, chưa ai xử lý).
-5. Copy `phase-12b-harness-engineering.md` và `phase-12c-shadow-deploy.md`
+1. ~~`tests/test_forward_golden.py`~~ — **ĐÃ CÓ, đã xanh.** Được giao lại
+   là "chưa có, quan trọng nhất" nhưng kiểm tra trực tiếp (file tồn tại,
+   `git log` cho thấy đã commit ở `479495d`, có trên `origin/main`, chạy
+   `pytest tests/test_forward_golden.py` PASS) không khớp — đã báo lại
+   thay vì âm thầm build lại. Không có việc gì để làm ở mục này; đã nằm
+   trong danh sách 5 test bắt buộc ở CLAUDE.md #15 từ trước phiên này.
+2. **4 test skip trong `test_hmm.py`** — ưu tiên thật hiện tại.
+   `hmm_engine.py` là thứ forward test phụ thuộc trực tiếp; `test_look_ahead`
+   xanh chỉ chứng minh không có look-ahead bias, KHÔNG phủ BIC selection,
+   gán nhãn regime, hay bộ lọc ổn định (`stability_bars`/flicker). Độ phủ
+   thật thấp hơn con số "193 passed" gợi ý.
+3. **Lỗi mypy trong `tests/test_forward_logger.py`** (8 lỗi, pre-existing,
+   không ai xử lý qua nhiều phiên) — nợ kỹ thuật tồn đọng.
+4. **`prompts/phase-10-main-loop.md`** — xây được và test được bằng
+   `--dry-run`, KHÔNG cần sàn thật. Chỉ phần nghiệm thu đặt lệnh thật mới
+   cần testnet (bị chặn, xem trên) — không chặn việc xây main loop.
+5. Điền `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` + nghiệm thu `CCXTClient`
+   qua mạng thật — **TẠM DỪNG**, chờ testnet hết bị chặn ở tầng tài khoản
+   GitHub. Không phải việc kế tiếp.
+6. Copy `phase-12b-harness-engineering.md` và `phase-12c-shadow-deploy.md`
    vào `prompts/` (đã soạn, chưa có trong repo).
+
+## Đổi sàn Bybit -> Binance (ccxt) — 2026-08-06 (tóm tắt, chi tiết ở DECISIONS.md)
+
+Bybit chặn theo khu vực (`retCode 10024`), không kết nối được cả testnet
+lẫn mainnet kể cả public endpoint. Thay bằng `broker/ccxt_client.py::CCXTClient`,
+`broker/bybit_client.py` giữ lại (deprecated, không xoá — bằng chứng
+quyết định). WebSocket -> REST polling toàn bộ (`ExchangeClient` bỏ
+`subscribe_klines`/`subscribe_executions`; `PositionTracker.on_execution()`
+bỏ, thêm `poll()` — Phase 10 main loop PHẢI gọi `position_tracker.poll()`
+mỗi vòng, đây là đường cập nhật vị thế duy nhất bây giờ).
+`broker/order_executor.py` — 0 thay đổi logic (ABC không rò rỉ chi tiết
+sàn). `ops/health_check.py` đọc `exchange.name` từ config, env var
+`EXCHANGE_API_KEY/SECRET/TESTNET` — fallback đọc tên `BYBIT_*` cũ đã BỎ
+HẲN (không còn đọc, kể cả làm dự phòng) — thiếu biến nào thì
+`exchange_authenticated` FAIL và nêu đúng tên biến đó.
 
 ## Việc tiếp theo
 
-Key Binance testnet thật -> nghiệm thu CCXTClient qua mạng -> Phase 10
-(main loop, gọi `position_tracker.poll()` mỗi vòng thay vì subscribe).
+test_hmm.py (4 skip) -> mypy test_forward_logger.py -> Phase 10 main loop
+(`--dry-run`, không cần testnet) -> [testnet hết bị chặn] -> nghiệm thu
+CCXTClient qua mạng thật.
 
 ## Quy tắc đã học, không lặp lại
 
@@ -88,7 +75,13 @@ Key Binance testnet thật -> nghiệm thu CCXTClient qua mạng -> Phase 10
   Thanh khoản testnet là nhân tạo.
 - Không bao giờ log giá trị key/secret, kể cả một phần.
 - Không bao giờ hai tiến trình cùng khả năng đặt lệnh trên một tài khoản.
-- Khả năng truy cập theo khu vực của một sàn có thể đổi bất kỳ lúc nào,
-  không cảnh báo trước — đây là lý do `ExchangeClient` ABC tồn tại; giữ
-  ranh giới đó sạch (không rò rỉ chi tiết sàn lên tầng trên) không phải
-  kỹ thuật thừa, nó vừa được chứng minh cần thiết trong thực tế.
+- Khả năng truy cập theo khu vực/tài khoản có thể chặn bất kỳ lớp nào
+  (sàn — Bybit; hạ tầng — GitHub) bất kỳ lúc nào, không cảnh báo trước.
+  Khi bị chặn, xác định ĐÚNG lớp bị chặn trước khi debug (đừng sửa code
+  để "chữa" một chặn ở tầng tài khoản) — chuyển sang việc không phụ thuộc
+  lớp đó, quay lại khi hết chặn, không đoán/không chờ không việc gì.
+- Trước khi "xây lại" một file bị báo là thiếu/chưa có: kiểm tra thật
+  (file tồn tại? đã commit? có trên remote? test pass?) rồi mới tin —
+  CLAUDE.md #16 (đột biến trước khi tin test) áp dụng tương tự cho việc
+  tin một báo cáo trạng thái: xác minh trước khi hành động, không phải
+  sau.
