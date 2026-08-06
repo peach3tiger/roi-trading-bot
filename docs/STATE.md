@@ -90,17 +90,50 @@ phải chưa xây:**
 - submit_order/close_position/modify_stop thật qua mạng — cần
   `EXCHANGE_API_KEY`/`SECRET` thật (mục "Testnet đang bị chặn" dưới).
 
-## `tests/test_forward_golden.py` — được giao lại lần 2 là "chưa có", VẪN đã có (2026-08-07)
+## `tests/test_forward_golden.py` — được giao lại LẦN 3 là "chưa có", VẪN đã có (2026-08-07)
 
 Kiểm tra lại (file tồn tại, `git log` cho thấy đã commit ở `479495d`, có
 trên remote, `pytest` PASS, đã có trong CLAUDE.md #15 dòng 138) — khớp y
-hệt lần kiểm tra trước. Không có gì để xây thêm. Việc THẬT làm thêm lần
-này: kiểm chứng bằng mutation đúng yêu cầu CLAUDE.md #16 — sửa
-`core/regime_strategies.py::_EMA_PERIOD` (50 → 40), chạy lại golden test,
-FAIL đúng ngay bar đầu tiên có strategy LowVol/MidVol chạm EMA
-(`hmm_allocation` lệch `0.95` → `0.60` tại `bar_index=153`), sau đó revert
-sạch (`git diff --stat` rỗng). Xác nhận thật: test này bắt được đúng loại
-thay đổi nó được thiết kế để bắt.
+hệt hai lần kiểm tra trước. Không có gì để xây thêm.
+
+**Việc THẬT, mới, làm ở lần giao này — kiểm tra hồi tố Phase 10 có đổi
+hành vi forward hay không** (yêu cầu cụ thể, khác hai lần trước):
+`git worktree add /tmp/pre-p10 3edc6d4` (commit cha trực tiếp của `877ddc2`
+— Phase 10), chạy `_run_golden_pipeline()` (hàm thật trong chính
+`tests/test_forward_golden.py`, không viết lại pipeline riêng) ở CẢ HAI
+cây trên cùng dữ liệu tổng hợp seed cố định, so JSON kết quả field-by-field
+bằng script độc lập (không qua assert của chính test, để không tự tin
+nhầm vào logic so sánh của bản thân file test).
+
+**Kết quả: KHỚP 100%** — 60/60 bar, cả 9 field categorical/string
+(`bar_index`/`regime_id`/`regime_label`/`regime_is_confirmed`/
+`is_flickering`/`hmm_allocation`/`trend_gate_state`/`trend_gate_cap`/
+`final_allocation`) khớp tuyệt đối ở MỌI bar, `regime_probability` lệch
+đúng `0.0` (không chỉ trong dung sai — bit-for-bit giống hệt). Đối chiếu
+thêm: golden baseline đã commit (`tests/golden/forward_baseline.json`)
+cũng khớp 100% với cả hai lần chạy — ba nguồn (baseline đã commit,
+pre-Phase-10, post-Phase-10/HEAD) đồng nhất tuyệt đối.
+
+**Kết luận: Phase 10 KHÔNG đổi hành vi forward pipeline.** Đúng như phân
+tích cấu trúc trước khi chạy thật: `git diff --stat 3edc6d4 HEAD -- core/`
+chỉ có `core/signal_generator.py` đổi (25 dòng — `generate()` đổi kiểu
+trả về thành `SignalGeneratorResult`), và `_run_golden_pipeline()` KHÔNG
+dùng `SignalGenerator` — nó gọi thẳng
+`hmm_engine`/`orchestrator`/`trend_gate`/`compose_layer_allocations`,
+bỏ qua lớp bọc đó hoàn toàn. `main.py` (file mới), `broker/order_executor.py`
+(chỉ thêm `restore_known_stop()`, không sửa method cũ), `config/settings.yaml`
+(chỉ thêm section `execution`, không đổi giá trị `hmm`/`trend_gate`/
+`strategy` mà golden test dùng) — không file nào trong ba file đó ảnh
+hưởng pipeline forward. Thí nghiệm forward hiện tại (`forward/log.csv`)
+**còn nguyên vẹn**, không cần regenerate golden, không cần ghi mục "thí
+nghiệm kết thúc" vào `docs/DECISIONS.md` (không có gì kết thúc). Đã dọn
+worktree (`git worktree remove /tmp/pre-p10`).
+
+**Mutation (CLAUDE.md #16), làm lại lần nữa cho lần giao này:** sửa
+`core/regime_strategies.py::_EMA_PERIOD` (50 → 40), golden test FAIL
+đúng bar_index=153 (`hmm_allocation` lệch `0.95` → `0.60`, cùng vị trí cả
+hai lần chạy), revert sạch (`git diff --stat` rỗng), full suite 227
+passed lại.
 
 ## Git remote — đã đổi tài khoản, ĐÃ GIẢI QUYẾT (2026-08-07)
 

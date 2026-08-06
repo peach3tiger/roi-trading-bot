@@ -851,3 +851,50 @@ mạng.
 
 227 passed / 0 skipped. ruff + mypy sạch toàn bộ 52 file (bao gồm
 `test_forward_logger.py`, đã sửa xong ở mục trước).
+
+---
+
+## Kiểm tra hồi tố: Phase 10 có đổi hành vi forward pipeline không? (2026-08-07)
+
+Yêu cầu: xác nhận bằng thực nghiệm (không phải đọc code) rằng Phase 10
+(`877ddc2`, xem mục trên) không âm thầm đổi output pipeline forward giữa
+chừng thí nghiệm 12 tháng.
+
+**Phương pháp:** `git worktree add /tmp/pre-p10 3edc6d4` (commit cha trực
+tiếp của `877ddc2`). Chạy `_run_golden_pipeline()` — hàm THẬT trong
+`tests/test_forward_golden.py`, không viết lại pipeline riêng cho việc
+này — ở cả `/tmp/pre-p10` lẫn HEAD hiện tại, cùng dữ liệu tổng hợp seed cố
+định (`_SEED=12345`). So JSON kết quả bằng script độc lập bên ngoài, field-
+by-field, không qua logic assert của chính file test (tránh tự tin nhầm
+vào công cụ đang được dùng để kiểm tra chính nó).
+
+**Kết quả: KHỚP 100%.** 60/60 bar, mọi field categorical/string khớp
+tuyệt đối, `regime_probability` lệch đúng `0.0` (bit-for-bit, không chỉ
+trong dung sai `1e-6` của test). Đối chiếu thêm với
+`tests/golden/forward_baseline.json` đã commit — cũng khớp 100% với cả
+hai lần chạy. Ba nguồn (baseline đã commit, pre-Phase-10, HEAD) đồng nhất.
+
+**Vì sao khớp — xác nhận bằng `git diff --stat 3edc6d4 HEAD -- core/`**:
+Phase 10 chỉ đổi MỘT file trong `core/` — `core/signal_generator.py`
+(`generate()` đổi kiểu trả về thành `SignalGeneratorResult`, thêm
+`regime_state`/`is_flickering`). `_run_golden_pipeline()` KHÔNG dùng
+`SignalGenerator` — nó gọi thẳng `HMMRegimeEngine`/`StrategyOrchestrator`/
+`StructuralTrendGate`/`compose_layer_allocations`, bỏ qua lớp bọc đó hoàn
+toàn. `main.py` (file mới, không sửa `core/`), `broker/order_executor.py`
+(chỉ thêm `restore_known_stop()`, không sửa method cũ nào), `config/settings.yaml`
+(chỉ thêm section `execution` mới, không đổi bất kỳ giá trị `hmm`/
+`trend_gate`/`strategy` nào golden test dùng — golden test tự khai báo
+tham số riêng, không đọc `settings.yaml`) — không file nào trong ba file
+đó chạm tới đường pipeline forward thật sự đi qua.
+
+**Kết luận:** Thí nghiệm forward (`forward/log.csv`, xem mục "Forward test
+— tiền đăng ký") **còn nguyên vẹn qua Phase 10** — không có gì kết thúc,
+không cần regenerate golden baseline, không cần đóng thí nghiệm. Ghi lại
+việc này (dù kết luận là "không đổi gì") vì đây là loại kiểm tra CLAUDE.md
+tinh thần #16 muốn thấy trước khi tin — "golden test hiện đang PASS" một
+mình không đủ bằng chứng nó BẮT ĐƯỢC đúng thay đổi Phase 10 tạo ra (có
+thể pipeline forward tình cờ không đi qua đường Phase 10 sửa, may rủi
+thay vì thiết kế) — kiểm tra hồi tố kiểu này xác nhận trực tiếp, không
+suy luận gián tiếp từ "test đang xanh".
+
+Dọn `git worktree remove /tmp/pre-p10` sau khi xong.
