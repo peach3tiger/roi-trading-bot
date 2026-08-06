@@ -404,3 +404,27 @@ def test_modify_stop_is_per_symbol() -> None:
     assert executor.modify_stop("BTCUSDT", Decimal("60000")) is True
     # Symbol khác chưa có stop nào — không bị chặn bởi stop của BTCUSDT.
     assert executor.modify_stop("ETHUSDT", Decimal("3000")) is True
+
+
+def test_restore_known_stop_then_modify_stop_still_enforces_tighten_only() -> None:
+    """Mô phỏng đúng kịch bản khôi phục sau restart (main.py đọc
+    state_snapshot.json): restore_known_stop() nạp lại stop đã biết, rồi
+    modify_stop() phải VẪN từ chối một giá trị nới rộng hơn — không được
+    coi restart là "chưa từng có stop" (bug đúng loại restore_known_stop
+    tồn tại để ngăn)."""
+    executor, _ = _make_executor()
+    executor.restore_known_stop("BTCUSDT", Decimal("61000"))
+
+    assert executor.modify_stop("BTCUSDT", Decimal("59000")) is False  # nới rộng -> vẫn từ chối
+    assert executor.modify_stop("BTCUSDT", Decimal("61500")) is True  # siết hơn -> OK
+
+
+def test_restore_known_stop_does_not_go_through_tighten_check() -> None:
+    """restore_known_stop() là NẠP LẠI trạng thái, không phải một quyết
+    định sửa stop — không tự so sánh với giá trị cũ (không có giá trị cũ
+    nào để so lúc khởi động lại)."""
+    executor, _ = _make_executor()
+    executor.restore_known_stop("BTCUSDT", Decimal("70000"))
+    executor.restore_known_stop("BTCUSDT", Decimal("50000"))  # "nới rộng" nhưng vẫn phải áp dụng được
+
+    assert executor._current_stops["BTCUSDT"] == Decimal("50000")

@@ -1,0 +1,67 @@
+# ops/regime-trader-crypto.service — mẫu systemd unit cho triển khai KHÔNG
+# qua Docker (chạy main.py trực tiếp trên VPS/host qua .venv). Nếu đã dùng
+# ops/docker-compose.yml, KHÔNG cần file này — docker-compose.yml đã có
+# `restart: unless-stopped` riêng, xem ops/RUNBOOK.md.
+#
+# Cài đặt:
+#   sudo cp ops/regime-trader-crypto.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now regime-trader-crypto
+#
+# Sửa User=/WorkingDirectory=/ExecStart= bên dưới cho đúng máy triển khai
+# trước khi cài — các đường dẫn mẫu dưới đây giả định checkout tại
+# /opt/regime-trader-crypto, user hệ thống riêng "regime-trader" (không
+# chạy bằng root — CLAUDE.md không nói rõ, chọn phương án giảm rủi ro).
+#
+# `.env` (EXCHANGE_API_KEY/EXCHANGE_API_SECRET/EXCHANGE_TESTNET, xem
+# .env.example) đọc qua EnvironmentFile — KHÔNG đặt trong unit file này
+# (unit file thường world-readable qua `systemctl cat`; `.env` phải giữ
+# quyền 600, ngoài phạm vi systemd quản lý).
+
+[Unit]
+Description=regime-trader-crypto — bot phân bổ danh mục theo chế độ biến động (BTC/USDT spot)
+Documentation=file:///opt/regime-trader-crypto/ops/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=regime-trader
+Group=regime-trader
+WorkingDirectory=/opt/regime-trader-crypto
+EnvironmentFile=/opt/regime-trader-crypto/.env
+Environment=CONFIG_PATH=config/settings.yaml
+Environment=MODEL_PATH=models/hmm_model.pkl
+Environment=STATE_DIR=state
+Environment=LOG_DIR=logs
+ExecStartPre=/opt/regime-trader-crypto/.venv/bin/python ops/health_check.py
+ExecStart=/opt/regime-trader-crypto/.venv/bin/python main.py
+# KHÔNG --live ở đây — mainnet yêu cầu gõ tay chuỗi xác nhận đầy đủ
+# (CLAUDE.md bất biến #6), không tương thích với khởi động không người
+# trông của systemd. Đổi sang mainnet là một thao tác thủ công riêng,
+# không phải cấu hình unit này.
+
+# Thị trường 24/7 — tiến trình SẼ crash-restart giữa lúc có lệnh đang chờ
+# (bình thường, xem ops/RUNBOOK.md "Khôi phục sau crash"). Auto-restart
+# vô điều kiện, nhưng có giới hạn tốc độ (StartLimit*) để không crash-loop
+# vô hạn nếu nguyên nhân là cấu hình sai/lỗi lặp lại — health check FAIL
+# lặp lại liên tục trong `journalctl` là dấu hiệu cần dừng tay, không phải
+# cứ để systemd tự thử mãi.
+Restart=always
+RestartSec=15
+StartLimitIntervalSec=600
+StartLimitBurst=8
+
+# SIGTERM trước, đợi rồi mới SIGKILL — cho main.py kịp chạy nhánh tắt
+# (ghi state_snapshot.json, KHÔNG đóng vị thế — xem main.py::run_live_loop
+# và Brain-Crypto-Bybit.md §Phase 7 "Tắt").
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Không root, không ghi ngoài phạm vi cần thiết.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/regime-trader-crypto/logs /opt/regime-trader-crypto/state /opt/regime-trader-crypto/models /opt/regime-trader-crypto/data/cache
+
+[Install]
+WantedBy=multi-user.target

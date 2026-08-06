@@ -16,13 +16,15 @@ import argparse
 import json
 import logging
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS_PATH = Path("config/settings.yaml")
 
@@ -355,17 +357,70 @@ def build_orchestrator(settings: dict[str, Any]) -> Any:
     )
 
 
-def build_risk_manager(settings: dict[str, Any]) -> Any:
+def build_risk_manager(settings: dict[str, Any], *, halt_lock_path: Path | None = None) -> Any:
     """`RiskManager(config: dict)` nhận thẳng `settings["risk"]` — khác quy
     ước "named Decimal params" của các builder khác, vì đó là chữ ký spec
-    §5.7 (xem docstring core/risk_manager.py::RiskManager). Builder này vẫn
-    tồn tại (dù chưa có caller nào trong repo — main loop là Phase 10/
-    phase-10-main-loop.md, chưa implement) để giữ đúng quy ước "settings.yaml
-    → object chỉ dịch ở một chỗ" khi Phase 10 cần tới.
+    §5.7 (xem docstring core/risk_manager.py::RiskManager).
+
+    `halt_lock_path=None` giữ mặc định của `RiskManager` (`trading_halted.lock`
+    tại CWD) — `run_live_loop` truyền `${STATE_DIR}/trading_halted.lock`
+    tường minh (khớp `ops/RUNBOOK.md`), test truyền `tmp_path/...`.
     """
     from core.risk_manager import RiskManager
 
-    return RiskManager(settings["risk"])
+    return RiskManager(settings["risk"], halt_lock_path=halt_lock_path)
+
+
+def build_exchange_client(settings: dict[str, Any], *, testnet: bool) -> Any:
+    """Credential đọc từ env `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` — KHÔNG
+    BAO GIỜ từ settings.yaml/CLI (CLAUDE.md bất biến #6: không hardcode
+    credentials, không log kể cả một phần). Đọc đúng tên biến hiện tại của
+    `ops/health_check.py` sau khi bỏ fallback `BYBIT_*` (xem docs/DECISIONS.md)
+    — dùng chung một quy ước tên biến giữa hai điểm vào."""
+    import os
+
+    from broker.ccxt_client import CCXTClient
+
+    exch = settings["exchange"]
+    return CCXTClient(
+        exchange_id=exch["name"],
+        symbol=exch["symbol"],
+        api_key=os.environ.get("EXCHANGE_API_KEY") or None,
+        api_secret=os.environ.get("EXCHANGE_API_SECRET") or None,
+        testnet=testnet,
+        quote_asset=exch["quote_asset"],
+    )
+
+
+def build_market_data_service(settings: dict[str, Any], exchange_client: Any) -> Any:
+    from data.market_data import MarketDataService
+
+    exch = settings["exchange"]
+    return MarketDataService(exchange_client, exch["symbol"], exch["timeframe"])
+
+
+def build_order_executor(settings: dict[str, Any], exchange_client: Any) -> Any:
+    from broker.order_executor import OrderExecutor
+
+    ex = settings["execution"]
+    return OrderExecutor(
+        exchange_client,
+        limit_offset_pct=Decimal(str(ex["limit_offset_pct"])),
+        timeout_seconds=int(ex["order_timeout_seconds"]),
+    )
+
+
+def build_signal_generator(
+    settings: dict[str, Any], hmm_engine: Any, *, halt_lock_path: Path | None = None
+) -> Any:
+    from core.signal_generator import SignalGenerator
+
+    return SignalGenerator(
+        hmm_engine,
+        build_trend_gate(settings),
+        build_orchestrator(settings),
+        build_risk_manager(settings, halt_lock_path=halt_lock_path),
+    )
 
 
 # ----------------------------------------------------------------------
@@ -649,6 +704,509 @@ def run_ablation(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
     return {"csv": str(csv_path), "rows": rows}
 
 
+# ----------------------------------------------------------------------
+# Live loop — Phase 10 (prompts/phase-10-main-loop.md)
+# ----------------------------------------------------------------------
+
+# Đủ cho EMA50/ATR14 hội tụ mà không phải tính lại toàn bộ lịch sử mỗi
+# bar — khớp forward/logger.py::_STRATEGY_BARS_LOOKBACK (cùng lý do, hai
+# module không dùng chung hằng số có chủ đích, xem _latest_closed_bar_date
+# dưới đây).
+_STRATEGY_BARS_LOOKBACK = 300
+
+
+def _latest_closed_bar_date(now: datetime) -> Any:
+    """Bar ngày gần nhất đã ĐÓNG tại thời điểm `now` — CLAUDE.md bất biến
+    #10, ranh giới ngày LUÔN 00:00 UTC, không có khái niệm giờ giao dịch.
+
+    Trùng logic `forward/logger.py::latest_closed_bar_date` — CỐ TÌNH
+    không import từ đó: `forward/` tự cô lập hoàn toàn khỏi phần còn lại
+    của hệ thống (docstring `forward/logger.py`: "KHÔNG import broker.* ở
+    bất cứ đâu trong module này"), và live loop không nên phụ thuộc NGƯỢC
+    vào forward/ dù chỉ một hàm thuần vô hại — trùng lặp 4 dòng còn rẻ hơn
+    phá vỡ ranh giới đó (forward test là thí nghiệm tiền đăng ký 12 tháng,
+    xem docs/DECISIONS.md).
+    """
+    import pandas as pd
+
+    now_utc = now.astimezone(timezone.utc)
+    today = pd.Timestamp(now_utc.date(), tz="UTC")
+    return today - pd.Timedelta(days=1)
+
+
+@dataclass
+class LiveLoopState:
+    """Ghi vào `state_snapshot.json` MỖI BAR (spec Phase 7 — không chỉ lúc
+    thoát): thị trường 24/7, tiến trình CÓ THỂ crash bất cứ lúc nào giữa
+    hai bar, và khôi phục sai `current_stop_loss` sau restart có thể âm
+    thầm vi phạm CLAUDE.md bất biến #5 (xem
+    broker/order_executor.py::restore_known_stop).
+    """
+
+    last_processed_bar: str | None  # ISO date "2026-08-06", None = chưa xử lý bar nào
+    current_stop_loss: str | None  # str(Decimal), None = đang flat
+    current_allocation_pct: str | None  # str(Decimal)
+    current_regime_id: int | None
+    current_regime_label: str | None
+    session_started_at_utc: str  # đặt lại mỗi lần run_live_loop() khởi động, KHÔNG khôi phục từ snapshot cũ
+    written_at_utc: str
+
+
+def write_state_snapshot(path: Path, state: LiveLoopState) -> None:
+    """Ghi NGUYÊN TỬ (tmp file + rename) — tiến trình crash đúng giữa lúc
+    ghi không được để lại `state_snapshot.json` nửa vời (JSON hỏng khiến
+    lần khởi động sau không đọc được, mất hết trạng thái đã biết)."""
+    from dataclasses import asdict
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def load_state_snapshot(path: Path) -> LiveLoopState | None:
+    """`None` nếu chưa tồn tại HOẶC hỏng — coi như phiên mới, không raise
+    (một `state_snapshot.json` hỏng không được phép chặn khởi động lại,
+    chỉ mất khả năng khôi phục allocation/stop đã biết)."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return LiveLoopState(**data)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning("%s hỏng/không đọc được (%s) — bỏ qua, coi như phiên mới.", path, exc)
+        return None
+
+
+def process_one_bar(
+    *,
+    symbol: str,
+    signal_generator: Any,
+    order_executor: Any,
+    position_tracker: Any,
+    ohlcv: Any,
+    features: Any,
+    bar_ts: Any,
+    state: LiveLoopState,
+    dry_run: bool,
+) -> LiveLoopState:
+    """Xử lý ĐÚNG MỘT bar đã đóng. Tách khỏi vòng lặp poll để test được
+    bằng fake, không cần `time.sleep`/vòng lặp vô hạn thật — xem
+    tests/test_main_loop.py.
+
+    Thứ tự (spec Phase 7 §Vòng lặp chính, điều chỉnh cho REST polling —
+    không có bước "nhận bar qua WebSocket", xem docs/DECISIONS.md mục
+    "Đổi sàn Bybit -> Binance (ccxt)"):
+    1. Reset ranh giới ngày/tuần của risk_manager (CLAUDE.md bất biến #10)
+       — mỗi bar LÀ một ngày mới (timeframe 1D) nên reset_daily() mỗi
+       bar; reset_weekly() khi bar rơi đúng Thứ Hai.
+    2. Kiểm tra stop loss đã biết có bị breach chưa — spot KHÔNG có stop
+       order native trên sàn (§ ghi chú broker/order_executor.py), bot
+       phải tự theo dõi mỗi bar bằng giá đóng.
+    3. Breach -> đóng vị thế, DỪNG ở đây, không sinh signal mới bar này.
+    4. Không breach -> SignalGenerator.generate() -> RiskDecision.
+    5. approved -> submit_order (trừ dry_run) + modify_stop.
+       rejected -> chỉ log lý do, KHÔNG đổi allocation/stop đang có.
+    6. position_tracker.poll() đối soát lại (trừ dry_run — không có lệnh
+       thật nào vừa gửi để đối soát).
+
+    KHÔNG tự ghi `state_snapshot.json` — caller (`run_live_loop`) làm việc
+    đó, để hàm này test được thuần bằng cách so state trả về, không phải
+    đọc lại filesystem.
+
+    Lỗi HMM ("giữ nguyên regime hiện tại", spec §Xử lý lỗi): KHÔNG bắt
+    riêng ở đây — nếu `signal_generator.generate()` raise, hàm này raise
+    theo, và caller (`run_live_loop`) bắt ở vòng ngoài rồi GIỮ NGUYÊN
+    `state` đã trả về ở lần gọi trước (không ghi đè) — hiệu quả giống hệt
+    "giữ nguyên regime" mà không cần hai lớp try/except lồng nhau cho
+    cùng một kết quả.
+    """
+    risk_manager = signal_generator.risk_manager
+    risk_manager.reset_daily()
+    if bar_ts.weekday() == 0:  # Thứ Hai — CLAUDE.md bất biến #10
+        risk_manager.reset_weekly()
+
+    close_price = Decimal(str(ohlcv.loc[bar_ts, "close"]))
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    current_stop = Decimal(state.current_stop_loss) if state.current_stop_loss else None
+    if current_stop is not None and close_price <= current_stop:
+        logger.warning(
+            "STOP LOSS BREACH %s: giá đóng %s <= stop %s — đóng vị thế.", symbol, close_price, current_stop
+        )
+        if dry_run:
+            logger.info("[DRY-RUN] sẽ đóng vị thế %s (stop breach) — không đặt lệnh thật.", symbol)
+        else:
+            result = order_executor.close_position(symbol)
+            logger.info(
+                "close_position(%s) -> order_id=%s status=%s", symbol, result.order_id, result.status
+            )
+            position_tracker.poll()
+        return replace(
+            state,
+            last_processed_bar=bar_ts.date().isoformat(),
+            current_stop_loss=None,
+            current_allocation_pct="0",
+            written_at_utc=now_iso,
+        )
+
+    current_allocation = (
+        Decimal(state.current_allocation_pct) if state.current_allocation_pct else Decimal("0")
+    )
+    bars_window = ohlcv.loc[:bar_ts].tail(_STRATEGY_BARS_LOOKBACK)
+    features_so_far = features.loc[:bar_ts]
+
+    balance = order_executor.exchange_client.get_balance()
+    positions = {p.symbol: p for p in order_executor.exchange_client.get_positions()}
+    qty = positions[symbol].qty if symbol in positions else Decimal("0")
+    equity = balance.total + qty * close_price
+    # daily_pnl/weekly_pnl/peak_equity/drawdown: KHÔNG được risk_manager.
+    # validate_signal() đọc (nó tự theo dõi drawdown NỘI BỘ qua
+    # circuit_breaker.update(portfolio_state.equity, ...) — chỉ trường
+    # .equity thật sự ảnh hưởng quyết định, xác nhận bằng đọc lại
+    # core/risk_manager.py). Điền cho mục đích log/dashboard tương lai
+    # (Phase 8), không phải vì validate_signal cần chúng.
+    from core.risk_manager import PortfolioState
+
+    portfolio_state = PortfolioState(
+        equity=equity,
+        cash=balance.available,
+        available_balance=balance.available,
+        positions=positions,
+        daily_pnl=Decimal("0"),
+        weekly_pnl=Decimal("0"),
+        peak_equity=equity,
+        drawdown=Decimal("0"),
+        circuit_breaker_status={},
+        flicker_rate=signal_generator.hmm_engine.get_regime_flicker_rate(),
+    )
+
+    result = signal_generator.generate(
+        symbol, features_so_far, bars_window, current_allocation, portfolio_state
+    )
+    decision = result.decision
+    regime_id = result.regime_state.state_id
+    regime_label = result.regime_state.label
+
+    if decision.approved:
+        signal = decision.modified_signal
+        assert signal is not None
+        if decision.modifications:
+            logger.info("Signal sửa bởi risk_manager: %s", "; ".join(decision.modifications))
+        if dry_run:
+            logger.info(
+                "[DRY-RUN] signal %s %s allocation=%s stop=%s regime=%s(%s) — KHÔNG đặt lệnh thật.",
+                signal.symbol,
+                signal.direction,
+                signal.target_allocation_pct,
+                signal.stop_loss,
+                regime_id,
+                regime_label,
+            )
+        else:
+            order_result = order_executor.submit_order(signal)
+            logger.info(
+                "submit_order -> order_id=%s order_link_id=%s status=%s filled_qty=%s",
+                order_result.order_id,
+                order_result.order_link_id,
+                order_result.status,
+                order_result.filled_qty,
+            )
+            applied = order_executor.modify_stop(signal.symbol, signal.stop_loss)
+            if not applied:
+                logger.info("modify_stop(%s): không siết chặt hơn stop hiện tại — giữ nguyên.", signal.symbol)
+            position_tracker.poll()
+        new_stop = signal.stop_loss
+        new_allocation = signal.target_allocation_pct
+    else:
+        logger.warning("Signal bị risk_manager TỪ CHỐI: %s", decision.rejection_reason)
+        new_stop = current_stop
+        new_allocation = current_allocation
+
+    return LiveLoopState(
+        last_processed_bar=bar_ts.date().isoformat(),
+        current_stop_loss=str(new_stop) if new_stop is not None else None,
+        current_allocation_pct=str(new_allocation),
+        current_regime_id=regime_id,
+        current_regime_label=regime_label,
+        session_started_at_utc=state.session_started_at_utc,
+        written_at_utc=now_iso,
+    )
+
+
+def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
+    """Khởi động (spec Phase 7 §Khởi động, 10 bước) rồi vòng lặp poll REST
+    vĩnh viễn (không có "chờ thị trường mở" — CLAUDE.md bất biến #10).
+    """
+    import os
+    import signal as os_signal
+    import time
+
+    import pandas as pd
+
+    dry_run: bool = args.dry_run
+    testnet = not args.live
+    symbol = settings["exchange"]["symbol"]
+    ccxt_symbol = symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
+    poll_interval = int(settings["execution"]["poll_interval_seconds"])
+    retrain_interval_days = int(settings["hmm"]["retrain_interval_days"])
+
+    state_dir = Path(os.environ.get("STATE_DIR", "state"))
+    model_path = Path(os.environ.get("MODEL_PATH", "models/hmm_model.pkl"))
+    snapshot_path = state_dir / "state_snapshot.json"
+    halt_lock_path = state_dir / "trading_halted.lock"
+
+    logger.info("=" * 60)
+    logger.info(
+        "regime-trader-crypto — khởi động (%s, dry_run=%s)", "testnet" if testnet else "MAINNET", dry_run
+    )
+
+    # Bước 8 (spec) — kiểm tra TRƯỚC KHI làm gì khác cần mạng/tiền. Risk
+    # manager cũng tự kiểm tra lại mỗi validate_signal() (core/risk_manager.py::
+    # _is_halted) — cổng ở đây chặn SỚM HƠN, trước khi tốn một round-trip
+    # mạng nào, đúng tinh thần "fail loud" của spec.
+    if halt_lock_path.exists():
+        print(f"TỪ CHỐI KHỞI ĐỘNG: {halt_lock_path} tồn tại.")
+        print(halt_lock_path.read_text(encoding="utf-8"))
+        print("Xoá file này thủ công sau khi đã xem xét trước khi chạy lại (Brain-Crypto-Bybit.md §5.2).")
+        sys.exit(1)
+
+    # Bước 1-2 — kết nối + xác minh tài khoản + đồng bộ thời gian. Uỷ
+    # quyền cho ops/health_check.py (đã kiểm chứng bằng mạng thật, xem
+    # docs/STATE.md) thay vì viết lại cùng logic lần hai.
+    from ops.health_check import check_exchange_authenticated, check_exchange_reachable
+
+    reachable = check_exchange_reachable(Path(args.config))
+    logger.info("[%s] exchange_reachable: %s", reachable.status, reachable.detail)
+    if reachable.status == "FAIL":
+        print(f"TỪ CHỐI KHỞI ĐỘNG: không kết nối được sàn — {reachable.detail}")
+        sys.exit(1)
+
+    if not dry_run:
+        authenticated = check_exchange_authenticated(Path(args.config))
+        logger.info("[%s] exchange_authenticated: %s", authenticated.status, authenticated.detail)
+        if authenticated.status == "FAIL":
+            print(f"TỪ CHỐI KHỞI ĐỘNG: xác thực sàn thất bại — {authenticated.detail}")
+            sys.exit(1)
+    else:
+        logger.info("--dry-run: bỏ qua exchange_authenticated (không cần đặt lệnh thật).")
+
+    exchange_client = build_exchange_client(settings, testnet=testnet)
+
+    # Bước 3
+    instrument_rules = exchange_client.get_instrument_rules(symbol)
+    logger.info("InstrumentRules(%s): %s", symbol, instrument_rules)
+
+    # Bước 4 — load hoặc train (retrain nếu model cũ hơn retrain_interval_days
+    # hoặc không tồn tại/không nạp được).
+    from data.feature_engineering import compute_all_features
+    from data.history_loader import HistoryLoader
+
+    hmm_engine = build_hmm_engine(settings)
+    need_retrain = True
+    if model_path.exists():
+        try:
+            hmm_engine.load(str(model_path))
+            age_days = (datetime.now(timezone.utc) - hmm_engine.training_date).days
+            need_retrain = age_days >= retrain_interval_days
+            logger.info(
+                "Model HMM nạp từ %s — train lúc %s (%d ngày trước).",
+                model_path,
+                hmm_engine.training_date,
+                age_days,
+            )
+        except Exception:
+            logger.warning("Không nạp được model %s — sẽ train mới.", model_path, exc_info=True)
+            need_retrain = True
+
+    history_loader = HistoryLoader()
+    data_start = datetime.strptime(DEFAULT_DATA_START, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    latest_bar = _latest_closed_bar_date(now)
+    ohlcv = history_loader.load(ccxt_symbol, "1D", data_start, latest_bar.to_pydatetime())
+    feature_config = build_feature_config(settings)
+    features = compute_all_features(ohlcv, feature_config)
+
+    if need_retrain:
+        logger.info("Training HMM (%d bar)...", len(features))
+        hmm_engine.select_and_train(features)
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        hmm_engine.save(str(model_path))
+        logger.info("Đã train + lưu %s.", model_path)
+
+    # Bước 5-6 — risk manager (qua signal_generator), position tracker, đối soát.
+    from broker.position_tracker import PositionTracker
+
+    balance = exchange_client.get_balance()
+    logger.info("Số dư %s: total=%s available=%s", balance.asset, balance.total, balance.available)
+
+    order_executor = build_order_executor(settings, exchange_client)
+    position_tracker = PositionTracker(exchange_client)
+    position_tracker.reconcile_on_startup()
+
+    signal_generator = build_signal_generator(settings, hmm_engine, halt_lock_path=halt_lock_path)
+
+    # Bước 7 — khôi phục state_snapshot.json.
+    restored = load_state_snapshot(snapshot_path)
+    if restored is not None:
+        logger.info(
+            "Khôi phục state: last_processed_bar=%s allocation=%s stop=%s regime=%s",
+            restored.last_processed_bar,
+            restored.current_allocation_pct,
+            restored.current_stop_loss,
+            restored.current_regime_label,
+        )
+        if restored.current_stop_loss is not None:
+            # BẮT BUỘC trước modify_stop() đầu tiên sau restart — xem
+            # broker/order_executor.py::restore_known_stop.
+            order_executor.restore_known_stop(symbol, Decimal(restored.current_stop_loss))
+        state = replace(restored, session_started_at_utc=datetime.now(timezone.utc).isoformat())
+    else:
+        logger.info("Không có %s — bắt đầu phiên mới.", snapshot_path)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        state = LiveLoopState(
+            last_processed_bar=None,
+            current_stop_loss=None,
+            current_allocation_pct="0",
+            current_regime_id=None,
+            current_regime_label=None,
+            session_started_at_utc=now_iso,
+            written_at_utc=now_iso,
+        )
+
+    # Bước 9-10 — không có WebSocket để mở (REST polling, xem
+    # docs/DECISIONS.md); "System online".
+    logger.info("REST polling active — poll mỗi %ss, không WebSocket.", poll_interval)
+    logger.info("System online. symbol=%s testnet=%s dry_run=%s", symbol, testnet, dry_run)
+
+    stop_requested = False
+
+    def _handle_shutdown_signal(signum: int, _frame: Any) -> None:
+        nonlocal stop_requested
+        name = os_signal.Signals(signum).name
+        logger.info(
+            "Nhận tín hiệu %s — dừng sau vòng poll hiện tại. KHÔNG đóng vị thế "
+            "(stop đã đặt vẫn còn hiệu lực phía bot ở lần khởi động lại kế tiếp).",
+            name,
+        )
+        stop_requested = True
+
+    os_signal.signal(os_signal.SIGINT, _handle_shutdown_signal)
+    os_signal.signal(os_signal.SIGTERM, _handle_shutdown_signal)
+
+    while not stop_requested:
+        try:
+            now = datetime.now(timezone.utc)
+            latest_bar = _latest_closed_bar_date(now)
+            last_processed = (
+                pd.Timestamp(state.last_processed_bar, tz="UTC") if state.last_processed_bar else None
+            )
+
+            if last_processed is not None and latest_bar <= last_processed:
+                time.sleep(poll_interval)
+                continue
+
+            ohlcv = history_loader.load(ccxt_symbol, "1D", data_start, latest_bar.to_pydatetime())
+            features = compute_all_features(ohlcv, feature_config)
+
+            if latest_bar not in features.index:
+                logger.warning("Bar %s chưa đủ warmup feature — chờ vòng poll sau.", latest_bar.date())
+                time.sleep(poll_interval)
+                continue
+
+            # Retrain theo lịch — lỗi ở đây KHÔNG được dừng vòng lặp, GIỮ
+            # NGUYÊN model cũ (spec §Xử lý lỗi: "Lỗi HMM: giữ nguyên regime
+            # hiện tại").
+            try:
+                if (datetime.now(timezone.utc) - hmm_engine.training_date).days >= retrain_interval_days:
+                    logger.info("Đến hạn retrain HMM (bar %s)...", latest_bar.date())
+                    hmm_engine.select_and_train(features)
+                    hmm_engine.save(str(model_path))
+                    logger.info("Retrain xong, đã lưu %s.", model_path)
+            except Exception:
+                logger.error(
+                    "Lỗi retrain HMM — GIỮ NGUYÊN model cũ, không dừng vòng lặp.", exc_info=True
+                )
+
+            state = process_one_bar(
+                symbol=symbol,
+                signal_generator=signal_generator,
+                order_executor=order_executor,
+                position_tracker=position_tracker,
+                ohlcv=ohlcv,
+                features=features,
+                bar_ts=latest_bar,
+                state=state,
+                dry_run=dry_run,
+            )
+            write_state_snapshot(snapshot_path, state)
+
+        except Exception:
+            # "Lỗi không bắt được: log traceback, ghi trạng thái, cảnh
+            # báo" (spec §Xử lý lỗi) — `state` ở đây vẫn là kết quả của
+            # lần process_one_bar() THÀNH CÔNG gần nhất (chưa bị ghi đè
+            # bởi lần gọi lỗi dở dang), nên ghi lại nó = "giữ nguyên trạng
+            # thái đã biết", đúng tinh thần "lỗi HMM giữ nguyên regime cũ"
+            # mà không cần bắt riêng exception HMM ở process_one_bar.
+            logger.error("Lỗi không bắt được trong vòng lặp chính — ghi trạng thái, tiếp tục.", exc_info=True)
+            write_state_snapshot(snapshot_path, state)
+
+        time.sleep(poll_interval)
+
+    write_state_snapshot(snapshot_path, state)
+    logger.info(
+        "Đã dừng. Tổng kết phiên: bar cuối=%s allocation=%s regime=%s",
+        state.last_processed_bar,
+        state.current_allocation_pct,
+        state.current_regime_label,
+    )
+
+
+def run_train_only(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str, Any]:
+    """`--train-only` — train HMM rồi thoát, KHÔNG kết nối sàn.
+
+    Chỉ cần dữ liệu lịch sử công khai (`HistoryLoader`, không cần API key)
+    — hữu ích để kiểm chứng riêng bước train mà không phụ thuộc testnet
+    (xem docs/STATE.md, mục "Testnet đang bị chặn"). Không dùng model
+    cache có sẵn — `--train-only` nghĩa là ép train lại, khác nhánh
+    "load nếu còn mới" trong `run_live_loop`.
+    """
+    import os
+
+    from data.feature_engineering import compute_all_features
+    from data.history_loader import HistoryLoader
+
+    symbol = settings["exchange"]["symbol"]
+    ccxt_symbol = symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
+    model_path = Path(os.environ.get("MODEL_PATH", "models/hmm_model.pkl"))
+
+    data_start = datetime.strptime(DEFAULT_DATA_START, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    latest_bar = _latest_closed_bar_date(now)
+    ohlcv = HistoryLoader().load(ccxt_symbol, "1D", data_start, latest_bar.to_pydatetime())
+    features = compute_all_features(ohlcv, build_feature_config(settings))
+
+    hmm_engine = build_hmm_engine(settings)
+    logger.info("Training HMM (%d bar)...", len(features))
+    hmm_engine.select_and_train(features)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    hmm_engine.save(str(model_path))
+    logger.info("Đã train + lưu %s.", model_path)
+
+    return {
+        "model_path": str(model_path),
+        "training_date": str(hmm_engine.training_date),
+        "n_bars": len(features),
+        "bic_results": [
+            {"n_components": r.n_components, "bic": r.bic, "converged": r.converged}
+            for r in hmm_engine.bic_results
+        ],
+        "regimes": [
+            {"regime_id": r.regime_id, "regime_name": r.regime_name} for r in hmm_engine.regime_infos
+        ],
+    }
+
+
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -674,8 +1232,21 @@ def main() -> None:
     if args.stress_test:
         raise NotImplementedError("--stress-test: dùng backtest/stress_test.py trực tiếp cho tới Phase 8")
 
-    # Live loop: Phase 10 trong đánh số prompts/.
-    raise NotImplementedError("Live loop chưa được implement — dùng --backtest")
+    if args.dashboard:
+        raise NotImplementedError("--dashboard: Phase 8 (monitoring), chưa implement.")
+
+    if args.train_only:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        settings = load_settings(args.config)
+        results = run_train_only(args, settings)
+        json.dump(results, sys.stdout, indent=2, default=str)
+        sys.stdout.write("\n")
+        return
+
+    # Live loop — Phase 10.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    settings = load_settings(args.config)
+    run_live_loop(args, settings)
 
 
 if __name__ == "__main__":

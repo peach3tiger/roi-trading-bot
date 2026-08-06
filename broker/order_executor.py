@@ -234,6 +234,21 @@ class OrderExecutor:
         self._current_stops[symbol] = new_stop
         return True
 
+    def restore_known_stop(self, symbol: str, known_stop: Decimal) -> None:
+        """Khôi phục stop đã biết sau khi tiến trình restart (đọc từ
+        `state_snapshot.json`, xem main.py) — PHẢI gọi TRƯỚC lần
+        `modify_stop()` đầu tiên sau restart.
+
+        `_current_stops` sống trong bộ nhớ, mất khi tiến trình chết.
+        Không gọi hàm này thì `modify_stop()` đầu tiên sau restart sẽ coi
+        `current = None` (chưa từng có stop) và chấp nhận BẤT KỲ giá trị
+        nào — kể cả rộng hơn stop thật đã đặt trước khi crash — âm thầm vi
+        phạm CLAUDE.md bất biến #5 (chỉ siết, không bao giờ nới) ngay sau
+        một lần khởi động lại. Không qua `modify_stop()` (không kiểm tra
+        siết/nới ở đây) vì đây là NẠP LẠI trạng thái đã biết, không phải
+        một quyết định sửa stop mới."""
+        self._current_stops[symbol] = known_stop
+
     # ------------------------------------------------------------------
     # Đóng vị thế / huỷ lệnh
     # ------------------------------------------------------------------

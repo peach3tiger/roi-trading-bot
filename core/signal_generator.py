@@ -12,15 +12,27 @@ tồn tại của các tầng khác.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 import pandas as pd
 
-from core.hmm_engine import HMMRegimeEngine
+from core.hmm_engine import HMMRegimeEngine, RegimeState
 from core.regime_strategies import Signal, StrategyOrchestrator
 from core.risk_manager import PortfolioState, RiskDecision, RiskManager
 from core.trend_gate import StructuralTrendGate
+
+
+@dataclass(frozen=True)
+class SignalGeneratorResult:
+    """`RiskDecision` một mình không đủ cho caller (main loop, Phase 10):
+    cần cả `regime_state`/`is_flickering` để log và ghi `state_snapshot.json`
+    — hai giá trị này được tính bên trong `generate()` nhưng trước đây bị
+    vứt đi sau khi dùng xong, không có cách nào đọc lại từ bên ngoài."""
+
+    decision: RiskDecision
+    regime_state: RegimeState
+    is_flickering: bool
 
 
 def compose_layer_allocations(*caps: Decimal) -> Decimal:
@@ -59,8 +71,8 @@ class SignalGenerator:
         bars: pd.DataFrame,
         current_allocation: Decimal,
         portfolio_state: PortfolioState,
-    ) -> RiskDecision:
-        """Chạy toàn bộ pipeline cho một bar mới và trả RiskDecision cuối cùng.
+    ) -> SignalGeneratorResult:
+        """Chạy toàn bộ pipeline cho một bar mới.
 
         Thứ tự: HMM filtered (trên `features` đã z-score) → StrategyOrchestrator
         → áp trần trend gate (trên `bars` giá thô) qua hàm tối thiểu →
@@ -87,7 +99,10 @@ class SignalGenerator:
         trend_gate_cap = self.trend_gate.get_allocation_cap(bars)
         signal = self._apply_layer_caps(signal, trend_gate_cap)
 
-        return self.risk_manager.validate_signal(signal, portfolio_state)
+        decision = self.risk_manager.validate_signal(signal, portfolio_state)
+        return SignalGeneratorResult(
+            decision=decision, regime_state=regime_state, is_flickering=is_flickering
+        )
 
     def _apply_layer_caps(self, signal: Signal, trend_gate_cap: Decimal) -> Signal:
         """Áp hàm tối thiểu giữa allocation của signal và trần trend gate —

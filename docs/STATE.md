@@ -5,82 +5,114 @@
 
 ## Đang ở đâu
 
-- Phase 1–8 xong. Phase 9 (broker) chuyển từ Bybit sang **Binance qua
-  ccxt** (2026-08-06, xem `docs/DECISIONS.md`). 207 passed / 0 skipped.
+- Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 227 passed
+  / 0 skipped.
 - Forward test chạy từ 2026-08-06, cấu hình đóng băng, launchd hằng ngày.
-  Mốc đánh giá: 2026-11-06 / 2027-02-06 / 2027-08-06. Không đụng tới trong
-  phiên này.
+  Mốc đánh giá: 2026-11-06 / 2027-02-06 / 2027-08-06. Không đụng tới.
 - Cổng: `CLAUDE.md` #12 — xây tầng thực thi ở **testnet** được, **mainnet**
-  bị chặn tới 2027-08-06.
+  bị chặn tới 2027-08-06. `main.py` KHÔNG có `--live` tự động xác nhận —
+  vẫn yêu cầu gõ tay chuỗi xác nhận qua `require_live_confirmation()`
+  (broker/ccxt_client.py) khi `testnet=False`.
+
+## Phase 10 — Main loop (`main.py::run_live_loop`) — 2026-08-07
+
+Xây theo `prompts/phase-10-main-loop.md` + `docs/Brain-Crypto-Bybit.md`
+§Phase 7, điều chỉnh cho kiến trúc REST polling (không có bước "nhận bar
+qua WebSocket"/"đóng WebSocket lúc tắt" — xem mục "Đổi sàn" dưới).
+
+**Mới:**
+- `main.py`: `LiveLoopState` (dataclass, ghi/đọc `state_snapshot.json`
+  nguyên tử — tmp+rename), `process_one_bar()` (thuần, test được bằng
+  fake, không cần mạng), `run_live_loop()` (khởi động 10 bước spec +
+  vòng lặp poll vĩnh viễn), `run_train_only()` (`--train-only`, KHÔNG cần
+  kết nối sàn — chỉ cần `HistoryLoader` công khai).
+- `core/signal_generator.py::SignalGenerator.generate()` đổi trả về
+  `SignalGeneratorResult` (thêm `regime_state`/`is_flickering`) thay vì
+  `RiskDecision` trần — module này trước đó KHÔNG có caller/test nào
+  trong repo, an toàn để đổi API.
+- `broker/order_executor.py::restore_known_stop()` — MỚI, bắt buộc gọi
+  lúc khởi động lại từ snapshot: không có nó, `modify_stop()` đầu tiên
+  sau restart coi `current=None` và chấp nhận BẤT KỲ giá trị nào, kể cả
+  rộng hơn stop thật trước khi crash — vi phạm CLAUDE.md #5 âm thầm.
+- `config/settings.yaml`: thêm section `execution` (`limit_offset_pct`,
+  `order_timeout_seconds`, `poll_interval_seconds`).
+- `ops/regime-trader-crypto.service` — mẫu systemd, auto-restart
+  (`Restart=always`, rate-limited), `SIGTERM` trước `SIGKILL`.
+- Test mới: `tests/test_signal_generator.py` (4 test — SignalGenerator
+  trước đó 0 test), `tests/test_main_loop.py` (14 test — dry-run không
+  đặt lệnh, stop-loss breach, signal bị từ chối giữ nguyên state, snapshot
+  round-trip/hỏng, reset ngày/tuần), `tests/test_orders.py` (+2, restore_known_stop).
+
+**Thiết kế đáng chú ý:**
+- Stop loss trên spot KHÔNG phải lệnh sàn native — bot tự theo dõi mỗi
+  bar (`close_price <= tracked_stop` → `close_position()`), xem
+  `broker/order_executor.py` ghi chú cũ.
+- `reset_daily()` gọi MỖI bar (timeframe 1D = mỗi bar là một ngày mới);
+  `reset_weekly()` chỉ khi `bar_ts.weekday() == 0` (Thứ Hai).
+- Lỗi HMM ("giữ nguyên regime cũ", spec): KHÔNG bắt riêng trong
+  `process_one_bar` — nếu nó raise, `run_live_loop`'s catch-all vòng
+  ngoài giữ nguyên `state` của lần thành công gần nhất (chưa bị ghi đè) —
+  cùng hiệu quả, không cần hai lớp try/except lồng nhau.
+- `_latest_closed_bar_date()` trong `main.py` CỐ TÌNH KHÔNG import từ
+  `forward/logger.py` dù logic giống hệt — `forward/` tự cô lập hoàn
+  toàn (thí nghiệm tiền đăng ký 12 tháng), live loop không nên phụ thuộc
+  ngược vào đó dù chỉ một hàm thuần.
+- `ops/health_check.py::check_exchange_reachable/authenticated` được TÁI
+  SỬ DỤNG trực tiếp làm bước 1-2 của khởi động (kết nối + xác thực) —
+  không viết lại cùng logic lần hai. `--dry-run` bỏ qua bước xác thực
+  (không cần đặt lệnh thật).
+
+**Xác nhận bằng chạy thật (không chỉ unit test):**
+- `python main.py --dry-run` chạy thật tới `testnet.binance.vision` —
+  `exchange_reachable` OK 178ms, `InstrumentRules(BTCUSDT)` lấy đúng, vào
+  tới bước train HMM thật (dừng ở đó có chủ đích — train đầy đủ
+  n_candidates=[3,4,5,6,7]×n_init=10 tốn nhiều phút, không cần chạy hết
+  để xác nhận pipeline đúng).
+- Tạo `state/trading_halted.lock` thủ công → `python main.py --dry-run`
+  thoát NGAY (exit 1, không hề gọi mạng), in đúng nội dung lock + hướng
+  dẫn — đúng nghiệm thu #2 của `prompts/phase-10-main-loop.md`.
+- `grep -rn "is_market_open\|market_hours" .` — không có kết quả (nghiệm
+  thu #2... đánh số lại: xem file gốc, mục "không có giờ giao dịch").
+
+**Tự kiểm chứng bằng mutation (CLAUDE.md #16):** 5 mutation trên
+`process_one_bar`/`run_live_loop`/`load_state_snapshot` (bỏ qua dry_run ở
+cả hai nhánh, reset_weekly gọi mọi bar, giữ allocation sai khi bị từ chối,
+bỏ try/except JSON hỏng) — đúng 5 test liên quan đỏ, 9 không liên quan vẫn
+xanh. Revert lại bản thật trước khi chạy full suite.
+
+**Chưa xác nhận được (cần testnet thật, hiện bị chặn — xem dưới), KHÔNG
+phải chưa xây:**
+- Kill+restart QUA MẠNG THẬT rồi xác nhận khôi phục đúng (đã xác nhận
+  bằng unit test `test_state_snapshot_roundtrip` + logic
+  `restore_known_stop`, chưa chạy qua tiến trình `main.py` thật đầu-cuối).
+- Chạy `--dry-run` liên tục 24 giờ — cần một phiên riêng ngoài phạm vi
+  làm việc tương tác, không giả lập trong phiên này.
+- submit_order/close_position/modify_stop thật qua mạng — cần
+  `EXCHANGE_API_KEY`/`SECRET` thật (mục "Testnet đang bị chặn" dưới).
 
 ## Testnet đang bị chặn — KHÔNG PHẢI lỗi Binance, KHÔNG PHẢI lỗi code
 
-Chặn ở tầng tài khoản GitHub. Đã xác nhận trước đó bằng gọi thật:
+Chặn ở tầng tài khoản GitHub. Đã xác nhận bằng gọi thật:
 `exchange_reachable` OK (mạng/API Binance testnet sống bình thường,
-155ms), vấn đề nằm ngoài cả hai lớp (sàn, code). Không debug thêm ở
-hướng "sửa CCXTClient"/"sửa health_check" cho việc này — không phải chỗ
-hỏng. Mọi việc cần key Binance testnet thật (nghiệm thu submit_order/
-cancel_order/idempotency qua mạng) **tạm dừng**, không phải ưu tiên hiện
-tại — xem "Việc còn treo" bên dưới, thứ tự đã đổi để tránh nó.
+155-178ms qua nhiều lần chạy), vấn đề nằm ngoài cả hai lớp (sàn, code).
+Không debug thêm ở hướng "sửa CCXTClient"/"sửa health_check"/"sửa main.py"
+cho việc này — không phải chỗ hỏng.
 
-## Việc còn treo, theo thứ tự ưu tiên (cập nhật — tránh nhánh bị chặn testnet)
+## Việc còn treo, theo thứ tự ưu tiên
 
-1. ~~`tests/test_forward_golden.py`~~ — đã có từ trước phiên này, không
-   phải việc thật (đã kiểm tra lại và báo lại khi được giao nhầm là
-   "chưa có, quan trọng nhất").
-2. ~~4 test skip trong `test_hmm.py`~~ — **XONG.** 14 test thay 4 skip
-   (BIC selection, gán nhãn theo return-rank, vol-rank độc lập, bộ lọc ổn
-   định/hysteresis, flicker rate). **Phát hiện + sửa 1 bug thật trong lúc
-   viết test** (không phải đọc code):
-   `HMMRegimeEngine._extract_variances()` đọc sai vị trí variance cho
-   `covariance_type` khác `"full"` — `diag`/`tied`/`spherical` sai (chỉ
-   `full` tình cờ đúng), vì `model.covars_` của hmmlearn 0.3.3 LUÔN trả
-   full matrix bất kể covariance_type, khác giả định cũ. Không lộ ra vì
-   production chỉ chạy `covariance_type: full` (settings.yaml) — sẽ lộ
-   ngay khi ablation thử loại khác. Đã sửa: bỏ nhánh theo loại, luôn đọc
-   đường chéo ma trận full. Chi tiết đầy đủ: `docs/DECISIONS.md`, mục
-   "Lấp 4 test skip trong test_hmm.py". Tự kiểm chứng bằng mutation
-   (CLAUDE.md #16): 11/14 test đỏ đúng theo 5 mutation, 3 không liên quan
-   vẫn xanh, đã revert.
-3. ~~Lỗi mypy trong `tests/test_forward_logger.py`~~ — **XONG.** 2 nguyên
-   nhân gốc: (a) `dict.fromkeys(fields, "")` khiến mypy suy ra
-   `dict[str, str]` từ giá trị điền mặc định thay vì tôn trọng chữ ký hàm
-   `dict[str, object]` — annotate biến tường minh; (b) fixture
-   `_forward_harness` thiếu return type + 5 chỗ dùng nó thiếu type param
-   — thêm alias `_ForwardHarness = tuple[Path, pd.DataFrame, Path]`, gắn
-   vào cả fixture lẫn mọi hàm test dùng nó. Chỉ thêm type hint, không đổi
-   logic — 23/23 test cũ pass nguyên vẹn. `mypy .` toàn repo sạch (50
-   file, 0 lỗi) — trước đây (kể cả nhiều phiên trước phiên này) luôn còn
-   sót 8 lỗi ở đúng file này.
-4. **`prompts/phase-10-main-loop.md`** — ưu tiên thật hiện tại. Xây được
-   và test được bằng `--dry-run`, KHÔNG cần sàn thật. Chỉ phần nghiệm thu
-   đặt lệnh thật mới cần testnet (bị chặn, xem trên) — không chặn việc
-   xây main loop.
-5. Điền `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` + nghiệm thu `CCXTClient`
-   qua mạng thật — **TẠM DỪNG**, chờ testnet hết bị chặn ở tầng tài khoản
-   GitHub. Không phải việc kế tiếp.
-6. Copy `phase-12b-harness-engineering.md` và `phase-12c-shadow-deploy.md`
+1. Copy `phase-12b-harness-engineering.md` và `phase-12c-shadow-deploy.md`
    vào `prompts/` (đã soạn, chưa có trong repo).
-
-## Đổi sàn Bybit -> Binance (ccxt) — 2026-08-06 (tóm tắt, chi tiết ở DECISIONS.md)
-
-Bybit chặn theo khu vực (`retCode 10024`), không kết nối được cả testnet
-lẫn mainnet kể cả public endpoint. Thay bằng `broker/ccxt_client.py::CCXTClient`,
-`broker/bybit_client.py` giữ lại (deprecated, không xoá — bằng chứng
-quyết định). WebSocket -> REST polling toàn bộ (`ExchangeClient` bỏ
-`subscribe_klines`/`subscribe_executions`; `PositionTracker.on_execution()`
-bỏ, thêm `poll()` — Phase 10 main loop PHẢI gọi `position_tracker.poll()`
-mỗi vòng, đây là đường cập nhật vị thế duy nhất bây giờ).
-`broker/order_executor.py` — 0 thay đổi logic (ABC không rò rỉ chi tiết
-sàn). `ops/health_check.py` đọc `exchange.name` từ config, env var
-`EXCHANGE_API_KEY/SECRET/TESTNET` — fallback đọc tên `BYBIT_*` cũ đã BỎ
-HẲN (không còn đọc, kể cả làm dự phòng) — thiếu biến nào thì
-`exchange_authenticated` FAIL và nêu đúng tên biến đó.
+2. Điền `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` + nghiệm thu qua mạng
+   thật (CCXTClient submit_order/cancel_order/idempotency; main.py
+   kill+restart thật; `--dry-run` 24h) — **TẠM DỪNG**, chờ testnet hết bị
+   chặn ở tầng tài khoản GitHub.
+3. Phase 11 (monitoring/dashboard, `--dashboard` hiện raise
+   `NotImplementedError` trong `main.py`).
 
 ## Việc tiếp theo
 
-Phase 10 main loop (`--dry-run`, không cần testnet) -> [testnet hết bị
-chặn] -> nghiệm thu CCXTClient qua mạng thật.
+[testnet hết bị chặn] -> nghiệm thu CCXTClient + main.py qua mạng thật ->
+Phase 11 (monitoring/dashboard).
 
 ## Quy tắc đã học, không lặp lại
 
@@ -90,17 +122,17 @@ chặn] -> nghiệm thu CCXTClient qua mạng thật.
 - Không bao giờ hai tiến trình cùng khả năng đặt lệnh trên một tài khoản.
 - Khả năng truy cập theo khu vực/tài khoản có thể chặn bất kỳ lớp nào
   (sàn — Bybit; hạ tầng — GitHub) bất kỳ lúc nào, không cảnh báo trước.
-  Khi bị chặn, xác định ĐÚNG lớp bị chặn trước khi debug (đừng sửa code
-  để "chữa" một chặn ở tầng tài khoản) — chuyển sang việc không phụ thuộc
-  lớp đó, quay lại khi hết chặn, không đoán/không chờ không việc gì.
+  Khi bị chặn, xác định ĐÚNG lớp bị chặn trước khi debug — chuyển sang
+  việc không phụ thuộc lớp đó, quay lại khi hết chặn.
 - Trước khi "xây lại" một file bị báo là thiếu/chưa có: kiểm tra thật
-  (file tồn tại? đã commit? có trên remote? test pass?) rồi mới tin —
-  CLAUDE.md #16 (đột biến trước khi tin test) áp dụng tương tự cho việc
-  tin một báo cáo trạng thái: xác minh trước khi hành động, không phải
-  sau.
+  (file tồn tại? đã commit? có trên remote? test pass?) rồi mới tin.
 - Thư viện ngoài có thể đổi hành vi giữa các phiên bản theo cách âm thầm
   đúng-ngữ-pháp-sai-ngữ-nghĩa (hmmlearn's `covars_` luôn trả full matrix
-  bất kể `covariance_type`, khác giả định code cũ) — code không lỗi cú
-  pháp, không raise, chỉ âm thầm tính sai. Viết test đọc lại GIÁ TRỊ THẬT
-  từ một lần fit thật, không chỉ test "không crash", là cách duy nhất bắt
-  được loại lỗi này.
+  bất kể `covariance_type`) — viết test đọc lại GIÁ TRỊ THẬT từ một lần
+  fit/gọi thật, không chỉ test "không crash", là cách duy nhất bắt được.
+- Restart tiến trình là nơi bất biến dễ vỡ nhất trong im lặng nhất
+  (`modify_stop()` sau restart không biết stop cũ nếu không nạp lại tường
+  minh — CLAUDE.md #5 có thể bị vi phạm mà không có exception nào báo).
+  Mọi trạng thái trong bộ nhớ ảnh hưởng tới một bất biến an toàn PHẢI có
+  đường khôi phục tường minh sau restart, không được ngầm định "restart =
+  trạng thái sạch".

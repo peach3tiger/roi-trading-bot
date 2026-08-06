@@ -34,6 +34,19 @@ exchange:
                                  # CCXTClient đọc — giữ lại cho
                                  # broker/bybit_client.py (deprecated).
 
+# Phase 10 (main.py live loop) — broker/order_executor.py::OrderExecutor và
+# vòng lặp poll REST. Thêm 2026-08-07, chưa có field nào ở đây trước đó
+# (CLAUDE.md bất biến #14 — không magic number ngoài config).
+execution:
+  limit_offset_pct: 0.05        # LIMIT đặt lệch ±0.05% quanh giá hiện tại,
+                                 # xem broker/order_executor.py::submit_order
+  order_timeout_seconds: 30     # huỷ nếu chưa khớp sau chừng này
+  poll_interval_seconds: 60     # main loop hỏi lại REST xem đã có bar mới
+                                 # đóng chưa, mỗi chừng này giây — bar 1D
+                                 # nên không cần tần suất cao, xem
+                                 # docs/DECISIONS.md "Đổi sàn Bybit ->
+                                 # Binance (ccxt)" mục REST polling
+
 costs:
   taker_fee_pct: 0.10          # Bybit spot VIP0, XÁC MINH LẠI trước khi live
   maker_fee_pct: 0.10

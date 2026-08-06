@@ -753,3 +753,101 @@ Revert lại bản gốc + fix thật trước khi chạy full suite.
 207 passed / 0 skipped (trước: 193 passed / 4 skipped — 4 skip đã lấp
 hết). ruff + mypy sạch (trừ 8 lỗi pre-existing ở `test_forward_logger.py`,
 không liên quan, chưa xử lý).
+
+---
+
+## Phase 10 — Main loop (`main.py::run_live_loop`) (2026-08-07)
+
+Theo `prompts/phase-10-main-loop.md` + `docs/Brain-Crypto-Bybit.md` §Phase
+7, điều chỉnh cho kiến trúc REST polling đã đổi ở Phase 9 (không có bước
+"nhận bar qua WebSocket"/"đóng WebSocket lúc tắt" trong spec gốc — thay
+bằng poll REST định kỳ, xem mục "Đổi sàn Bybit -> Binance (ccxt)" ở trên).
+
+**Tái sử dụng thay vì viết lại:** `ops/health_check.py::check_exchange_reachable/
+authenticated` làm bước 1-2 của khởi động (kết nối + xác thực + đồng bộ
+thời gian) — cùng logic đã xác nhận bằng mạng thật ở Phase 9, không viết
+lại lần hai. `core/signal_generator.py::SignalGenerator` (dựng ở phase
+trước, KHÔNG có caller/test nào cho tới bản này) đúng là mảnh ghép
+HMM→strategy→trend_gate→risk_manager cần cho main loop — chỉ cần đổi
+`generate()` trả về thêm `regime_state`/`is_flickering` (đóng gói thành
+`SignalGeneratorResult`) vì `main.py` cần hai giá trị đó để log/ghi
+`state_snapshot.json` mà bản gốc tính xong rồi vứt.
+
+**Phát hiện quan trọng lúc thiết kế khôi phục sau restart:** `broker/
+order_executor.py::OrderExecutor._current_stops` sống trong bộ nhớ, mất
+khi tiến trình chết. Không nạp lại tường minh thì `modify_stop()` ĐẦU
+TIÊN sau restart coi `current=None` (chưa từng có stop) và chấp nhận BẤT
+KỲ giá trị nào — kể cả RỘNG HƠN stop thật đã đặt trước khi crash — vi
+phạm CLAUDE.md bất biến #5 (chỉ siết, không bao giờ nới) một cách hoàn
+toàn im lặng, không exception nào báo hiệu. Thêm
+`OrderExecutor.restore_known_stop()` (nạp thẳng, không qua kiểm tra siết/
+nới — đây là NẠP LẠI trạng thái đã biết, không phải một quyết định sửa
+stop mới) — `run_live_loop()` gọi nó ngay sau khi đọc `state_snapshot.json`,
+TRƯỚC bất kỳ lệnh gọi `modify_stop()` nào khác. Đây là loại lỗi mà
+CLAUDE.md #16 (mutation trước khi tin) và bài học "restart là nơi bất
+biến dễ vỡ nhất trong im lặng nhất" (docs/STATE.md) muốn ngăn — không lộ
+ra bằng đọc code hay chạy happy-path, chỉ lộ ra khi cố tình nghĩ về đúng
+kịch bản restart-giữa-lúc-đang-giữ-stop.
+
+**Stop loss trên spot** — Bybit/Binance spot không có lệnh stop native
+qua `broker/order_executor.py` hiện tại (chỉ LIMIT/MARKET, xem
+`broker/base.py::OrderType`). Bot tự theo dõi: mỗi bar, nếu
+`close_price <= tracked_stop` thì `close_position()` NGAY, dừng ở đó,
+KHÔNG sinh signal mới cho bar đó (position coi như đã đóng). Đây là điểm
+duy nhất `process_one_bar()` chủ động đóng vị thế mà không đi qua
+`SignalGenerator`/`RiskManager` — chọn thiết kế này vì stop loss là biện
+pháp bảo vệ CUỐI CÙNG (CLAUDE.md bất biến #5), không nên phụ thuộc vào
+risk_manager approve nó như một signal thường.
+
+**`reset_daily()`/`reset_weekly()` (CLAUDE.md bất biến #10):** timeframe
+`1D` nghĩa là MỖI bar đã là một ngày mới — `reset_daily()` gọi vô điều
+kiện mỗi bar (không cần kiểm tra ranh giới, luôn đúng); `reset_weekly()`
+chỉ khi `bar_ts.weekday() == 0` (Thứ Hai). Gọi TRƯỚC `SignalGenerator.generate()`
+(tức trước `circuit_breaker.update()` của bar đó) — để baseline
+daily/weekly là equity đóng cửa của bar HÔM TRƯỚC, không phải equity của
+chính bar đang xử lý.
+
+**"Lỗi HMM: giữ nguyên regime cũ" (spec §Xử lý lỗi)** — KHÔNG bắt riêng
+một `except` quanh lệnh gọi `hmm_engine.predict_regime_filtered()` bên
+trong `process_one_bar()`. Nếu `SignalGenerator.generate()` raise (vì bất
+kỳ lý do gì, kể cả lỗi HMM), `process_one_bar()` raise theo, và
+`run_live_loop()`'s catch-all vòng ngoài bắt nó, log traceback, rồi ghi
+lại `state` — biến này vẫn là kết quả của lần `process_one_bar()` THÀNH
+CÔNG gần nhất (chưa bao giờ bị gán lại bởi lần gọi lỗi dở dang) — hiệu
+quả giống hệt "giữ nguyên regime hiện tại" mà không cần hai lớp try/except
+lồng nhau xử lý cùng một kết quả. Cùng nguyên tắc cho "mất data feed": lỗi
+mạng lúc `history_loader.load()` cũng rơi vào catch-all này, vòng lặp tiếp
+tục ở lần poll kế tiếp, không có lệnh mới nào được gửi trong lúc đó (stop
+cũ vẫn còn hiệu lực phía bot).
+
+**`_latest_closed_bar_date()` trùng logic `forward/logger.py::latest_closed_bar_date`
+CỐ TÌNH không import từ đó** — `forward/` tự cô lập hoàn toàn khỏi phần
+còn lại hệ thống (docstring module đó: "KHÔNG import broker.* ở bất cứ
+đâu"), thí nghiệm tiền đăng ký 12 tháng cần giữ nguyên trạng suốt kỳ. Live
+loop phụ thuộc ngược vào `forward/` — dù chỉ một hàm thuần 4 dòng vô hại —
+phá vỡ tính đối xứng của ranh giới đó. Trùng lặp rẻ hơn.
+
+**Xác nhận bằng chạy thật, không chỉ unit test** (dù testnet bị chặn ở
+tầng tài khoản GitHub, xem mục "Testnet đang bị chặn" — `exchange_reachable`
+KHÔNG bị chặn, chỉ các endpoint cần key mới bị):
+- `python main.py --dry-run` chạy thật tới `testnet.binance.vision`:
+  `exchange_reachable` OK 178ms, `InstrumentRules(BTCUSDT)` đúng, vào tới
+  bước train HMM thật (dừng có chủ đích, train đầy đủ tốn nhiều phút).
+- `state/trading_halted.lock` thủ công → `python main.py --dry-run`
+  thoát NGAY exit 1, KHÔNG gọi mạng, in đúng nội dung lock + hướng dẫn.
+- `grep -rn "is_market_open\|market_hours" .` — 0 kết quả.
+
+**Tự kiểm chứng bằng mutation (CLAUDE.md #16):** 5 mutation trên
+`process_one_bar`/`run_live_loop`/`load_state_snapshot` — đúng 5 test
+liên quan đỏ, 9 không liên quan vẫn xanh. Revert lại bản thật trước khi
+chạy full suite.
+
+**Chưa xác nhận được** (đúng lý do — cần testnet thật, đang bị chặn ở
+tầng tài khoản, KHÔNG phải chưa xây): kill+restart qua tiến trình thật
+đầu-cuối (đã xác nhận riêng từng phần: `state_snapshot.json` round-trip
+bằng unit test, `restore_known_stop()` bằng unit test); `--dry-run` chạy
+liên tục 24 giờ; `submit_order`/`close_position`/`modify_stop` thật qua
+mạng.
+
+227 passed / 0 skipped. ruff + mypy sạch toàn bộ 52 file (bao gồm
+`test_forward_logger.py`, đã sửa xong ở mục trước).
