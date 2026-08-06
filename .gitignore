@@ -12,6 +12,14 @@ feature_ablation.csv
 trading_halted.lock
 state_snapshot.json
 *.log
+# forward/warnings.log LÀ ngoại lệ — một phần bằng chứng của thí nghiệm
+# forward test 12 tháng (docs/DECISIONS.md, "Forward test — tiền đăng ký"),
+# cùng vai trò với forward/log.csv, không phải log runtime bỏ đi.
+!forward/warnings.log
+# launchd tự tạo, không phải bằng chứng thí nghiệm — bỏ qua bình thường
+# (đã khớp *.log ở trên, liệt kê tường minh để dễ thấy).
+forward/launchd.out.log
+forward/launchd.err.log
 
 # Python
 __pycache__/

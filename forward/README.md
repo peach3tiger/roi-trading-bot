@@ -53,12 +53,9 @@ In ra JSON `{"appended": N, "last_logged_date": "YYYY-MM-DD"}`. `N=0` nghĩa
 là log đã cập nhật, không có bar mới (idempotent — chạy lại cùng ngày
 không ghi thêm dòng nào).
 
-Crontab gợi ý (chạy mỗi ngày lúc 01:00 UTC, đủ trễ sau ranh giới bar 00:00
-UTC để dữ liệu ngày hôm qua chắc chắn đã có trên Binance):
-
-```
-0 1 * * * cd /path/to/regime-trader-crypto && .venv/bin/python -m forward.logger >> forward/cron.log 2>&1
-```
+Lịch chạy tự động: xem mục "Lịch chạy tự động (launchd)" bên dưới —
+**không dùng cron**, cron không chạy khi máy ngủ (macOS mặc định ngủ khi
+gập nắp/không cắm sạc), sẽ bỏ lỡ hầu hết các ngày trong 12 tháng.
 
 ## Backfill
 
@@ -107,15 +104,112 @@ bốn đường này thì không so sánh được gì.
 ## Cột `forward/log.csv`
 
 `date, run_at_utc, open_price, close_price, hmm_retrained, hmm_train_bars,
-regime_id, regime_label, regime_probability, regime_is_confirmed,
-is_flickering, hmm_allocation, trend_gate_state, trend_gate_cap,
-final_allocation`, rồi 4 nhóm `{prefix}_cash, {prefix}_qty, {prefix}_equity,
-{prefix}_target_allocation` cho `prefix ∈ {strategy, bh, sma200, volTarget}`.
+warning_count, regime_id, regime_label, regime_probability,
+regime_is_confirmed, is_flickering, hmm_allocation, trend_gate_state,
+trend_gate_cap, final_allocation`, rồi 4 nhóm `{prefix}_cash, {prefix}_qty,
+{prefix}_equity, {prefix}_target_allocation` cho
+`prefix ∈ {strategy, bh, sma200, volTarget}`. `warning_count` — xem mục
+"Warnings — chuyển hướng, KHÔNG filter" bên dưới.
 
 `{prefix}_target_allocation` của dòng hiện tại chính là target sẽ được
 thực thi ở giá OPEN của bar KẾ TIẾP (fill delay 1 bar) — đây là toàn bộ
 trạng thái cần để tiếp tục, không có state file ẩn nào khác ngoài cache
 model (mục Retrain).
+
+## Warnings — chuyển hướng, KHÔNG filter
+
+Thí nghiệm 12 tháng không người trông: lọc bớt warning là mất tín hiệu (tần
+suất/tính chất cảnh báo đổi khác giữa chừng là điều cần biết, không phải
+điều cần che). Vì vậy `forward/logger.py` **không có bất kỳ
+`warnings.filterwarnings("ignore", ...)` nào** — khác với
+`pyproject.toml [tool.pytest.ini_options] filterwarnings`, vốn CHỦ Ý bỏ qua
+một số warning quen thuộc (matmul overflow lúc hmmlearn `.fit()`,
+"Model is not converging") khi chạy test.
+
+Thay vào đó, mọi warning xảy ra trong lúc chạy (`warnings.simplefilter
+("always")`, không dedupe, không bỏ loại nào) được **chuyển hướng** vào
+`forward/warnings.log` — mỗi dòng: `run_at_utc, bar_date, category,
+message, file:dòng` (tab-separated). Warning xảy ra trước khi vào vòng lặp
+per-bar (lúc dựng component/tính feature) được gắn `bar_date="(setup)"`.
+Cột `warning_count` trong `forward/log.csv` là số warning gắn với ĐÚNG bar
+đó — cộng dồn qua 12 tháng cho một chuỗi thời gian riêng để phát hiện thay
+đổi bất thường (vd. đột nhiên tăng vọt ở một giai đoạn cụ thể).
+
+`forward/warnings.log` cũng chỉ APPEND (`_write_warnings_log`, cùng
+nguyên tắc với `append_row`) và **được commit vào git** — đã thêm ngoại lệ
+tường minh trong `.gitignore` (`!forward/warnings.log`) vì mặc định
+`*.log` sẽ bỏ qua nó. `forward/launchd.out.log`/`launchd.err.log` (mục
+dưới) thì KHÔNG commit — đó là log runtime của launchd, không phải bằng
+chứng thí nghiệm.
+
+Đã kiểm tra lại (2026-08-07, xem `docs/DECISIONS.md`): những warning
+`RuntimeWarning: divide by zero/overflow encountered in matmul` từng thấy
+khi chạy đến từ `HMMRegimeEngine.select_and_train` (đường `.fit()` EM/
+k-means CỦA thư viện hmmlearn/sklearn khi khởi tạo model) — **không phải**
+từ `predict_regime_filtered`/thuật toán forward tự viết ở
+`core/hmm_engine.py`. Forward algorithm chạy sạch, không cần chuẩn hoá
+`log_alpha` ở mỗi bước (xem docstring `_forward_log_alpha`). Không sửa gì
+ở đó — cơ chế warning-log ở đây vẫn hữu ích để theo dõi độ thường xuyên của
+những warning training này qua thời gian, dù đã biết chúng vô hại.
+
+## Lịch chạy tự động (launchd)
+
+**Dùng launchd, không dùng cron** — cron chỉ chạy khi máy đang thức; nếu
+Mac ngủ đúng giờ đã đặt (rất phổ biến với laptop), cron bỏ lỡ hoàn toàn,
+không có cơ chế bù. launchd (`StartCalendarInterval`) tự chạy bù ngay khi
+máy thức dậy nếu đã lỡ mốc lịch trong lúc ngủ — đúng cơ chế cần cho thí
+nghiệm 12 tháng. Kết hợp với backfill đã có sẵn trong `forward/logger.py`
+(mục Backfill ở trên), chạy trượt vài ngày do máy tắt hẳn cũng không mất
+dữ liệu — lần chạy kế tiếp tự bù.
+
+File nguồn: `forward/com.regime-trader-crypto.forward-test.plist` (đã
+commit, đường dẫn tuyệt đối khớp máy đã dựng — sửa lại nếu chạy trên máy
+khác). Mặc định chạy 08:00 giờ địa phương (máy này UTC+7 → 01:00 UTC, một
+giờ sau ranh giới bar 00:00 UTC, đủ để Binance publish xong candle hôm
+qua) và chạy thêm một lần mỗi khi nạp lại (`RunAtLoad`, an toàn vì
+idempotent).
+
+**Nạp:**
+
+```bash
+cp forward/com.regime-trader-crypto.forward-test.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.regime-trader-crypto.forward-test.plist
+```
+
+**Kiểm tra đang chạy / đã nạp:**
+
+```bash
+launchctl print gui/$(id -u)/com.regime-trader-crypto.forward-test
+```
+
+In ra `state = running` (đang chạy) hoặc `state = waiting` (đã nạp, chờ
+tới giờ) — cả hai đều đúng, chỉ cần KHÔNG phải "could not find service".
+Xem `last exit code` trong cùng output để biết lần chạy gần nhất có lỗi
+không (`0` = thành công). Cách nhanh hơn, chỉ để xác nhận đã nạp:
+
+```bash
+launchctl list | grep com.regime-trader-crypto
+```
+
+**Chạy thử ngay, không đợi tới giờ đã đặt** (kiểm tra plist hoạt động
+đúng trước khi tin tưởng để nó tự chạy 12 tháng):
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.regime-trader-crypto.forward-test
+tail -f forward/launchd.out.log forward/launchd.err.log
+```
+
+**Gỡ** (dừng lịch tự động, không xoá `forward/log.csv` hay bất kỳ dữ liệu
+nào):
+
+```bash
+launchctl bootout gui/$(id -u)/com.regime-trader-crypto.forward-test
+rm ~/Library/LaunchAgents/com.regime-trader-crypto.forward-test.plist
+```
+
+**Sau khi sửa file plist** (vd. đổi giờ chạy): copy lại file đã sửa vào
+`~/Library/LaunchAgents/` rồi `bootout` + `bootstrap` lại (launchd không tự
+đọc lại plist khi file đổi trong lúc đã nạp).
 
 ## Mốc đánh giá
 

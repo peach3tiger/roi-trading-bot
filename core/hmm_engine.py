@@ -348,6 +348,34 @@ class HMMRegimeEngine:
         cùng X luôn cho cùng log_alpha, không phụ thuộc trạng thái nội bộ
         của engine. Dùng làm nền tảng cho cả bản có cache lẫn
         `predict_regime_filtered_history`.
+
+        KHÔNG chuẩn hoá `log_alpha` ở mỗi bước `t` — đã kiểm tra lại việc
+        này (2026-08-07, xem docs/DECISIONS.md) sau khi thấy cảnh báo
+        `RuntimeWarning: divide by zero/overflow encountered in matmul` lúc
+        chạy forward test. Kết luận: KHÔNG PHẢI bug ở đây.
+
+        Chuẩn hoá mỗi bước (chia alpha cho hằng số `c_t = 1/Σ alpha_t(i)`,
+        kiểu Rabiner) chỉ bắt buộc trong KHÔNG GIAN XÁC SUẤT THƯỜNG, nơi
+        alpha là xác suất đồng thời co lại theo cấp SỐ NHÂN theo t và
+        underflow về đúng 0.0 chỉ sau ~100-200 bước. Trong LOG SPACE,
+        `log_alpha` chỉ giảm gần như TUYẾN TÍNH theo t (cộng dồn log-mật độ
+        mỗi bước) — với is_bars cỡ vài nghìn bar thực tế, `log_alpha` rơi
+        vào khoảng -1e4 tới -1e5, còn cách rất xa giới hạn biểu diễn của
+        float64 (~-1.7e308). `logsumexp` trong `_forward_step` đã tự ổn định
+        theo từng bước (trừ max trước khi exp), nên không cần chuẩn hoá
+        thêm — và bước exp() DUY NHẤT của toàn thuật toán nằm ở
+        `_filtered_proba_incremental`/`predict_regime_filtered_history`
+        (`np.exp(log_alpha[-1] - logsumexp(log_alpha[-1]))`), luôn nhận
+        input ≤ 0 nên không bao giờ overflow.
+
+        Xác nhận bằng thực nghiệm trên dữ liệu thật (2657 bar,
+        `min_train_bars=730`): `log_alpha` cuối chuỗi nằm trong khoảng
+        [-22815, -9.2], không NaN/Inf, `predict_regime_filtered` chạy sạch
+        (0 warning) trong khi `select_and_train` (đường `.fit()` EM/k-means
+        CỦA HMMLEARN, không phải forward algorithm tự viết ở đây) là nơi
+        THẬT SỰ phát ra các warning matmul đó — đã cô lập bằng
+        `warnings.simplefilter("error")` quanh từng lệnh gọi riêng để xác
+        nhận nguồn. Không sửa gì ở forward algorithm.
         """
         assert self.model is not None
         log_startprob = np.log(self.model.startprob_ + _LOG_FLOOR)

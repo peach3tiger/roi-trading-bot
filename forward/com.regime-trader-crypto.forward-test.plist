@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent cho forward test — KHÔNG dùng cron, vì cron không
+  chạy khi máy ngủ (launchd tự chạy bù khi máy thức dậy nếu lỡ mốc lịch,
+  đúng cơ chế macOS cần cho một thí nghiệm 12 tháng không người trông).
+  Xem forward/README.md, mục "Lịch chạy tự động (launchd)" để biết cách
+  nạp/gỡ/kiểm tra file này bằng launchctl.
+
+  File này là bản NGUỒN đã commit trong repo. Đường dẫn tuyệt đối bên dưới
+  khớp máy đã dựng (/Users/lbeyewear/regime-trader-crypto) — nếu chạy trên
+  máy khác, sửa cả ba đường dẫn (ProgramArguments, WorkingDirectory,
+  StandardOutPath/StandardErrorPath) trước khi copy vào ~/Library/LaunchAgents/.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.regime-trader-crypto.forward-test</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/lbeyewear/regime-trader-crypto/.venv/bin/python</string>
+        <string>-m</string>
+        <string>forward.logger</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/lbeyewear/regime-trader-crypto</string>
+
+    <!--
+      08:00 giờ địa phương (múi giờ máy này: UTC+7) = 01:00 UTC — một giờ
+      sau ranh giới bar 00:00 UTC (CLAUDE.md bất biến #10), đủ để Binance
+      publish xong candle ngày hôm qua trước khi script chạy. Đây là GIỜ
+      ĐỊA PHƯƠNG của launchd, không phải UTC — đổi múi giờ máy thì đổi lại
+      Hour/Minute cho khớp margin này.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!--
+      Chạy thêm một lần mỗi khi plist được nạp (login/khởi động lại
+      launchd) — bổ sung cho cơ chế launchd tự bù lịch bị lỡ khi máy NGỦ:
+      nếu máy tắt HẲN qua đúng giờ 08:00 và chỉ bật lại sau đó, RunAtLoad
+      đảm bảo vẫn có một lần chạy ngay khi đăng nhập/khởi động lại thay vì
+      phải chờ tới 08:00 hôm sau. An toàn tuyệt đối vì script idempotent —
+      chạy thừa chỉ trả về {"appended": 0}, không ghi gì thêm.
+    -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/lbeyewear/regime-trader-crypto/forward/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/lbeyewear/regime-trader-crypto/forward/launchd.err.log</string>
+</dict>
+</plist>

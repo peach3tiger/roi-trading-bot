@@ -430,3 +430,40 @@ retrain interval, cost model, ngưỡng rebalance, ...): **KẾT THÚC thí
 nghiệm này, bắt đầu thí nghiệm mới** với `config_frozen.yaml`/hash mới,
 ghi rõ lý do và ngày bắt đầu mới vào đây — không sửa tại chỗ, không nối
 tiếp log.csv cũ sang cấu hình khác.
+
+### Bổ sung hạ tầng (2026-08-07) — không đụng cấu hình đóng băng
+
+Ba việc, không sửa `forward/config_frozen.yaml`/`FEATURE_SUBSET` (không mở
+thí nghiệm mới):
+
+1. **Warnings không filter, chuyển hướng vào `forward/warnings.log`** —
+   timestamp + bar date + toàn văn, cột `warning_count` thêm vào
+   `forward/log.csv`. Lý do: 12 tháng không người trông, lọc warning là mất
+   tín hiệu về thay đổi hành vi giữa chừng. Không có `filterwarnings
+   ("ignore", ...)` nào trong `forward/logger.py` (khác pytest, vốn chủ ý
+   bỏ qua vài loại quen thuộc). `forward/warnings.log` thêm ngoại lệ tường
+   minh trong `.gitignore` (`!forward/warnings.log`) — mặc định `*.log` sẽ
+   bỏ qua nó, nhưng đây là bằng chứng thí nghiệm, không phải log runtime.
+
+2. **Kiểm tra lại `predict_regime_filtered` có chuẩn hoá đúng trong log
+   space không** (nghi ngờ dấy lên từ warning `RuntimeWarning: divide by
+   zero/overflow encountered in matmul` thấy lúc chạy). **Kết luận: không
+   có bug.** Cô lập bằng `warnings.simplefilter("error")` quanh từng lệnh
+   gọi riêng: `select_and_train` (đường `.fit()` EM/k-means của hmmlearn/
+   sklearn) RAISE warning; `predict_regime_filtered` KHÔNG raise gì, chạy
+   sạch, `state_probabilities` hợp lệ (tổng ≈ 1.0, không NaN/Inf). Đo trực
+   tiếp `log_alpha` trên dữ liệu thật (2657 bar): khoảng [-22815, -9.2] ở
+   bar cuối — cách rất xa giới hạn float64. Lý do không cần chuẩn hoá mỗi
+   bước: trong log space, `log_alpha` giảm gần tuyến tính theo t (không
+   phải cấp số nhân như xác suất thường), `logsumexp` đã tự ổn định từng
+   bước, và exp() duy nhất của toàn thuật toán (ở bước chuẩn hoá cuối cùng)
+   luôn nhận input ≤ 0. Đã ghi chi tiết vào docstring
+   `HMMRegimeEngine._forward_log_alpha` (`core/hmm_engine.py`) — không sửa
+   code, chỉ xác nhận và ghi lại bằng chứng.
+
+3. **launchd thay cron** — `forward/com.regime-trader-crypto.forward-test.plist`
+   (LaunchAgent, `StartCalendarInterval` 08:00 giờ địa phương = 01:00 UTC).
+   Lý do đổi từ gợi ý cron ban đầu: cron không chạy khi máy ngủ, launchd tự
+   bù khi máy thức dậy — cần thiết cho 12 tháng không người trông trên
+   laptop. Hướng dẫn nạp/kiểm tra/gỡ: `forward/README.md`, mục "Lịch chạy
+   tự động (launchd)".

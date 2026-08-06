@@ -59,6 +59,7 @@ import hashlib
 import json
 import logging
 import sys
+import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -83,6 +84,14 @@ _FORWARD_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = _FORWARD_DIR / "config_frozen.yaml"
 _HASH_PATH = _FORWARD_DIR / "config_frozen.sha256"
 _LOG_PATH = _FORWARD_DIR / "log.csv"
+
+# Thí nghiệm 12 tháng không người trông — KHÔNG filter warning nào (không có
+# `warnings.filterwarnings("ignore", ...)` ở đâu trong module này, khác hẳn
+# pyproject.toml [tool.pytest.ini_options] filterwarnings dùng cho test).
+# Mọi warning xảy ra trong lúc chạy được CHUYỂN HƯỚNG vào đây thay vì in ra
+# stderr rồi mất — timestamp + bar date + toàn văn, để phát hiện được nếu
+# tần suất hay tính chất cảnh báo đổi khác giữa chừng 12 tháng.
+_WARNINGS_LOG_PATH = _FORWARD_DIR / "warnings.log"
 
 # Cache HIỆU NĂNG THUẦN TUÝ, không phải trạng thái thẩm quyền — lịch retrain
 # thật đọc lại được từ cột `hmm_retrained` của log.csv (xem `run_forward_test`).
@@ -131,6 +140,7 @@ _CSV_FIELDNAMES = [
     "close_price",
     "hmm_retrained",
     "hmm_train_bars",
+    "warning_count",
     "regime_id",
     "regime_label",
     "regime_probability",
@@ -298,6 +308,37 @@ def read_existing_log(path: Path | None = None) -> pd.DataFrame | None:
     return df
 
 
+def _format_warning_lines(
+    caught: list[warnings.WarningMessage], bar_date: str, now: datetime | None = None
+) -> list[str]:
+    """Một dòng TSV mỗi warning: run_at_utc, bar_date, loại, thông điệp,
+    nguồn (file:dòng). Hàm THUẦN (ngoại trừ mốc thời gian mặc định) — dễ
+    test độc lập với `_write_warnings_log`.
+
+    KHÔNG loại bỏ warning nào theo category/message — mọi phần tử trong
+    `caught` đều thành một dòng. Việc "không filter" nằm ở CHỖ GỌI
+    (`warnings.simplefilter("always")`, xem `run_forward_test`), hàm này chỉ
+    định dạng những gì đã được thu.
+    """
+    if not caught:
+        return []
+    ts = (now or datetime.now(timezone.utc)).isoformat()
+    lines = []
+    for w in caught:
+        message = str(w.message).replace("\t", " ").replace("\n", " ")
+        lines.append(f"{ts}\t{bar_date}\t{w.category.__name__}\t{message}\t{w.filename}:{w.lineno}\n")
+    return lines
+
+
+def _write_warnings_log(lines: list[str], path: Path | None = None) -> None:
+    """Append — cùng nguyên tắc với `append_row`, không đọc-rồi-ghi-đè."""
+    if not lines:
+        return
+    target = path if path is not None else _WARNINGS_LOG_PATH
+    with target.open("a", encoding="utf-8") as fh:
+        fh.writelines(lines)
+
+
 # ----------------------------------------------------------------------
 # Mô phỏng portfolio giấy (paper) — 4 track song song, cùng cost model
 # ----------------------------------------------------------------------
@@ -377,59 +418,67 @@ def run_forward_test(now: datetime | None = None) -> dict[str, Any]:
     trend_gate_cfg = settings["trend_gate"]
     costs_cfg = settings["costs"]
 
-    hmm_engine = HMMRegimeEngine(
-        n_candidates=list(hmm_cfg["n_candidates"]),
-        n_init=hmm_cfg["n_init"],
-        covariance_type=hmm_cfg["covariance_type"],
-        min_train_bars=hmm_cfg["min_train_bars"],
-        stability_bars=hmm_cfg["stability_bars"],
-        flicker_window=hmm_cfg["flicker_window"],
-        flicker_threshold=hmm_cfg["flicker_threshold"],
-    )
-    orchestrator = StrategyOrchestrator(
-        min_confidence=strategy_cfg["min_confidence"],
-        rebalance_threshold_pct=Decimal(str(strategy_cfg["rebalance_threshold_pct"])),
-        # "halve" — xem docs/DECISIONS.md, QUYẾT ĐỊNH (2026-08-05): giữ
-        # nguyên, cơ chế phòng vệ đuôi thật, không phải lỗi thiết kế.
-        uncertainty_mode="halve",
-    )
-    trend_gate = StructuralTrendGate(
-        TrendGateConfig(
-            sma_period=trend_gate_cfg["sma_period"],
-            slope_lookback=trend_gate_cfg["slope_lookback"],
-            buffer_pct=Decimal(str(trend_gate_cfg["buffer_pct"])),
-            confirm_bars=trend_gate_cfg["confirm_bars"],
-            cap_bull_structure=Decimal(str(trend_gate_cfg["cap_bull_structure"])),
-            cap_transition=Decimal(str(trend_gate_cfg["cap_transition"])),
-            cap_bear_structure=Decimal(str(trend_gate_cfg["cap_bear_structure"])),
+    # Dựng component + tính feature một lần — KHÔNG filter warning nào ở
+    # đây (không `simplefilter("ignore", ...)`), chỉ chuyển hướng: mọi
+    # warning xảy ra trong khối này (vd. matmul overflow lúc GaussianHMM
+    # khởi tạo) được ghi vào forward/warnings.log, gắn nhãn "(setup)" vì
+    # chưa gắn với bar cụ thể nào (xảy ra trước vòng lặp per-bar).
+    with warnings.catch_warnings(record=True) as setup_caught:
+        warnings.simplefilter("always")
+        hmm_engine = HMMRegimeEngine(
+            n_candidates=list(hmm_cfg["n_candidates"]),
+            n_init=hmm_cfg["n_init"],
+            covariance_type=hmm_cfg["covariance_type"],
+            min_train_bars=hmm_cfg["min_train_bars"],
+            stability_bars=hmm_cfg["stability_bars"],
+            flicker_window=hmm_cfg["flicker_window"],
+            flicker_threshold=hmm_cfg["flicker_threshold"],
         )
-    )
-    cost_model = CostModel(
-        taker_fee_pct=Decimal(str(costs_cfg["taker_fee_pct"])),
-        maker_fee_pct=Decimal(str(costs_cfg["maker_fee_pct"])),
-        slippage_pct=Decimal(str(costs_cfg["slippage_pct"])),
-        assume_taker=costs_cfg["assume_taker"],
-    )
-    wf_defaults = WalkForwardConfig()
-    instrument_rules = wf_defaults.instrument_rules
-    initial_equity = wf_defaults.initial_equity
-    threshold_fraction = Decimal(str(strategy_cfg["rebalance_threshold_pct"])) / Decimal("100")
+        orchestrator = StrategyOrchestrator(
+            min_confidence=strategy_cfg["min_confidence"],
+            rebalance_threshold_pct=Decimal(str(strategy_cfg["rebalance_threshold_pct"])),
+            # "halve" — xem docs/DECISIONS.md, QUYẾT ĐỊNH (2026-08-05): giữ
+            # nguyên, cơ chế phòng vệ đuôi thật, không phải lỗi thiết kế.
+            uncertainty_mode="halve",
+        )
+        trend_gate = StructuralTrendGate(
+            TrendGateConfig(
+                sma_period=trend_gate_cfg["sma_period"],
+                slope_lookback=trend_gate_cfg["slope_lookback"],
+                buffer_pct=Decimal(str(trend_gate_cfg["buffer_pct"])),
+                confirm_bars=trend_gate_cfg["confirm_bars"],
+                cap_bull_structure=Decimal(str(trend_gate_cfg["cap_bull_structure"])),
+                cap_transition=Decimal(str(trend_gate_cfg["cap_transition"])),
+                cap_bear_structure=Decimal(str(trend_gate_cfg["cap_bear_structure"])),
+            )
+        )
+        cost_model = CostModel(
+            taker_fee_pct=Decimal(str(costs_cfg["taker_fee_pct"])),
+            maker_fee_pct=Decimal(str(costs_cfg["maker_fee_pct"])),
+            slippage_pct=Decimal(str(costs_cfg["slippage_pct"])),
+            assume_taker=costs_cfg["assume_taker"],
+        )
+        wf_defaults = WalkForwardConfig()
+        instrument_rules = wf_defaults.instrument_rules
+        initial_equity = wf_defaults.initial_equity
+        threshold_fraction = Decimal(str(strategy_cfg["rebalance_threshold_pct"])) / Decimal("100")
 
-    feature_config = FeatureConfig(
-        zscore_lookback=hmm_cfg["zscore_lookback"],
-        use_trade_count_not_volume=settings["features"]["use_trade_count_not_volume"],
-        tier2_derivatives=False,  # đóng băng cùng FEATURE_SUBSET — pruned-8 không dùng Tầng 2
-        tier3_temporal=False,
-        feature_subset=FEATURE_SUBSET,
-    )
-    features = compute_all_features(ohlcv, feature_config)
+        feature_config = FeatureConfig(
+            zscore_lookback=hmm_cfg["zscore_lookback"],
+            use_trade_count_not_volume=settings["features"]["use_trade_count_not_volume"],
+            tier2_derivatives=False,  # đóng băng cùng FEATURE_SUBSET — pruned-8 không dùng Tầng 2
+            tier3_temporal=False,
+            feature_subset=FEATURE_SUBSET,
+        )
+        features = compute_all_features(ohlcv, feature_config)
 
-    # Tính một lần trên toàn bộ lịch sử rồi tra bảng theo bar — không gọi
-    # lại get_structure_history() mỗi bar (O(n) mỗi lần, xem lý do trong
-    # backtest/backtester.py).
-    trend_gate_history = trend_gate.get_structure_history(ohlcv)
-    sma200 = ohlcv["close"].rolling(200, min_periods=200).mean()
-    realized_vol_20 = ohlcv["close"].pct_change().rolling(20, min_periods=20).std()
+        # Tính một lần trên toàn bộ lịch sử rồi tra bảng theo bar — không gọi
+        # lại get_structure_history() mỗi bar (O(n) mỗi lần, xem lý do trong
+        # backtest/backtester.py).
+        trend_gate_history = trend_gate.get_structure_history(ohlcv)
+        sma200 = ohlcv["close"].rolling(200, min_periods=200).mean()
+        realized_vol_20 = ohlcv["close"].pct_change().rolling(20, min_periods=20).std()
+    _write_warnings_log(_format_warning_lines(setup_caught, "(setup)"))
 
     tracks: dict[str, _Track] = {}
     pending: dict[str, Decimal] = {}
@@ -474,108 +523,127 @@ def run_forward_test(now: datetime | None = None) -> dict[str, Any]:
             logger.warning("Bar %s chưa đủ warmup feature — dừng, chờ lần chạy sau.", ts.date())
             break
 
-        schedule_due = (
-            last_retrain_date is None or (ts.date() - last_retrain_date).days >= retrain_interval_days
-        )
-        # `hmm_engine.model is None` bắt đúng trường hợp tiến trình mới khởi
-        # động, chưa tới hạn retrain theo lịch, NHƯNG không có cache model để
-        # nạp — không có nhánh này thì predict_regime_filtered() bên dưới sẽ
-        # crash thay vì tự phục hồi.
-        must_retrain = schedule_due or hmm_engine.model is None
-        train_bars_used: int | None = None
-        # pandas-stubs không nhận nhãn Timestamp làm biên slice `.loc[:ts]`
-        # dù runtime hoàn toàn hợp lệ (label-based slicing chuẩn của pandas)
-        # — `# type: ignore[misc]` đúng ba chỗ dùng pattern này bên dưới.
-        if must_retrain:
-            train_features = features.loc[:ts]  # type: ignore[misc]
-            hmm_engine.select_and_train(train_features)  # raise rõ ràng nếu thiếu min_train_bars
-            train_bars_used = len(train_features)
-            last_retrain_date = ts.date()
-            _MODEL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            hmm_engine.save(str(_MODEL_CACHE_PATH))
+        # Bắt MỌI warning xảy ra khi xử lý bar này — không filter, chỉ
+        # chuyển hướng vào forward/warnings.log kèm ngày bar này (xem
+        # docstring module). `catch_warnings` lồng nhau đúng cách: warning
+        # xảy ra ở đây KHÔNG lọt vào `setup_caught` của khối ngoài, và
+        # ngược lại — mỗi bar có sổ đếm riêng.
+        with warnings.catch_warnings(record=True) as bar_caught:
+            warnings.simplefilter("always")
 
-        features_so_far = features.loc[:ts]  # type: ignore[misc]
-        regime_state = hmm_engine.predict_regime_filtered(features_so_far)
-        is_flickering = hmm_engine.is_flickering()
+            schedule_due = (
+                last_retrain_date is None or (ts.date() - last_retrain_date).days >= retrain_interval_days
+            )
+            # `hmm_engine.model is None` bắt đúng trường hợp tiến trình mới
+            # khởi động, chưa tới hạn retrain theo lịch, NHƯNG không có
+            # cache model để nạp — không có nhánh này thì
+            # predict_regime_filtered() bên dưới sẽ crash thay vì tự phục hồi.
+            must_retrain = schedule_due or hmm_engine.model is None
+            train_bars_used: int | None = None
+            # pandas-stubs không nhận nhãn Timestamp làm biên slice `.loc[:ts]`
+            # dù runtime hoàn toàn hợp lệ (label-based slicing chuẩn của
+            # pandas) — `# type: ignore[misc]` đúng ba chỗ dùng pattern này.
+            if must_retrain:
+                train_features = features.loc[:ts]  # type: ignore[misc]
+                hmm_engine.select_and_train(train_features)  # raise rõ nếu thiếu min_train_bars
+                train_bars_used = len(train_features)
+                last_retrain_date = ts.date()
+                _MODEL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                hmm_engine.save(str(_MODEL_CACHE_PATH))
 
-        bars_window = ohlcv.loc[:ts].tail(_STRATEGY_BARS_LOOKBACK)  # type: ignore[misc]
-        # Tương tự, `.loc[ts, "col"]` (tuple nhãn hàng+cột) không khớp overload
-        # của pandas-stubs cho kiểu Timestamp tường minh — `# type: ignore[index]`.
-        open_price = Decimal(str(ohlcv.loc[ts, "open"]))  # type: ignore[index]
-        close_price = Decimal(str(ohlcv.loc[ts, "close"]))  # type: ignore[index]
+            features_so_far = features.loc[:ts]  # type: ignore[misc]
+            regime_state = hmm_engine.predict_regime_filtered(features_so_far)
+            is_flickering = hmm_engine.is_flickering()
 
-        # 1) thực thi quyết định của bar TRƯỚC, tại giá OPEN của bar này —
-        # cùng cơ chế cho cả 4 track (cùng dữ liệu, cùng chi phí).
-        for prefix in _TRACK_PREFIXES:
-            execute_pending(tracks[prefix], pending[prefix], open_price, cost_model, instrument_rules)
+            bars_window = ohlcv.loc[:ts].tail(_STRATEGY_BARS_LOOKBACK)  # type: ignore[misc]
+            # Tương tự, `.loc[ts, "col"]` (tuple nhãn hàng+cột) không khớp
+            # overload của pandas-stubs cho kiểu Timestamp tường minh —
+            # `# type: ignore[index]`.
+            open_price = Decimal(str(ohlcv.loc[ts, "open"]))  # type: ignore[index]
+            close_price = Decimal(str(ohlcv.loc[ts, "close"]))  # type: ignore[index]
 
-        # 2) suy luận + quyết định target MỚI (dùng dữ liệu tới HẾT bar này) —
-        # target này trở thành "pending" cho lần chạy/bar kế tiếp.
-        strategy_track = tracks["strategy"]
-        signal = orchestrator.generate_signal(
-            _SYMBOL,
-            regime_state,
-            hmm_engine.regime_infos,
-            bars_window,
-            strategy_track.allocation(close_price),
-            is_flickering,
-        )
-        trend_gate_row = trend_gate_history.loc[ts]
-        trend_gate_cap = Decimal(str(trend_gate_row["cap"]))
-        hmm_allocation = signal.target_allocation_pct
-        final_allocation = compose_layer_allocations(hmm_allocation, trend_gate_cap)
+            # 1) thực thi quyết định của bar TRƯỚC, tại giá OPEN của bar này —
+            # cùng cơ chế cho cả 4 track (cùng dữ liệu, cùng chi phí).
+            for prefix in _TRACK_PREFIXES:
+                execute_pending(tracks[prefix], pending[prefix], open_price, cost_model, instrument_rules)
 
-        bh_target = thresholded_target(Decimal("1"), tracks["bh"].allocation(close_price), threshold_fraction)
+            # 2) suy luận + quyết định target MỚI (dùng dữ liệu tới HẾT bar
+            # này) — target này trở thành "pending" cho lần chạy/bar kế tiếp.
+            strategy_track = tracks["strategy"]
+            signal = orchestrator.generate_signal(
+                _SYMBOL,
+                regime_state,
+                hmm_engine.regime_infos,
+                bars_window,
+                strategy_track.allocation(close_price),
+                is_flickering,
+            )
+            trend_gate_row = trend_gate_history.loc[ts]
+            trend_gate_cap = Decimal(str(trend_gate_row["cap"]))
+            hmm_allocation = signal.target_allocation_pct
+            final_allocation = compose_layer_allocations(hmm_allocation, trend_gate_cap)
 
-        sma_val = sma200.loc[ts]
-        close_raw = float(ohlcv.loc[ts, "close"])  # type: ignore[index, arg-type]
-        if pd.isna(sma_val):
-            raw_sma_target = Decimal("0")
-        else:
-            raw_sma_target = Decimal("1") if close_raw > float(sma_val) else Decimal("0")
-        sma200_target = thresholded_target(
-            raw_sma_target, tracks["sma200"].allocation(close_price), threshold_fraction
-        )
+            bh_target = thresholded_target(
+                Decimal("1"), tracks["bh"].allocation(close_price), threshold_fraction
+            )
 
-        vol_val = realized_vol_20.loc[ts]
-        if pd.isna(vol_val) or vol_val <= 0:
-            raw_vol_target = Decimal("0")
-        else:
-            raw_vol_target = min(Decimal("1"), max(Decimal("0"), _TARGET_DAILY_VOL / Decimal(str(vol_val))))
-        vol_target = thresholded_target(
-            raw_vol_target, tracks["volTarget"].allocation(close_price), threshold_fraction
-        )
+            sma_val = sma200.loc[ts]
+            close_raw = float(ohlcv.loc[ts, "close"])  # type: ignore[index, arg-type]
+            if pd.isna(sma_val):
+                raw_sma_target = Decimal("0")
+            else:
+                raw_sma_target = Decimal("1") if close_raw > float(sma_val) else Decimal("0")
+            sma200_target = thresholded_target(
+                raw_sma_target, tracks["sma200"].allocation(close_price), threshold_fraction
+            )
 
-        new_targets = {
-            "strategy": final_allocation,
-            "bh": bh_target,
-            "sma200": sma200_target,
-            "volTarget": vol_target,
-        }
+            vol_val = realized_vol_20.loc[ts]
+            if pd.isna(vol_val) or vol_val <= 0:
+                raw_vol_target = Decimal("0")
+            else:
+                raw_vol_target = min(
+                    Decimal("1"), max(Decimal("0"), _TARGET_DAILY_VOL / Decimal(str(vol_val)))
+                )
+            vol_target = thresholded_target(
+                raw_vol_target, tracks["volTarget"].allocation(close_price), threshold_fraction
+            )
 
-        # 3) ghi lại — mark-to-market bằng giá ĐÓNG của bar này.
-        row: dict[str, Any] = {
-            "date": ts.date().isoformat(),
-            "run_at_utc": datetime.now(timezone.utc).isoformat(),
-            "open_price": str(open_price),
-            "close_price": str(close_price),
-            "hmm_retrained": must_retrain,
-            "hmm_train_bars": train_bars_used if train_bars_used is not None else "",
-            "regime_id": regime_state.state_id,
-            "regime_label": regime_state.label,
-            "regime_probability": regime_state.probability,
-            "regime_is_confirmed": regime_state.is_confirmed,
-            "is_flickering": is_flickering,
-            "hmm_allocation": str(hmm_allocation),
-            "trend_gate_state": trend_gate_row["confirmed_state"],
-            "trend_gate_cap": str(trend_gate_cap),
-            "final_allocation": str(final_allocation),
-        }
-        for prefix in _TRACK_PREFIXES:
-            row[f"{prefix}_cash"] = str(tracks[prefix].cash)
-            row[f"{prefix}_qty"] = str(tracks[prefix].qty)
-            row[f"{prefix}_equity"] = str(tracks[prefix].equity(close_price))
-            row[f"{prefix}_target_allocation"] = str(new_targets[prefix])
+            new_targets = {
+                "strategy": final_allocation,
+                "bh": bh_target,
+                "sma200": sma200_target,
+                "volTarget": vol_target,
+            }
+
+            # 3) ghi lại — mark-to-market bằng giá ĐÓNG của bar này.
+            row: dict[str, Any] = {
+                "date": ts.date().isoformat(),
+                "run_at_utc": datetime.now(timezone.utc).isoformat(),
+                "open_price": str(open_price),
+                "close_price": str(close_price),
+                "hmm_retrained": must_retrain,
+                "hmm_train_bars": train_bars_used if train_bars_used is not None else "",
+                "regime_id": regime_state.state_id,
+                "regime_label": regime_state.label,
+                "regime_probability": regime_state.probability,
+                "regime_is_confirmed": regime_state.is_confirmed,
+                "is_flickering": is_flickering,
+                "hmm_allocation": str(hmm_allocation),
+                "trend_gate_state": trend_gate_row["confirmed_state"],
+                "trend_gate_cap": str(trend_gate_cap),
+                "final_allocation": str(final_allocation),
+            }
+            for prefix in _TRACK_PREFIXES:
+                row[f"{prefix}_cash"] = str(tracks[prefix].cash)
+                row[f"{prefix}_qty"] = str(tracks[prefix].qty)
+                row[f"{prefix}_equity"] = str(tracks[prefix].equity(close_price))
+                row[f"{prefix}_target_allocation"] = str(new_targets[prefix])
+
+        # Warning count/log NGOÀI khối `with` (đã đóng, `bar_caught` là danh
+        # sách cuối cùng) nhưng vẫn trong bar_date của bar này — đặt
+        # `warning_count` vào row trước khi append, không sau.
+        row["warning_count"] = len(bar_caught)
+        _write_warnings_log(_format_warning_lines(bar_caught, ts.date().isoformat()))
 
         append_row(row)
         appended += 1

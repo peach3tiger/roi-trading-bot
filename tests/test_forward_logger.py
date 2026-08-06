@@ -9,6 +9,7 @@ trùng, và chạy hằng ngày hay hằng tuần cho cùng một log.csv cuối
 from __future__ import annotations
 
 import inspect
+import warnings
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -244,9 +245,11 @@ def _stub_settings() -> dict:
 
 @pytest.fixture
 def _forward_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Trỏ log.csv sang tmp_path, chặn hoàn toàn mạng/config thật."""
+    """Trỏ log.csv/warnings.log sang tmp_path, chặn hoàn toàn mạng/config thật."""
     log_path = tmp_path / "log.csv"
+    warnings_path = tmp_path / "warnings.log"
     monkeypatch.setattr(fwd, "_LOG_PATH", log_path)
+    monkeypatch.setattr(fwd, "_WARNINGS_LOG_PATH", warnings_path)
     monkeypatch.setattr(fwd, "_MODEL_CACHE_PATH", tmp_path / "state" / "hmm_model.pkl")
     monkeypatch.setattr(fwd, "load_frozen_settings", _stub_settings)
 
@@ -257,11 +260,11 @@ def _forward_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             return synthetic
 
     monkeypatch.setattr(fwd, "HistoryLoader", _StubLoader)
-    return log_path, synthetic
+    return log_path, synthetic, warnings_path
 
 
 def test_run_forward_test_first_run_appends_exactly_one_row(_forward_harness) -> None:
-    log_path, synthetic = _forward_harness
+    log_path, synthetic, _warnings_path = _forward_harness
     now = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()  # bar 160 vừa đóng
 
     result = fwd.run_forward_test(now=now)
@@ -273,7 +276,7 @@ def test_run_forward_test_first_run_appends_exactly_one_row(_forward_harness) ->
 
 
 def test_run_forward_test_same_day_rerun_is_idempotent(_forward_harness) -> None:
-    log_path, synthetic = _forward_harness
+    log_path, synthetic, _warnings_path = _forward_harness
     now = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()
 
     fwd.run_forward_test(now=now)
@@ -286,7 +289,7 @@ def test_run_forward_test_same_day_rerun_is_idempotent(_forward_harness) -> None
 
 
 def test_run_forward_test_backfills_gap_without_touching_prior_rows(_forward_harness) -> None:
-    log_path, synthetic = _forward_harness
+    log_path, synthetic, _warnings_path = _forward_harness
     now_day1 = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()
     fwd.run_forward_test(now=now_day1)
     content_after_day1 = log_path.read_text(encoding="utf-8")
@@ -306,3 +309,102 @@ def test_run_forward_test_backfills_gap_without_touching_prior_rows(_forward_har
     # 4 track đều có equity > 0 xuyên suốt — không cash âm, không NaN.
     for prefix in fwd._TRACK_PREFIXES:
         assert (df[f"{prefix}_equity"].astype(float) > 0).all()
+
+
+# ----------------------------------------------------------------------
+# Warnings — KHÔNG filter, chuyển hướng vào forward/warnings.log + đếm
+# ----------------------------------------------------------------------
+
+
+def test_format_warning_lines_includes_bar_date_category_and_message() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.warn("divide by zero encountered in matmul", RuntimeWarning)
+
+    lines = fwd._format_warning_lines(caught, "2026-08-05", now=datetime(2026, 8, 6, tzinfo=timezone.utc))
+
+    assert len(lines) == 1
+    parts = lines[0].rstrip("\n").split("\t")
+    assert parts[0] == "2026-08-06T00:00:00+00:00"
+    assert parts[1] == "2026-08-05"
+    assert parts[2] == "RuntimeWarning"
+    assert parts[3] == "divide by zero encountered in matmul"
+
+
+def test_format_warning_lines_empty_when_nothing_caught() -> None:
+    assert fwd._format_warning_lines([], "2026-08-05") == []
+
+
+def test_format_warning_lines_does_not_drop_any_category() -> None:
+    """"KHÔNG filter" — mọi warning bắt được đều thành một dòng, bất kể
+    category hay nội dung (đối lập với pyproject.toml's pytest
+    filterwarnings, vốn CHỦ Ý bỏ qua matmul/convergence warning khi test)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.warn("a", RuntimeWarning)
+        warnings.warn("b", UserWarning)
+        warnings.warn("c", DeprecationWarning)
+
+    lines = fwd._format_warning_lines(caught, "2026-08-05")
+    assert len(lines) == 3
+
+
+def test_write_warnings_log_never_rewrites_prior_lines(tmp_path: Path) -> None:
+    path = tmp_path / "warnings.log"
+    fwd._write_warnings_log(["line1\n", "line2\n"], path=path)
+    before = path.read_text(encoding="utf-8")
+
+    fwd._write_warnings_log(["line3\n"], path=path)
+    after = path.read_text(encoding="utf-8")
+
+    assert after.startswith(before)
+    assert after == before + "line3\n"
+
+
+def test_write_warnings_log_noop_when_no_lines(tmp_path: Path) -> None:
+    path = tmp_path / "warnings.log"
+    fwd._write_warnings_log([], path=path)
+    assert not path.exists()  # không tạo file rỗng khi không có gì để ghi
+
+
+def test_run_forward_test_counts_and_logs_warnings_per_bar(
+    _forward_harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ép một warning thật xảy ra đúng 1 lần trong khối xử lý bar (qua
+    `compose_layer_allocations`, gọi đúng 1 lần/bar) — kiểm chứng
+    `warning_count` trong log.csv khớp, và forward/warnings.log nhận đúng
+    dòng, gắn đúng bar date, KHÔNG bị filter mất.
+    """
+    log_path, synthetic, warnings_path = _forward_harness
+    real_compose = fwd.compose_layer_allocations
+
+    def _compose_and_warn(*args: object) -> object:
+        warnings.warn("synthetic test warning", RuntimeWarning)
+        return real_compose(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fwd, "compose_layer_allocations", _compose_and_warn)
+
+    now = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()
+    fwd.run_forward_test(now=now)
+
+    df = fwd.read_existing_log(path=log_path)
+    assert df is not None
+    assert df.iloc[0]["warning_count"] == 1
+
+    assert warnings_path.exists()
+    log_lines = warnings_path.read_text(encoding="utf-8").splitlines()
+    bar_lines = [ln for ln in log_lines if "\t2026" in ln or synthetic.index[160].strftime("%Y-%m-%d") in ln]
+    assert any("synthetic test warning" in ln for ln in bar_lines)
+    assert any("RuntimeWarning" in ln for ln in bar_lines)
+
+
+def test_run_forward_test_zero_warnings_when_none_raised(_forward_harness) -> None:
+    log_path, synthetic, warnings_path = _forward_harness
+    now = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()
+
+    fwd.run_forward_test(now=now)
+
+    df = fwd.read_existing_log(path=log_path)
+    assert df is not None
+    assert int(df.iloc[0]["warning_count"]) == 0
+    assert not warnings_path.exists()  # không tạo file khi không có warning nào
