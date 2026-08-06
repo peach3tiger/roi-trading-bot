@@ -9,10 +9,12 @@ Bot phân bổ danh mục BTC/USDT theo chế độ biến động: HMM phát hi
 bằng forward algorithm (không nhìn tương lai), long-only, giảm tỷ trọng khi
 biến động cao thay vì đảo chiều short. Walk-forward backtest đạt 6/8 tiêu
 chí đi tiếp (§4.9) — giảm drawdown thật so với buy-and-hold nhưng **chưa**
-chứng minh được lợi thế Sharpe — nên chưa xây tầng đặt lệnh; hiện đang chạy
-forward test ghi log 12 tháng để lấy bằng chứng ngoài mẫu thật. Testnet là
-mặc định, chuyển mainnet cần gõ tay xác nhận, và risk manager (khi được
-xây) có quyền phủ quyết tuyệt đối, độc lập hoàn toàn với HMM.
+chứng minh được lợi thế Sharpe; đang chạy forward test ghi log 12 tháng để
+lấy bằng chứng ngoài mẫu thật, song song xây tầng thực thi ở TESTNET
+(`risk_manager` đã xong, `order_executor` đang làm — chưa đủ để đặt lệnh
+nào). Testnet là mặc định, chuyển mainnet cần gõ tay xác nhận **và** đạt
+mốc 12 tháng của forward test, và risk manager có quyền phủ quyết tuyệt
+đối, độc lập hoàn toàn với HMM.
 
 ## Sơ đồ
 
@@ -47,9 +49,12 @@ hmm_allocation  (LowVol 95% / MidVol 60-95% / HighVol 50%, ×0.5 nếu bất đ�
 ## Trạng thái hiện tại
 
 **6/8 tiêu chí §4.9 PASS** (2 fail nằm trong sai số đo, xem
-[docs/VALIDATION_REPORT.md](docs/VALIDATION_REPORT.md)). Theo CLAUDE.md bất
-biến #12: **chưa đủ 8/8 → chưa xây tầng thực thi** (risk manager/order
-executor vẫn là stub).
+[docs/VALIDATION_REPORT.md](docs/VALIDATION_REPORT.md)). CLAUDE.md bất
+biến #12 đã sửa (2026-08-06): chưa đủ 8/8 vẫn được xây tầng thực thi ở
+**TESTNET** — `core/risk_manager.py` đã implement (Phase 8/phase-08).
+`broker/order_executor.py` (Phase 9/phase-09) vẫn là stub. **Mainnet/tiền
+thật vẫn bị chặn** tới khi forward test đạt mốc 12 tháng (2027-08-06) và
+§4.9 được đánh giá lại trên dữ liệu forward.
 
 Đang chạy **forward test** (ghi log, không đặt lệnh) thay vì tiếp tục quét
 tham số trên dữ liệu lịch sử — tập đó đã bị nhìn quá nhiều lần, không còn
@@ -145,12 +150,15 @@ phá toàn bộ mô hình phòng thủ:
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | nhật ký quyết định + số liệu thật, theo thời gian |
 | [`docs/VALIDATION_REPORT.md`](docs/VALIDATION_REPORT.md) | đóng giai đoạn kiểm định Phase 1-7, bảng §4.9 đầy đủ |
 | [`forward/README.md`](forward/README.md) | forward test — đóng băng config, backfill, launchd |
+| [`ops/RUNBOOK.md`](ops/RUNBOOK.md) | triển khai container — circuit breaker, HMM retrain lỗi, mất WebSocket, khôi phục sau crash |
 
 ## Disclaimer
 
 Testnet Bybit là mặc định (`config/settings.yaml: testnet: true`);
-mainnet yêu cầu gõ tay chuỗi xác nhận đầy đủ. Chưa có tầng đặt lệnh nào
-được xây (chưa đủ 8/8 §4.9). Đây không phải lời khuyên đầu tư — kể cả sau
+mainnet yêu cầu gõ tay chuỗi xác nhận đầy đủ **và** đạt mốc 12 tháng của
+forward test (2027-08-06, CLAUDE.md bất biến #12). `broker/order_executor.py`
+chưa xong nên chưa có đường nào đặt lệnh được, kể cả ở testnet. Đây không
+phải lời khuyên đầu tư — kể cả sau
 khi forward test xong 12 tháng, kết quả OOS tốt trên một chu kỳ thị trường
 không đảm bảo gì cho chu kỳ sau. Không hardcode credentials; `.env` nằm
 trong `.gitignore`.
