@@ -1,0 +1,39 @@
+# Build context cho ops/Dockerfile là GỐC REPO (context: .. trong
+# ops/docker-compose.yml) — không có file này, `.env` (credentials thật)
+# sẽ bị COPY thẳng vào image layer bởi `COPY . .` trong Dockerfile. Đây là
+# rò rỉ credential nghiêm trọng hơn cả log — nằm vĩnh viễn trong layer
+# history của image, kể cả sau khi xoá file ở layer sau (CLAUDE.md bất
+# biến #6). File .env.example KHÔNG bị loại — nó không chứa bí mật thật.
+
+.env
+config/credentials.yaml
+
+.git/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Dữ liệu/log/model runtime — mount qua volume (docker-compose.yml), không
+# cần build cứng vào image.
+data/cache/
+logs/
+models/
+state/
+forward/log.csv
+forward/warnings.log
+forward/state/
+forward/launchd.*.log
+
+# Không cần trong image chạy (đây là image cho live loop, không chạy
+# pytest bên trong) — chỉ dùng lúc phát triển trên máy host.
+reports/
+tests/
+requirements-dev.txt

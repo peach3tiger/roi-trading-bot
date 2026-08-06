@@ -1,0 +1,60 @@
+# ops/docker-compose.yml — chạy từ đây: `docker compose -f ops/docker-compose.yml up -d`
+# (hoặc `cd ops && docker compose up -d`). context trỏ về gốc repo (`..`)
+# vì Dockerfile COPY toàn bộ mã nguồn, không chỉ ops/.
+#
+# QUAN TRỌNG — service này KHÔNG BAO GIỜ chạy forward/logger.py. Mount
+# forward/ ở đây CHỈ ĐỂ ĐỌC (`:ro`) — cho một dashboard/log-viewer tương lai
+# xem được trạng thái thí nghiệm forward test đang chạy trên host, không
+# phải để container tự chạy nó. Forward test là thí nghiệm đã đóng băng
+# cấu hình, chạy qua launchd trên host — xem forward/README.md và
+# docs/DECISIONS.md "Forward test — tiền đăng ký". `command:` của service
+# này không được đổi để trỏ vào `forward.logger` dưới bất kỳ hình thức nào;
+# ops/entrypoint.sh chặn việc này ở tầng runtime nếu ai đó thử.
+
+services:
+  bot:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: regime-trader-crypto:latest
+    container_name: regime-trader-crypto
+    restart: unless-stopped
+    # CẢNH BÁO: main.py chưa implement live loop (Phase 10 — xem
+    # ops/RUNBOOK.md "Trạng thái hiện tại"). Cho tới khi Phase 9/10 xong,
+    # container này sẽ thoát ngay với NotImplementedError và
+    # `restart: unless-stopped` sẽ crash-loop liên tục — đây là hành vi
+    # ĐÚNG cho một tính năng chưa xây (fail loud), không phải bug của
+    # ops/. Đổi thành `on-failure:3` hoặc `no` nếu crash-loop gây phiền
+    # trong lúc phát triển; đừng đổi thành `always` để "che" crash-loop.
+    # `.env` PHẢI tồn tại (copy từ .env.example) trước khi `docker compose
+    # up` — compose lỗi ngay nếu thiếu file, đây là chủ đích (fail loud hơn
+    # là chạy thiếu credentials rồi lỗi mù mờ ở đâu đó sau). Không commit
+    # `.env` thật (.gitignore + .dockerignore đều đã chặn).
+    env_file:
+      - ../.env
+    environment:
+      CONFIG_PATH: /app/config/settings.yaml
+      MODEL_PATH: /app/models/hmm_model.pkl
+      LOG_DIR: /app/logs
+      STATE_DIR: /app/state
+      TZ: UTC
+    volumes:
+      # Config đọc-ghi được vì health check + main loop tương lai có thể
+      # cần cập nhật (vd. cache InstrumentRules) — hẹp phạm vi nếu Phase 10
+      # cho thấy không cần ghi.
+      - ../config:/app/config
+      - ../logs:/app/logs
+      - ../models:/app/models
+      - ../state:/app/state
+      # CHỈ ĐỌC — xem cảnh báo ở đầu file. Không xoá `:ro`.
+      - ../forward:/app/forward:ro
+      # Cache OHLCV đã tải — tránh container mới phải tải lại toàn bộ lịch
+      # sử từ Binance mỗi lần khởi động.
+      - ../data/cache:/app/data/cache
+    # Docker healthcheck từ Dockerfile HEALTHCHECK — không cần khai báo lại
+    # trừ khi muốn override interval/timeout riêng cho compose.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
