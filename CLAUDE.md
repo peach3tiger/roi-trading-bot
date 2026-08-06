@@ -85,11 +85,37 @@ Mọi feature tính trên rolling window **chỉ nhìn về quá khứ**. Không
 
 ## Kỷ luật quy trình
 
-### 12. Không đi tiếp khi chưa qua điểm dừng Phase 4
+### 12. Xây tầng thực thi được phép ở mức TESTNET
 
-Sau Phase 4, đối chiếu 8 tiêu chí ở §4.9 của spec. Không đủ 8/8 thì **không xây tầng thực thi**.
+**Sửa đổi có chủ ý ngày 2026-08-06, sau khi đã thấy kết quả §4.9 (6/8 PASS
+— xem `docs/VALIDATION_REPORT.md`) — không phải diễn giải lại quy tắc gốc.**
+Quy tắc gốc ("Sau Phase 4, đối chiếu 8 tiêu chí ở §4.9 của spec. Không đủ
+8/8 thì không xây tầng thực thi.") được viết TRƯỚC khi có kết quả, và đã
+làm đúng việc nó phải làm: chặn dự án đi tiếp cho tới khi đối chiếu xong 8
+tiêu chí bằng số thật, không phải bằng trực giác. Bản sửa đổi này KHÔNG nới
+lỏng kỷ luật đó — nó thêm một cổng chặn mới, chặt hơn ở phía tiền thật.
 
-Nếu tôi bảo bạn bỏ qua bước này, hãy nhắc tôi rằng chính tôi đã viết ra nó, và hỏi lại một lần nữa trước khi làm.
+**KHÔNG được vào mainnet, không được đặt lệnh bằng tiền thật**, cho tới khi
+forward test đạt kết quả ở mốc 12 tháng (2027-08-06, xem `docs/DECISIONS.md`
+mục "Forward test — tiền đăng ký") **VÀ** §4.9 được đánh giá lại trên dữ
+liệu forward (không phải dữ liệu lịch sử đã dùng để kiểm định).
+
+Ở mức **TESTNET**, được phép xây tầng thực thi (risk manager, order
+executor, main loop) dù chưa đủ 8/8 — lý do dời cổng: (1) hai FAIL của §4.9
+nằm trong sai số đo đã lượng hoá được (`docs/VALIDATION_REPORT.md` mục 3.1);
+(2) testnet không có rủi ro tài chính; (3) lỗi thực thi (order sizing,
+idempotency qua `orderLinkId`, stop loss, circuit breaker) chỉ lộ ra khi
+chạy thật qua sàn, không lộ ra khi chỉ backtest.
+
+Lý do GIỮ cổng ở mainnet, không dời luôn cả hai: chiến lược vẫn **chưa**
+chứng minh được lợi thế Sharpe so với `sma200_trend` (0.9567) và
+`static_vol_target` (0.9142) — hai benchmark đơn giản hơn nhiều, không dùng
+HMM (`docs/VALIDATION_REPORT.md` mục 2). Xây xong tầng thực thi không phải
+bằng chứng nên dùng nó với tiền thật.
+
+Nếu tôi bảo bạn bỏ qua bước này (vào mainnet trước mốc 12 tháng, hoặc
+trước khi §4.9 được đánh giá lại trên dữ liệu forward), hãy nhắc tôi rằng
+chính tôi đã viết ra nó, và hỏi lại một lần nữa trước khi làm.
 
 ### 13. Thêm feature phải có ablation
 

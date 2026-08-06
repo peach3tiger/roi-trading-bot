@@ -467,3 +467,46 @@ thí nghiệm mới):
    bù khi máy thức dậy — cần thiết cho 12 tháng không người trông trên
    laptop. Hướng dẫn nạp/kiểm tra/gỡ: `forward/README.md`, mục "Lịch chạy
    tự động (launchd)".
+
+---
+
+## Sửa CLAUDE.md bất biến #12 (2026-08-06)
+
+**Sửa đổi có chủ ý, sau khi đã thấy kết quả §4.9 (6/8 PASS) — không phải
+diễn giải lại quy tắc gốc.** Ghi lại đây, đủ chi tiết để không cần đoán lại
+ý định khi đọc lại sau này. Nội dung đầy đủ đã sửa: `CLAUDE.md`, bất biến
+#12.
+
+**Quy tắc gốc** (viết trước Phase 4, trước khi có bất kỳ kết quả nào):
+"Sau Phase 4, đối chiếu 8 tiêu chí ở §4.9 của spec. Không đủ 8/8 thì không
+xây tầng thực thi." Quy tắc gốc đã làm đúng việc nó phải làm — chặn dự án
+xây risk manager/order executor cho tới khi 8 tiêu chí được đối chiếu bằng
+số thật (`docs/VALIDATION_REPORT.md`), không phải bằng cảm giác "chắc là
+được rồi".
+
+**Quy tắc mới:** Xây tầng thực thi được phép ở mức TESTNET. KHÔNG được vào
+mainnet, không được đặt lệnh bằng tiền thật, cho tới khi forward test đạt
+kết quả ở mốc 12 tháng (2027-08-06) và §4.9 được đánh giá lại trên dữ liệu
+forward.
+
+**Lý do dời cổng** (testnet được phép dù chưa đủ 8/8):
+- 6/8 với hai FAIL nằm trong sai số đo đã lượng hoá được (0.059 và 0.173,
+  cả hai nhỏ hơn biên độ nhiễu bar-offset 0.217 — `docs/VALIDATION_REPORT.md`
+  mục 3.1).
+- Testnet không có rủi ro tài chính.
+- Lỗi thực thi (order sizing, idempotency qua `orderLinkId`, stop loss,
+  circuit breaker) chỉ lộ ra khi chạy thật qua sàn — không lộ ra khi chỉ
+  backtest, kể cả backtest kỹ tới đâu.
+
+**Lý do GIỮ cổng ở mainnet** (không dời luôn cả hai cổng cùng lúc):
+Chiến lược vẫn **chưa** chứng minh được lợi thế Sharpe so với hai benchmark
+không dùng HMM: `sma200_trend` (0.9567) và `static_vol_target` (0.9142),
+trong khi strategy chỉ đạt 0.9411 (`docs/VALIDATION_REPORT.md` mục 2). Xây
+xong tầng thực thi (kỹ thuật) không phải bằng chứng nên dùng nó với tiền
+thật (chiến lược).
+
+**Điều gì KHÔNG đổi:** cơ chế tự nhắc — nếu ai (kể cả chính người viết
+`CLAUDE.md`) bảo bỏ qua bước này lần nữa (vào mainnet trước mốc 12 tháng,
+hoặc trước khi §4.9 đánh giá lại trên dữ liệu forward), quy tắc vẫn yêu
+cầu nhắc rằng chính người đó đã viết ra nó, và hỏi lại một lần nữa trước
+khi làm — không tự động vượt qua chỉ vì đã có một lần nới lỏng trước đó.
