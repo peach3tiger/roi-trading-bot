@@ -386,3 +386,47 @@ tiêu chí 6 của nó (biên độ 0.217) không đổi.
   ít window walk-forward độc lập hơn (`samples_per_param`-kiểu vấn đề nhưng
   theo trục số WINDOW thay vì số feature). Chưa điều tra, để phiên sau nếu
   cần dùng cửa sổ ngắn cho việc gì khác.
+
+---
+
+## Forward test — tiền đăng ký (2026-08-06)
+
+Ghi lại **trước khi chạy lần đầu tiên** — cùng tinh thần tiền đăng ký đã
+dùng cho thí nghiệm Tầng 2 ở trên. Theo `docs/VALIDATION_REPORT.md` mục 6:
+tập kiểm định lịch sử đã cạn (bị nhìn nhiều lần trong quá trình chẩn đoán,
+không còn ngoài mẫu — mục 3.4), không xây Phase 8-12, chuyển sang forward
+test ghi log, không đặt lệnh. Code: `forward/logger.py`,
+`forward/config_frozen.yaml`, `forward/README.md`.
+
+**Ngày bắt đầu:** 2026-08-06.
+
+**Hash cấu hình đóng băng** (`forward/config_frozen.yaml`, bản copy nguyên
+văn `config/settings.yaml` tại ngày bắt đầu):
+
+```
+SHA256: be741c659bc5a11d607955e64ec27cb0b194c1b6c368ca09704b8d056a1ec15c
+```
+
+Đóng băng cùng lúc với hash này — coi là MỘT khối duy nhất: `FEATURE_SUBSET`
+trong `forward/logger.py` (8 cột pruned-8 đã kiểm định:
+`log_return_1, log_return_5, realized_vol_20, vol_ratio_5_20, adx_14,
+sma50_slope, trade_count_zscore_50, trade_count_sma10_slope`) — không nằm
+trong `settings.yaml` (tham số CLI-only ở `main.py`), nên phải đóng băng
+làm hằng số nguồn đã commit.
+
+**Mốc đánh giá:**
+
+| mốc | ngày | mục đích |
+|---|---|---|
+| 3 tháng | 2026-11-06 | chỉ xem hành vi (regime có đổi hợp lý không, có bug ghi log không) — KHÔNG rút kết luận thống kê, quá ít bar |
+| 6 tháng | 2027-02-06 | đọc sơ bộ (xu hướng equity 4 track, có bất thường rõ ràng không) — vẫn KHÔNG đủ bar cho Sharpe đáng tin |
+| 12 tháng | 2027-08-06 | thống kê đầu tiên có nghĩa (Sharpe/Calmar/max DD trên ~365 bar thật, ngoài mẫu, chưa từng bị nhìn trước đó) |
+
+**KHÔNG sửa cấu hình giữa chừng.** `forward/config_frozen.yaml` và
+`FEATURE_SUBSET` đóng băng tại ngày bắt đầu ở trên — `load_frozen_settings()`
+kiểm tra lại sha256 mỗi lần chạy, sửa file sau đó làm chương trình dừng
+ngay (không âm thầm chạy tiếp). Muốn sửa bất kỳ tham số nào (feature,
+retrain interval, cost model, ngưỡng rebalance, ...): **KẾT THÚC thí
+nghiệm này, bắt đầu thí nghiệm mới** với `config_frozen.yaml`/hash mới,
+ghi rõ lý do và ngày bắt đầu mới vào đây — không sửa tại chỗ, không nối
+tiếp log.csv cũ sang cấu hình khác.
