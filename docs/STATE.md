@@ -7,6 +7,16 @@
 
 - Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 227 passed
   / 0 skipped.
+- **Khoảng trống đã biết, chưa xử lý:** `core/signal_generator.py::SignalGenerator`
+  (dùng bởi `main.py::run_live_loop`, Phase 10) là đường nối dây thứ BA,
+  độc lập với `forward/logger.py`/`tests/test_forward_golden.py` (cả hai
+  cái đó gọi thẳng HMM/strategy/trend_gate/`compose_layer_allocations`,
+  bỏ qua class `SignalGenerator` hoàn toàn — xác nhận 2026-08-07, xem
+  docstring `tests/test_forward_golden.py`). Golden test + forward test
+  hằng ngày KHÔNG bảo vệ được `SignalGenerator`; chỉ
+  `tests/test_signal_generator.py` phủ nó. Chưa quyết định: hợp nhất một
+  đường (forward/logger.py đi qua `SignalGenerator`?) hay giữ nguyên ba
+  đường độc lập — cần quyết định của người, không tự sửa.
 - Forward test chạy từ 2026-08-06, cấu hình đóng băng, launchd hằng ngày.
   Mốc đánh giá: 2026-11-06 / 2027-02-06 / 2027-08-06. Không đụng tới.
 - Cổng: `CLAUDE.md` #12 — xây tầng thực thi ở **testnet** được, **mainnet**

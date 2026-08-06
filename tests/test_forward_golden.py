@@ -23,6 +23,47 @@ Chạy TOÀN BỘ chuỗi feature → HMM → strategy → trend gate →
 
 Xem CLAUDE.md bất biến #15 — file này nằm trong danh sách test bắt buộc
 không được skip/xfail/comment out.
+
+**Đối chiếu đường gọi với forward/logger.py::run_forward_test() (2026-08-07,
+xem docs/STATE.md) — XÁC NHẬN TRÙNG NHAU**, cả hai đều BỎ QUA
+`core/signal_generator.py::SignalGenerator` (class) và gọi trực tiếp cùng
+4 thành phần theo cùng thứ tự (dòng bên trái = `_run_golden_pipeline()`
+file này, dòng bên phải = `forward/logger.py`):
+
+    HMMRegimeEngine(...)                              L129-137  ~  L428-436
+    StrategyOrchestrator(..., uncertainty_mode="halve")L138-142  ~  L437-443
+    StructuralTrendGate(TrendGateConfig(...))         L143      ~  L444-454
+    compute_all_features(ohlcv, feature_config)       L121      ~  L473
+    trend_gate.get_structure_history(ohlcv)  (1 lần)  L144      ~  L478
+    engine.select_and_train(...)                      L147      ~  L546-548
+    engine.predict_regime_filtered(features_so_far)   L157      ~  L555
+    engine.is_flickering()                            L158      ~  L556
+    orchestrator.generate_signal(...)                 L161-163  ~  L573-580
+    trend_gate_history.loc[ts]["cap"]                 L165-166  ~  L581-582
+    compose_layer_allocations(hmm_alloc, tg_cap)       L168      ~  L584
+
+Cả hai import `compose_layer_allocations` như HÀM THUẦN từ
+`core.signal_generator`, KHÔNG BAO GIỜ dùng class `SignalGenerator` —
+xác nhận bằng `grep -n "SignalGenerator" forward/logger.py
+tests/test_forward_golden.py` (0 kết quả cả hai file).
+
+Hai khác biệt Ở MỨC THAM SỐ (không phải khác hàm/lớp được gọi, không ảnh
+hưởng tới kết luận "đường gọi trùng nhau"):
+- `bars_window`: file này dùng `ohlcv.loc[:ts]` (không giới hạn),
+  `forward/logger.py` dùng `.tail(_STRATEGY_BARS_LOOKBACK)` (300 bar) —
+  vô hại trong thực tế vì EMA50/ATR14 hội tụ trong vài chục bar (xem
+  `core/regime_strategies.py::_ema`), nhưng là khác biệt THẬT ở input.
+- `select_and_train()`: file này gọi ĐÚNG MỘT LẦN trước vòng lặp (khoá
+  wiring, không khoá lịch retrain — xem docstring `_run_golden_pipeline`);
+  `forward/logger.py` gọi CÓ ĐIỀU KIỆN mỗi bar theo `retrain_interval_days`.
+
+**Phát hiện phụ, KHÔNG phải lệch giữa hai đường trên** (không được golden
+test này bảo vệ, ghi lại để không lặp lại nhầm lẫn): `SignalGenerator`
+(dùng bởi `main.py::run_live_loop`, Phase 10) là một cách nối dây THỨ BA,
+độc lập, không được golden test này lẫn `forward/logger.py` chạm tới — chỉ
+`tests/test_signal_generator.py` phủ nó. Một bug ở
+`SignalGenerator._apply_layer_caps()` sẽ không bị golden test này hay
+forward test hằng ngày bắt được.
 """
 
 from __future__ import annotations
