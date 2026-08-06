@@ -23,6 +23,7 @@ import ccxt
 import pandas as pd
 
 _MAX_LIMIT = 200
+_MAX_KLINE_LIMIT = 1000
 _DEFAULT_PROBE_START = datetime(2018, 1, 1, tzinfo=timezone.utc)
 
 OpenInterestInterval = Literal["5min", "15min", "30min", "1h", "4h", "1d"]
@@ -181,3 +182,86 @@ class DerivativesLoader:
         df["open_interest"] = df["openInterest"].astype(float)
         df = df.set_index("timestamp")[["open_interest"]].sort_index()
         return df[~df.index.duplicated(keep="last")]
+
+    # ------------------------------------------------------------------
+    # Perp close (cho perp_spot_basis — spot lấy từ HistoryLoader/Binance
+    # riêng, ở đây chỉ lấy giá đóng cửa của hợp đồng linear perpetual)
+    # ------------------------------------------------------------------
+
+    def load_perp_close(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+        """Giá đóng cửa daily của hợp đồng linear perpetual (`/v5/market/kline`,
+        category=linear) — không phải fetch_ohlcv chuẩn hoá của ccxt, dùng
+        raw endpoint để nhất quán với `load_funding_rate`/`load_open_interest`.
+        Phân trang LÙI theo `end`, không có cursor (giống funding rate)."""
+        rows = self._paginate_kline_backward(symbol, start, end)
+        return self._kline_rows_to_frame(rows)
+
+    def _paginate_kline_backward(self, symbol: str, start: datetime, end: datetime) -> list[list]:
+        rows: list[list] = []
+        cursor_end_ms = int(end.timestamp() * 1000)
+        start_ms = int(start.timestamp() * 1000)
+
+        while cursor_end_ms >= start_ms:
+            params = {
+                "category": self._category,
+                "symbol": symbol,
+                "interval": "D",
+                "start": start_ms,
+                "end": cursor_end_ms,
+                "limit": _MAX_KLINE_LIMIT,
+            }
+            response = self._exchange.publicGetV5MarketKline(params)
+            page = response["result"]["list"]
+            if not page:
+                break
+            rows.extend(page)
+
+            oldest_ms = min(int(r[0]) for r in page)
+            if oldest_ms <= start_ms or len(page) < _MAX_KLINE_LIMIT:
+                break
+            next_end_ms = oldest_ms - 1
+            if next_end_ms >= cursor_end_ms:
+                break
+            cursor_end_ms = next_end_ms
+            time.sleep(self._exchange.rateLimit / 1000)
+
+        return rows
+
+    @staticmethod
+    def _kline_rows_to_frame(rows: list[list]) -> pd.DataFrame:
+        if not rows:
+            empty = pd.DataFrame(columns=["perp_close"])
+            empty.index = pd.DatetimeIndex([], name="timestamp", tz="UTC")
+            return empty
+        df = pd.DataFrame(rows, columns=["start", "open", "high", "low", "close", "volume", "turnover"])
+        df["timestamp"] = pd.to_datetime(df["start"].astype("int64"), unit="ms", utc=True)
+        df["perp_close"] = df["close"].astype(float)
+        df = df.set_index("timestamp")[["perp_close"]].sort_index()
+        return df[~df.index.duplicated(keep="last")]
+
+    # ------------------------------------------------------------------
+    # Bundle Tầng 2 — gộp funding/OI/perp thành một frame căn theo bar 1d
+    # ------------------------------------------------------------------
+
+    def load_tier2_bundle(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+        """Gộp funding_rate (8h -> daily mean), open_interest (đã 1d), và
+        perp_close (đã 1d) thành một DataFrame căn theo mốc 00:00 UTC — khớp
+        với OHLCV daily offset0 mặc định của `HistoryLoader`. Dùng
+        `bar_offset_hours` khác 0 với dữ liệu Tầng 2 CHƯA được hỗ trợ (Bybit
+        không có tham số timeZone cho các endpoint này như Binance klines).
+        """
+        funding = self.load_funding_rate(symbol, start, end)
+        oi = self.load_open_interest(symbol, start, end, interval="1d")
+        perp = self.load_perp_close(symbol, start, end)
+
+        funding_daily = funding["funding_rate"].resample("1D").mean()
+        funding_daily.index.name = "timestamp"
+
+        combined = pd.DataFrame(
+            {
+                "funding_rate": funding_daily,
+                "open_interest": oi["open_interest"],
+                "perp_close": perp["perp_close"],
+            }
+        )
+        return combined.sort_index()

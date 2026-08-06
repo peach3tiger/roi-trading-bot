@@ -261,31 +261,59 @@ việc cần làm đầu tiên khi bắt đầu chạy, chưa làm trong phiên 
 
 ### Ngưỡng thành công — chốt trước khi chạy
 
-- **Sharpe cải thiện ≥ 0.20 so với baseline pruned-8 cùng cửa sổ ngắn**
-  (không so với 0.9411). Dưới mức đó = nhiễu, không được diễn giải là cải
-  thiện — khớp trực tiếp với biên độ nhiễu bar-offset 0.217 đo được ở phần
-  Bối cảnh phía trên, không phải một con số chọn tuỳ ý. Ngưỡng này CHẶT HƠN
-  chữ nghĩa CLAUDE.md #13 (nguyên văn "cải thiện Sharpe OOS ≥ 0.1") có chủ
-  đích. Lưu ý: cả biên độ nhiễu bar-offset (0.217) lẫn noise floor sweep mốc
-  bắt đầu (std ≈ 0.089, phần ablation Tầng 1 phía trên) đều đo trên cửa sổ
-  DÀI; cửa sổ ngắn hơn (ít năm hơn, ít window walk-forward độc lập hơn) có
-  thể có noise floor khác — chưa đo lại cho cửa sổ ngắn trong đăng ký này,
-  ghi nhận như một giới hạn đã biết, không tự ý mở rộng phạm vi để đo thêm.
+- ~~Sharpe cải thiện ≥ 0.20 so với baseline pruned-8 cùng cửa sổ ngắn~~ —
+  **SỬA ĐỔI (trước khi chạy bất kỳ cấu hình Tầng 2 nào, xem "Sửa đổi
+  ngưỡng" bên dưới).** Con số 0.20 gốc suy ra từ sàn nhiễu đo trên cửa sổ
+  DÀI (biên độ bar-offset 0.217, std sweep mốc bắt đầu ≈0.089); cửa sổ
+  ngắn có ít bar hơn nên sàn nhiễu thật của nó có thể cao hơn — giữ 0.20
+  cứng có nguy cơ ngưỡng quá dễ, cho phép nhiễu bị diễn giải nhầm thành tín
+  hiệu.
 - **Phải giữ được tiêu chí 5, 6, 7, 8** (chạy lại cả bốn trên cấu hình mới
   — `--period 2022` trong phạm vi cửa sổ ngắn cho phép, `--bar-offset
   0,6,12,18`, `--symbol ETHUSDT` không tune, `cost_pct_of_gross_profit`).
   Tiêu chí 1–4 tiếp tục đánh giá trên baseline-cùng-cửa-sổ vs Tầng-2, không
   đổi định nghĩa.
-- **Không đạt ngưỡng Sharpe ≥ 0.20 → kết luận Tầng 2 không mang thêm
-  thông tin, ghi lại đúng như vậy vào `docs/DECISIONS.md`, và dừng việc tìm
-  cần gạt** — không thử thêm biến thể Tầng 2 khác, không hạ ngưỡng sau khi
-  đã thấy kết quả.
+- **Không đạt ngưỡng → kết luận Tầng 2 không mang thêm thông tin, ghi lại
+  đúng như vậy vào `docs/DECISIONS.md`, và dừng việc tìm cần gạt** — không
+  thử thêm biến thể Tầng 2 khác, không hạ ngưỡng sau khi đã thấy kết quả.
+
+### Sửa đổi ngưỡng (trước khi chạy bất kỳ cấu hình Tầng 2 nào)
+
+Thay ngưỡng cố định 0.20 bằng quy tắc, chốt TRƯỚC khi thấy bất kỳ kết quả
+Tầng 2 nào:
+
+```
+ngưỡng = max(0.20, biên_độ_bar_offset_của_baseline_cửa_sổ_ngắn)
+```
+
+Biên độ đo bằng cách chạy baseline pruned-8 (không Tầng 2) trên cửa sổ
+ngắn ở 4 mốc offset (0/6/12/18) — vốn đã bắt buộc cho tiêu chí 6, không
+phải phép đo mới ngoài phạm vi đăng ký. Phép đo chỉ dùng baseline, không
+chạm tới treatment (Tầng 2), nên không rò rỉ thông tin về kết quả Tầng 2
+sắp có — tại thời điểm sửa đổi này, thí nghiệm Tầng 2 (ablation) đã bị
+dừng giữa chừng trước khi in ra bất kỳ kết quả nào, nên sửa đổi này chốt
+trước khi thấy số Tầng 2 đầu tiên, đúng tinh thần tiền đăng ký.
+
+**Ngưỡng cuối cùng: [ĐANG ĐO — điền ngay sau khi có kết quả bar-offset
+sweep của baseline cửa sổ ngắn, trước khi chạy lại bất kỳ cấu hình Tầng 2
+nào].**
 
 ### Trạng thái
 
-Đã đăng ký, **chưa chạy**. Bước tiếp theo khi được yêu cầu: implement
-`compute_tier2_features`, xác nhận mốc dữ liệu funding thật qua
-`get_funding_rate_available_range()`, chạy baseline-cùng-cửa-sổ trước tiên.
+- Baseline pruned-8 cùng cửa sổ ngắn (offset0, 2020-08-05→2026-08-04):
+  **xong** — Sharpe 0.7543, Calmar 0.5991, max DD -29.72%
+  (`reports/tier2_shortwin_baseline`). Đây là mốc so sánh cho cả ngưỡng
+  Sharpe lẫn tiêu chí 1–4.
+- `compute_tier2_features` + `compute_all_features` + wiring qua
+  `DerivativesLoader`/`main.py`/`backtest/backtester.py`: **đã implement**,
+  lint/mypy/pytest xanh, đã smoke-test bằng dữ liệu thật (căn index đúng,
+  z-score hợp lý).
+- Ablation Tầng 2 (13 cột): **đã dừng giữa chừng theo yêu cầu, chưa có kết
+  quả nào được in ra** — sẽ chạy lại sau khi ngưỡng ở trên được điền số
+  cuối cùng.
+- Bước tiếp theo: chạy baseline cửa sổ ngắn ở offset 6/12/18 (đã có offset0
+  từ báo cáo trên), tính biên độ, điền ngưỡng cuối cùng vào mục ngay trên,
+  rồi mới chạy lại ablation Tầng 2.
 
 ## Câu hỏi mở cho phiên sau
 

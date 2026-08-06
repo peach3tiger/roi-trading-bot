@@ -202,16 +202,38 @@ _VALID_TIER1_FEATURES = frozenset(
 )
 
 
+_VALID_TIER2_FEATURES = frozenset(
+    {
+        "funding_rate",
+        "funding_zscore_90",
+        "oi_change_24h",
+        "perp_spot_basis",
+        "taker_buy_ratio",
+    }
+)
+
+
 def parse_feature_subset(raw: str | None) -> tuple[str, ...] | None:
-    """`None` = giữ nguyên cả 14 cột (mặc định). Dùng cho ablation/feature-pruning
-    thủ công — xem ghi chú ở `FeatureConfig.feature_subset`."""
+    """`None` = giữ nguyên cả 14 cột Tầng 1 (mặc định). Dùng cho ablation/
+    feature-pruning thủ công — xem ghi chú ở `FeatureConfig.feature_subset`.
+    Chấp nhận cả tên cột Tầng 2 (xem `needs_tier2_derivatives`) — không tự
+    lấy toàn bộ 14+5 cột khi `raw` rỗng, chỉ Tầng 1 là mặc định như trước."""
     if not raw:
         return None
     names = tuple(part.strip() for part in raw.split(",") if part.strip())
-    invalid = [n for n in names if n not in _VALID_TIER1_FEATURES]
+    valid = _VALID_TIER1_FEATURES | _VALID_TIER2_FEATURES
+    invalid = [n for n in names if n not in valid]
     if invalid:
         raise ValueError(f"--feature-subset có tên cột không hợp lệ: {invalid}")
     return names
+
+
+def needs_tier2_derivatives(subset: tuple[str, ...] | None) -> bool:
+    """True nếu subset yêu cầu ít nhất một cột Tầng 2 — kích hoạt tải
+    derivatives và bật `FeatureConfig.tier2_derivatives`, KHÔNG đọc từ
+    `settings.yaml` (subset là nguồn sự thật duy nhất cho thí nghiệm này,
+    tránh phải sửa settings.yaml — một tham số — cho mỗi lần thử)."""
+    return subset is not None and any(name in _VALID_TIER2_FEATURES for name in subset)
 
 
 # ----------------------------------------------------------------------
@@ -344,6 +366,8 @@ def run_backtest(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
     Nhiều offset ghi vào thư mục con riêng: tiêu chí 6 của §4.9 so sánh Sharpe
     GIỮA các offset, nên ghi đè lên nhau sẽ xoá mất chính thứ cần đo.
     """
+    from dataclasses import replace as _replace
+
     from backtest.backtester import WalkForwardBacktester
     from backtest.performance import write_reports
     from data.history_loader import HistoryLoader
@@ -353,13 +377,31 @@ def run_backtest(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
     symbol = args.symbol or settings["exchange"]["symbol"]
     ccxt_symbol = symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
 
+    subset = parse_feature_subset(args.feature_subset)
     wf_config = build_walk_forward_config(settings)
-    feature_config = build_feature_config(settings, feature_subset=parse_feature_subset(args.feature_subset))
+    feature_config = build_feature_config(settings, feature_subset=subset)
+    use_tier2 = needs_tier2_derivatives(subset)
+    if use_tier2:
+        # settings.yaml tier2_derivatives có thể vẫn là False (mặc định) —
+        # subset là nguồn sự thật cho thí nghiệm này, xem needs_tier2_derivatives.
+        feature_config = _replace(feature_config, tier2_derivatives=True)
+        if offsets != [0]:
+            raise ValueError(
+                "Tầng 2 (funding/OI/perp) chỉ hỗ trợ bar_offset_hours=0 — "
+                "derivatives_loader.py không có tham số timeZone như Binance klines."
+            )
 
     data_start = resolve_data_start(args, start, settings, wf_config.is_bars)
 
     loader = HistoryLoader()
     results: dict[str, Any] = {}
+
+    derivatives = None
+    if use_tier2:
+        from data.derivatives_loader import DerivativesLoader
+
+        bybit_symbol = symbol if "/" not in symbol else symbol.replace("/", "")
+        derivatives = DerivativesLoader().load_tier2_bundle(bybit_symbol, data_start, end)
 
     for offset in offsets:
         ohlcv = loader.load(ccxt_symbol, "1D", data_start, end, bar_offset_hours=offset)
@@ -372,7 +414,7 @@ def run_backtest(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
             config=wf_config,
             feature_config=feature_config,
         )
-        result = backtester.run(symbol, ohlcv, start, end)
+        result = backtester.run(symbol, ohlcv, start, end, derivatives=derivatives)
 
         out_dir = Path(args.output_dir)
         if len(offsets) > 1:
@@ -394,21 +436,34 @@ def _run_one_config(
     start: datetime,
     end: datetime,
     out_dir: Path,
+    derivatives: Any = None,
 ) -> dict[str, Any]:
-    """Một lần walk-forward với đúng `subset` feature, trả về metric + BIC trung bình."""
+    """Một lần walk-forward với đúng `subset` feature, trả về metric + BIC trung bình.
+
+    `derivatives` truyền từ caller (đã tải một lần, dùng chung cho mọi cấu
+    hình ablation) — mỗi lần gọi tự quyết định có cần Tầng 2 hay không dựa
+    trên `subset` CỦA CHÍNH NÓ (vd. khi ablation bỏ đúng cột Tầng 2 cuối
+    cùng, `subset` đó không còn cần derivatives nữa dù baseline có cần).
+    """
+    from dataclasses import replace as _replace
+
     from backtest.backtester import WalkForwardBacktester
     from backtest.performance import write_reports
 
     wf_config = build_walk_forward_config(settings)
+    feature_config = build_feature_config(settings, feature_subset=subset)
+    use_tier2 = needs_tier2_derivatives(subset)
+    if use_tier2:
+        feature_config = _replace(feature_config, tier2_derivatives=True)
     backtester = WalkForwardBacktester(
         hmm_engine=build_hmm_engine(settings, min_train_bars=wf_config.is_bars),
         strategy_orchestrator=build_orchestrator(settings),
         trend_gate=build_trend_gate(settings, enabled=not args.no_trend_gate),
         cost_model=build_cost_model(settings),
         config=wf_config,
-        feature_config=build_feature_config(settings, feature_subset=subset),
+        feature_config=feature_config,
     )
-    result = backtester.run(symbol, ohlcv, start, end)
+    result = backtester.run(symbol, ohlcv, start, end, derivatives=derivatives if use_tier2 else None)
     benchmarks = write_reports(
         result, ohlcv, build_cost_model(settings), wf_config.instrument_rules, str(out_dir)
     )
@@ -447,6 +502,11 @@ def run_ablation(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
     offsets = parse_bar_offsets(args.bar_offset)
     if len(offsets) > 1:
         raise ValueError("--ablation chạy một bar-offset duy nhất; bỏ bớt --bar-offset")
+    if needs_tier2_derivatives(subset) and offsets != [0]:
+        raise ValueError(
+            "Tầng 2 (funding/OI/perp) chỉ hỗ trợ bar_offset_hours=0 — "
+            "derivatives_loader.py không có tham số timeZone như Binance klines."
+        )
 
     # core/hmm_engine.py cần cột này để gán nhãn regime (_build_regime_infos) —
     # xem chú thích chi tiết ở nhánh SKIPPED_STRUCTURAL_REQUIRED bên dưới.
@@ -461,13 +521,21 @@ def run_ablation(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
     from data.history_loader import HistoryLoader
 
     ohlcv = HistoryLoader().load(ccxt_symbol, "1D", data_start, end, bar_offset_hours=offsets[0])
+
+    derivatives = None
+    if needs_tier2_derivatives(subset):
+        from data.derivatives_loader import DerivativesLoader
+
+        bybit_symbol = symbol if "/" not in symbol else symbol.replace("/", "")
+        derivatives = DerivativesLoader().load_tier2_bundle(bybit_symbol, data_start, end)
+
     out_root = Path(args.output_dir)
 
     logger = logging.getLogger(__name__)
     logger.info("Ablation: %d feature -> %d lần chạy walk-forward", len(subset), len(subset) + 1)
 
     baseline = _run_one_config(
-        args, settings, subset, ohlcv, symbol, start, end, out_root / "ablation_baseline"
+        args, settings, subset, ohlcv, symbol, start, end, out_root / "ablation_baseline", derivatives
     )
     base_sharpe = baseline["metrics"]["sharpe"]
 
@@ -525,7 +593,15 @@ def run_ablation(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
         reduced = tuple(f for f in subset if f != feature)
         logger.info("Ablation %d/%d: bỏ %s", i, len(subset), feature)
         run = _run_one_config(
-            args, settings, reduced, ohlcv, symbol, start, end, out_root / f"ablation_drop_{feature}"
+            args,
+            settings,
+            reduced,
+            ohlcv,
+            symbol,
+            start,
+            end,
+            out_root / f"ablation_drop_{feature}",
+            derivatives,
         )
         contribution = base_sharpe - run["metrics"]["sharpe"]
         rows.append(

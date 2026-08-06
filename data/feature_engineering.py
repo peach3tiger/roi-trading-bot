@@ -169,7 +169,11 @@ def compute_tier1_features(ohlcv: pd.DataFrame, config: FeatureConfig) -> pd.Dat
         # distance_to_sma200_pct, warmup 200 bar) không được phép kéo dài
         # warmup của các cột còn lại qua dropna() nếu bản thân nó không còn
         # nằm trong output.
-        raw = raw[list(config.feature_subset)]
+        # Giao với raw.columns, không index thẳng bằng feature_subset: khi
+        # subset gộp cả tên cột Tầng 2 (vd. chạy compute_all_features), tên
+        # đó không tồn tại trong `raw` của hàm này — index thẳng sẽ KeyError.
+        keep = [c for c in config.feature_subset if c in raw.columns]
+        raw = raw[keep]
 
     normalized = raw.apply(lambda col: rolling_zscore(col, config.zscore_lookback))
     return normalized.dropna()
@@ -178,13 +182,62 @@ def compute_tier1_features(ohlcv: pd.DataFrame, config: FeatureConfig) -> pd.Dat
 def compute_tier2_features(
     ohlcv: pd.DataFrame, derivatives: pd.DataFrame, config: FeatureConfig
 ) -> pd.DataFrame:
-    """Tầng 2 — crypto-native: funding_rate, funding_zscore, oi_change_pct,
-    oi_price_divergence, perp_spot_basis, taker_buy_ratio.
+    """Tầng 2 — crypto-native, đòi hỏi dữ liệu derivatives (funding rate,
+    open interest, giá perp) ngoài OHLCV thuần: funding_rate (mượt 3 chu
+    kỳ), funding_zscore_90, oi_change_24h, perp_spot_basis, taker_buy_ratio.
 
-    Yêu cầu dữ liệu derivatives có lịch sử ngắn hơn OHLCV — chỉ bật khi
-    ablation test đã chứng minh giá trị (xem CLAUDE.md bất biến #13).
+    `derivatives` phải đã được căn theo cùng index daily 00:00 UTC với
+    `ohlcv` — xem `data.derivatives_loader.DerivativesLoader.load_tier2_bundle`.
+    Lịch sử derivatives ngắn hơn OHLCV rất nhiều (Bybit: funding từ ~03/2020,
+    open interest từ ~08/2020, trong khi giá qua Binance có từ 2017-2018) —
+    đây là lý do tầng này ĐỂ RIÊNG, chỉ bật khi ablation test chứng minh giá
+    trị (CLAUDE.md bất biến #13) — xem docs/DECISIONS.md, tiền đăng ký thí
+    nghiệm Tầng 2.
+
+    `taker_buy_ratio` không cần derivatives — Binance raw klines (đã tải bởi
+    `HistoryLoader`) có sẵn `taker_buy_base_volume` cùng `volume`, chỉ cần
+    OHLCV. Xếp vào Tầng 2 theo đúng phân loại của spec §2.3 (crypto-native,
+    không phải momentum/volatility/trend cổ điển của Tầng 1), dù về mặt kỹ
+    thuật không phụ thuộc `derivatives`.
     """
-    raise NotImplementedError
+    close = ohlcv["close"]
+    funding = derivatives["funding_rate"]
+    oi = derivatives["open_interest"]
+    perp_close = derivatives["perp_close"]
+
+    raw = pd.DataFrame(index=ohlcv.index)
+    raw["funding_rate"] = funding.rolling(window=3, min_periods=3).mean()
+    raw["funding_zscore_90"] = rolling_zscore(funding, lookback=90)
+    raw["oi_change_24h"] = oi.pct_change(periods=1)
+    raw["perp_spot_basis"] = (perp_close - close) / close
+    raw["taker_buy_ratio"] = ohlcv["taker_buy_base_volume"] / ohlcv["volume"].replace(0.0, np.nan)
+
+    if config.feature_subset is not None:
+        keep = [c for c in config.feature_subset if c in raw.columns]
+        raw = raw[keep]
+
+    normalized = raw.apply(lambda col: rolling_zscore(col, config.zscore_lookback))
+    return normalized.dropna()
+
+
+def compute_all_features(
+    ohlcv: pd.DataFrame, config: FeatureConfig, derivatives: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Gộp Tầng 1 (luôn bật) với Tầng 2 (chỉ khi `config.tier2_derivatives`
+    True VÀ có `derivatives`) thành một feature matrix duy nhất.
+
+    Mỗi tầng tự z-score/dropna riêng (xem docstring từng hàm) rồi mới
+    `join="inner"` — cách này để warmup ngắn hơn của Tầng 1 không bị Tầng 2
+    (lịch sử ngắn hơn nhiều) kéo dài một cách ẩn, và ngược lại: nếu chỉ dùng
+    Tầng 1 (`tier2_derivatives=False`), kết quả giống hệt gọi
+    `compute_tier1_features` trực tiếp — không có tác dụng phụ nào cho các
+    caller cũ (`WalkForwardBacktester` trước bản này).
+    """
+    tier1 = compute_tier1_features(ohlcv, config)
+    if not config.tier2_derivatives or derivatives is None:
+        return tier1
+    tier2 = compute_tier2_features(ohlcv, derivatives, config)
+    return tier1.join(tier2, how="inner")
 
 
 def compute_tier3_features(ohlcv: pd.DataFrame, config: FeatureConfig) -> pd.DataFrame:

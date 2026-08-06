@@ -38,7 +38,7 @@ from core.hmm_engine import HMMRegimeEngine
 from core.regime_strategies import StrategyOrchestrator
 from core.signal_generator import compose_layer_allocations
 from core.trend_gate import StructuralTrendGate
-from data.feature_engineering import FeatureConfig, compute_tier1_features
+from data.feature_engineering import FeatureConfig, compute_all_features
 
 _STRATEGY_BARS_LOOKBACK = 300  # đủ cho EMA50/ATR14 hội tụ, tránh tính lại toàn bộ lịch sử mỗi bar
 
@@ -105,13 +105,25 @@ class WalkForwardBacktester:
         # — main.py.build_feature_config() tồn tại nhưng chưa từng được gọi.
         self.feature_config = feature_config
 
-    def run(self, symbol: str, ohlcv: pd.DataFrame, start: datetime, end: datetime) -> BacktestResult:
+    def run(
+        self,
+        symbol: str,
+        ohlcv: pd.DataFrame,
+        start: datetime,
+        end: datetime,
+        derivatives: pd.DataFrame | None = None,
+    ) -> BacktestResult:
         """Cửa sổ trượt IS/OOS: train HMM trên IS, đi qua OOS từng bar bằng
         filtered inference, mark-to-market bằng Decimal, rebalance khi lệch
         > ngưỡng, ghi một 'trade' mỗi lần allocation thay đổi.
+
+        `derivatives` chỉ cần khi `self.feature_config.tier2_derivatives`
+        True — bỏ qua (None mặc định) không đổi hành vi cho mọi caller cũ,
+        `compute_all_features` tự rơi về đúng `compute_tier1_features` khi
+        đó (xem docstring của nó).
         """
         ohlcv = ohlcv.sort_index()
-        features = compute_tier1_features(ohlcv, self.feature_config)
+        features = compute_all_features(ohlcv, self.feature_config, derivatives)
 
         # Trần trend gate KHÔNG phụ thuộc HMM/cửa sổ walk-forward — tính một
         # lần trên TOÀN BỘ lịch sử giá thô rồi tra bảng theo bar, thay vì gọi
