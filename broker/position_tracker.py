@@ -1,4 +1,13 @@
-"""broker.position_tracker — theo dõi vị thế qua WebSocket private stream.
+"""broker.position_tracker — theo dõi vị thế qua polling REST.
+
+REST polling, không WebSocket — quyết định kiến trúc 2026-08-06 (xem
+`docs/DECISIONS.md`, mục "Đổi sàn Bybit -> Binance (ccxt)"). Đã bỏ
+`on_execution()` (từng được gọi qua `ExchangeClient.subscribe_executions`,
+nay không còn tồn tại trong ABC — xem `broker/base.py`): không còn cơ chế
+nào đẩy `OrderResult` vào lớp này giữa hai lần đối soát, nên giữ lại nó là
+code chết. Nguồn cập nhật DUY NHẤT bây giờ là đối soát với sàn — lúc khởi
+động (`reconcile_on_startup()`) VÀ định kỳ trong lúc chạy (`poll()`, gọi
+từ main loop mỗi vòng, cùng logic, khác tên chỉ để chỗ gọi đọc rõ ý định).
 
 Đối soát khi khởi động: ở thị trường 24/7, bot offline trong lúc thị
 trường vẫn chạy là chuyện thường ngày, không phải trường hợp hiếm. Nếu
@@ -12,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from broker.base import ExchangeClient, OrderResult
+from broker.base import ExchangeClient
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +44,9 @@ class TrackedPosition:
 class PositionTracker:
     """Nguồn sự thật cho `qty`/`current_price` LUÔN là sàn — trạng thái cục
     bộ (`entry_price`, `regime_at_entry`, ...) chỉ là bối cảnh bổ sung mà
-    sàn không lưu (đặc biệt đúng với spot trên Bybit, không có khái niệm
-    "position" như derivatives — xem ghi chú ở
-    `broker/bybit_client.py::BybitClient.get_positions`).
-
-    `on_execution()` cần biết symbol/side của lần khớp để cập nhật đúng
-    hướng, nhưng `OrderResult` (broker/base.py) không mang hai trường đó
-    trực tiếp — đọc từ `raw_response` (luồng execution thật của Bybit có
-    `symbol`/`side`, xem `BybitClient.subscribe_executions`). Thiếu một
-    trong hai thì log cảnh báo và bỏ qua, không đoán.
+    sàn không lưu (đặc biệt đúng với spot, không có khái niệm "position"
+    như derivatives — xem ghi chú ở
+    `broker/ccxt_client.py::CCXTClient.get_positions`).
     """
 
     def __init__(self, exchange_client: ExchangeClient) -> None:
@@ -54,6 +57,17 @@ class PositionTracker:
         """So số dư thực tế trên sàn với trạng thái đã lưu; nếu lệch, tin
         sàn và log cảnh báo — không tự "sửa" số dư sàn để khớp state cũ
         (Brain-Crypto-Bybit.md §6.5)."""
+        self._reconcile()
+
+    def poll(self) -> None:
+        """Đối soát định kỳ trong lúc chạy — cùng logic
+        `reconcile_on_startup()`. Gọi từ main loop mỗi vòng poll REST
+        (thay cho việc nhận đẩy qua `on_execution()` trước đây), tên riêng
+        chỉ để chỗ gọi đọc rõ ý định (đối soát định kỳ, không phải chỉ lúc
+        khởi động)."""
+        self._reconcile()
+
+    def _reconcile(self) -> None:
         exchange_positions = {p.symbol: p for p in self.exchange_client.get_positions()}
 
         for symbol, exchange_pos in exchange_positions.items():
@@ -89,7 +103,8 @@ class PositionTracker:
             local.current_price = exchange_pos.current_price
             local.unrealized_pnl = exchange_pos.unrealized_pnl
 
-        # Local có vị thế nhưng sàn không còn — đã đóng trong lúc bot offline.
+        # Local có vị thế nhưng sàn không còn — đã đóng (bot offline, hoặc
+        # chỉ đơn giản là kể từ lần poll() trước).
         for symbol in list(self._positions):
             if symbol not in exchange_positions:
                 logger.warning(
@@ -97,52 +112,6 @@ class PositionTracker:
                     symbol,
                 )
                 del self._positions[symbol]
-
-    def on_execution(self, order_result: OrderResult) -> None:
-        """Cập nhật vị thế cục bộ sau mỗi lần khớp. Chỉ cập nhật `qty`/
-        `current_price` — cập nhật `PortfolioState`/`CircuitBreaker` là
-        việc của caller (main loop, Phase 10) sau khi có equity mới, không
-        phải việc của lớp này (giữ phạm vi đúng như tên class: theo dõi vị
-        thế, không phải toàn bộ portfolio/risk)."""
-        symbol = order_result.raw_response.get("symbol")
-        side = order_result.raw_response.get("side")
-        if not symbol or not side:
-            logger.warning(
-                "on_execution(%s): raw_response thiếu symbol/side — không cập nhật được vị thế.",
-                order_result.order_link_id,
-            )
-            return
-
-        fill_price = order_result.avg_fill_price
-        if fill_price is None:
-            logger.warning("on_execution(%s): thiếu avg_fill_price — không cập nhật.", symbol)
-            return
-
-        signed_qty = order_result.filled_qty if side == "Buy" else -order_result.filled_qty
-        existing = self._positions.get(symbol)
-
-        if existing is None:
-            if signed_qty <= 0:
-                return  # khớp bán mà chưa có vị thế cục bộ nào — không tạo vị thế âm
-            self._positions[symbol] = TrackedPosition(
-                symbol=symbol,
-                entry_time=datetime.now(timezone.utc),
-                entry_price=fill_price,
-                current_price=fill_price,
-                qty=signed_qty,
-                unrealized_pnl=Decimal("0"),
-                stop_loss=Decimal("0"),
-                regime_at_entry=_UNKNOWN_REGIME,
-                regime_current=_UNKNOWN_REGIME,
-            )
-            return
-
-        new_qty = existing.qty + signed_qty
-        if new_qty <= 0:
-            del self._positions[symbol]
-            return
-        existing.qty = new_qty
-        existing.current_price = fill_price
 
     def get_position(self, symbol: str) -> TrackedPosition | None:
         return self._positions.get(symbol)

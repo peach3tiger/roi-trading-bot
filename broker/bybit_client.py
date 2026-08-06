@@ -1,5 +1,21 @@
 """broker.bybit_client — BybitClient implement ExchangeClient qua pybit.
 
+DEPRECATED kể từ 2026-08-06 — KHÔNG dùng cho code mới, KHÔNG xoá file này.
+
+Bybit chặn theo khu vực (regulatory restrictions, retCode 10024) — không
+kết nối được cả testnet lẫn mainnet từ môi trường vận hành hiện tại. Xem
+`docs/DECISIONS.md`, mục "Đổi sàn Bybit -> Binance (ccxt)", cho bằng chứng
+đầy đủ. Sàn LIVE THẬT của dự án là `broker/ccxt_client.py::CCXTClient`
+(Binance qua ccxt).
+
+File này giữ nguyên, không sửa logic, không xoá — nó là bằng chứng cho
+quyết định đổi sàn (retCode thật, thời điểm phát hiện, toàn bộ lịch sử
+sửa lỗi `_call_with_retry` trước khi chặn khu vực lộ ra) và là ví dụ tham
+khảo cho `ExchangeClient` ABC hoạt động đúng ra sao: mọi lệnh gọi qua
+`broker/order_executor.py`/`broker/position_tracker.py` không cần đổi một
+dòng nào khi CCXTClient thay thế nó — đúng mục đích interface này được
+dựng lên từ đầu (xem `broker/base.py`).
+
 Testnet (api-testnet.bybit.com) là mặc định — xem CLAUDE.md bất biến #6.
 Chuyển sang mainnet yêu cầu gõ tay chuỗi xác nhận đầy đủ, không có cờ tắt
 qua middleware.

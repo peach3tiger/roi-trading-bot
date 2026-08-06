@@ -4,7 +4,19 @@ Thay đổi kiến trúc quan trọng nhất so với bản gốc: bản gốc g
 Alpaca. Interface trừu tượng này tách tầng strategy/risk khỏi bất kỳ SDK
 sàn cụ thể nào, để đổi sàn hoặc chuyển spot → perps không phải viết lại
 tầng trên. Tầng strategy và risk KHÔNG BAO GIỜ import trực tiếp `pybit`
-hay `ccxt` — chỉ qua interface này.
+hay `ccxt` — chỉ qua interface này. Chính bất biến này là lý do đổi sàn
+Bybit → Binance (Bybit bị chặn theo khu vực, retCode 10024 — xem
+`docs/DECISIONS.md`) chỉ cần một implementation mới
+(`broker/ccxt_client.py`), không phải viết lại `broker/order_executor.py`
+hay bất kỳ tầng nào phía trên.
+
+KHÔNG còn `subscribe_klines`/`subscribe_executions` (đã bỏ khỏi ABC) — hệ
+thống chạy bar `1D`, WebSocket là công nghệ cho tần suất cao mà dự án
+không cần; polling REST (30-60s) qua `get_historical_klines`/
+`get_positions`/`get_open_orders` đã sẵn có, đơn giản hơn nhiều so với
+heartbeat/reconnect của WebSocket. `broker/bybit_client.py` (deprecated,
+giữ lại làm bằng chứng) vẫn còn implement hai phương thức đó — chỉ là
+không nằm trong hợp đồng ABC nữa, không ai gọi qua interface này.
 """
 
 from __future__ import annotations
@@ -19,6 +31,29 @@ from typing import Callable, Optional
 import pandas as pd
 
 from broker.instrument_rules import InstrumentRules
+
+# CLAUDE.md bất biến #6: chuyển sang mainnet yêu cầu gõ tay chuỗi xác nhận
+# đầy đủ. Đặt hằng số + cổng chặn ở đây (không phải trong từng
+# ExchangeClient implementation riêng) để bất biến áp dụng cho MỌI sàn,
+# kể cả sàn thêm sau này — không thể vô tình bỏ sót khi viết implementation
+# mới. `broker/bybit_client.py` có bản sao riêng của logic này (viết trước
+# khi hàm dùng chung này tồn tại) — cố tình để nguyên, không refactor lại,
+# vì file đó đã deprecated và chỉ giữ làm bằng chứng lịch sử.
+LIVE_CONFIRMATION_PHRASE = "YES I UNDERSTAND THE RISKS"
+
+
+def require_live_confirmation(input_fn: Callable[[str], str] = input) -> None:
+    """Chặn kết nối mainnet cho tới khi gõ đúng `LIVE_CONFIRMATION_PHRASE`.
+
+    `input_fn` tiêm được (mặc định `input` thật) — để test mô phỏng gõ
+    đúng/sai/bỏ trống mà không cần stdin thật.
+    """
+    print("⚠️  LIVE TRADING VỚI TIỀN THẬT.")
+    typed = input_fn(f"Gõ '{LIVE_CONFIRMATION_PHRASE}' để xác nhận: ")
+    if typed.strip() != LIVE_CONFIRMATION_PHRASE:
+        raise PermissionError(
+            "Xác nhận live trading không đúng cụm từ yêu cầu — dừng, không kết nối mainnet."
+        )
 
 
 class OrderSide(str, Enum):
@@ -138,11 +173,3 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     def get_orderbook(self, symbol: str) -> OrderBook: ...
-
-    @abstractmethod
-    def subscribe_klines(
-        self, symbol: str, interval: str, callback: Callable[[pd.Series], None]
-    ) -> None: ...
-
-    @abstractmethod
-    def subscribe_executions(self, callback: Callable[[OrderResult], None]) -> None: ...

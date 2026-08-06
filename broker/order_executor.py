@@ -177,9 +177,10 @@ class OrderExecutor:
             still_open = any(o.order_id == result.order_id for o in self.exchange_client.get_open_orders())
             if not still_open:
                 # Không còn trong danh sách mở nữa — coi như đã khớp (hoặc
-                # bị huỷ/từ chối ở phía sàn); caller (position_tracker qua
-                # subscribe_executions) chịu trách nhiệm ghi nhận filled_qty
-                # thật từ luồng execution, không suy đoán ở đây.
+                # bị huỷ/từ chối ở phía sàn); broker/position_tracker.py
+                # tự đối soát filled_qty thật từ sàn ở vòng poll() kế tiếp
+                # (REST polling, không còn luồng execution đẩy trực tiếp —
+                # xem docs/DECISIONS.md), không suy đoán ở đây.
                 return result
 
         logger.warning(

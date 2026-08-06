@@ -3,13 +3,36 @@
 # thuộc về file này (xem CLAUDE.md bất biến #14).
 
 exchange:
-  name: bybit
-  category: spot              # spot | linear (linear = perps, Phase 10)
-  testnet: true                # LUÔN true khi bắt đầu
+  # Đổi ngày 2026-08-06: bybit -> binance (qua ccxt). Bybit chặn theo khu
+  # vực (regulatory restrictions, retCode 10024) — không kết nối được cả
+  # testnet lẫn mainnet từ môi trường vận hành. Xem docs/DECISIONS.md,
+  # mục "Đổi sàn Bybit -> Binance (ccxt)". broker/bybit_client.py giữ lại
+  # (deprecated) làm bằng chứng, không xoá.
+  name: binance
+  category: spot              # spot | linear (linear = perps, Phase 10) —
+                               # thuật ngữ riêng của Bybit, KHÔNG được
+                               # broker/ccxt_client.py::CCXTClient đọc; nó
+                               # tự phân biệt spot/swap qua ký hiệu hợp
+                               # nhất của ccxt ("BTC/USDT" vs
+                               # "BTC/USDT:USDT", xem _to_ccxt_symbol()).
+                               # Giữ lại chỉ để ghi phạm vi dự án (spot,
+                               # không leverage).
+  testnet: true                # LUÔN true khi bắt đầu — CCXTClient gọi
+                                # exchange.set_sandbox_mode(True) khi cờ
+                                # này bật, KHÔNG có field "sandbox" riêng
+                                # (xem broker/ccxt_client.py __init__: tên
+                                # tham số `testnet`, khớp CLAUDE.md #6 và
+                                # mọi chỗ đã dùng tên này — ops/health_check.py,
+                                # ops/RUNBOOK.md — thêm field "sandbox"
+                                # trùng nghĩa chỉ để đúng tên gợi ý ban đầu
+                                # sẽ tạo ra hai nguồn sự thật cho cùng một
+                                # khái niệm, dễ lệch nhau).
   symbol: BTCUSDT
   quote_asset: USDT
   timeframe: "1D"              # bar đóng 00:00 UTC
-  recv_window_ms: 5000
+  recv_window_ms: 5000          # Bybit-specific (recv_window), KHÔNG được
+                                 # CCXTClient đọc — giữ lại cho
+                                 # broker/bybit_client.py (deprecated).
 
 costs:
   taker_fee_pct: 0.10          # Bybit spot VIP0, XÁC MINH LẠI trước khi live

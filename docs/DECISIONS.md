@@ -569,3 +569,109 @@ CLAUDE.md bất biến #14 (không magic number ngoài config).
 **Không ảnh hưởng gì tới forward test đang chạy** — `forward/config_frozen.yaml`
 là bản copy độc lập, không đọc lại `config/settings.yaml`, và
 `forward/logger.py` không dùng `risk_manager` (xem `forward/README.md`).
+
+---
+
+## Đổi sàn Bybit -> Binance (ccxt) (2026-08-06)
+
+**Nguyên nhân:** Bybit chặn theo khu vực (regulatory restrictions) từ môi
+trường vận hành hiện tại — xác nhận bằng gọi thật, không suy luận:
+`retCode 10024` trên cả `api-testnet.bybit.com` lẫn `api.bybit.com`. Không
+kết nối được cả hai môi trường, kể cả ở tầng public endpoint (không phải
+lỗi xác thực key như đã gặp và ghi nhận trước đó ở mục Phase 9 nghiệm thu
+— đây là một vấn đề khác, nghiêm trọng hơn: không phải "key sai", mà là
+"không bao giờ tới được sàn"). `broker/bybit_client.py` giữ nguyên trong
+repo, đánh dấu deprecated trong docstring — không xoá, vì nó là bằng chứng
+cho quyết định này (retCode thật, toàn bộ lịch sử sửa `_call_with_retry`
+whitelist trước khi phát hiện chặn khu vực) và ví dụ tham khảo cho thấy
+`ExchangeClient` ABC hoạt động đúng thiết kế ra sao khi đổi sàn.
+
+**Sàn thay thế:** Binance, qua thư viện `ccxt` thay vì SDK riêng
+(`python-binance` hay tương tự). Ràng buộc thật ở đây là **khả năng truy
+cập theo khu vực**, không phải chất lượng API của một sàn cụ thể — nếu
+Binance sau này cũng bị chặn, hoặc cần thử một sàn khác, `ccxt` biến việc
+đổi sàn thành đổi `config/settings.yaml: exchange.name` (chuỗi khớp tên
+module `ccxt.<exchange_id>`) thay vì viết lại một implementation mới từ
+đầu. Cái giá phải trả: mất một số tối ưu riêng của Bybit (vd. rate limiter
+token-bucket 600 req/5s đo đúng giới hạn Bybit v5 — `ccxt`'s
+`enableRateLimit` là cơ chế chung, không tinh chỉnh riêng cho từng sàn ở
+mức đó). Đánh đổi hợp lý: dự án đặt vài lệnh/ngày (`max_trades_per_day: 6`),
+không phải market making — không cần tối ưu rate-limit ở mức micro-giây.
+
+**Bỏ WebSocket, chuyển hẳn sang REST polling** — quyết định kiến trúc đi
+kèm, không phải hệ quả phụ của việc đổi sàn:
+- Bot chạy bar `1D` (`exchange.timeframe`) — polling REST 30-60s dư sức
+  đáp ứng tần suất cần thiết; WebSocket là công nghệ cho tần suất cao
+  (tick-by-tick, market making) mà dự án không có nhu cầu đó.
+- Đổi lại: bỏ được toàn bộ độ phức tạp của heartbeat/phát hiện mất kết nối
+  im lặng/reconnect-với-backoff — `broker/base.py::ExchangeClient` không
+  còn `subscribe_klines`/`subscribe_executions`; `data/market_data.py`
+  không còn `is_feed_alive()`/cache bar mới nhất; `broker/position_tracker.py`
+  không còn `on_execution()` (từng được gọi qua `subscribe_executions`,
+  nay đã đối soát định kỳ qua `poll()` thay thế — cùng logic
+  `reconcile_on_startup()`, gọi thêm mỗi vòng main loop).
+- Với REST polling, không còn khái niệm "kết nối còn sống nhưng dữ liệu
+  cũ" cần một cơ chế phát hiện riêng — mỗi lần gọi HOẶC thành công HOẶC
+  raise ngay tại chỗ gọi.
+
+**Kiểm chứng ranh giới ABC không bị rò rỉ** (đúng tiêu chí đặt ra trước khi
+làm): `broker/order_executor.py` — lớp gọi `ExchangeClient` nhiều nhất
+(`get_instrument_rules`/`get_balance`/`get_positions`/`submit_order`/
+`get_open_orders`/`cancel_order`) — **không cần sửa một dòng logic nào**.
+Xác nhận bằng cả hai cách: (1) toàn bộ 15 test hiện có của nó
+(`tests/test_orders.py`) pass nguyên vẹn không sửa; (2) đọc lại từng lệnh
+gọi `self.exchange_client.*` — tất cả đều dùng đúng chữ ký ABC không đổi.
+Một dòng COMMENT (không phải logic) trong `_wait_for_fill_or_cancel` có
+tham chiếu tên `subscribe_executions` đã xoá — sửa lại nội dung comment
+cho khớp cơ chế mới (poll định kỳ thay vì đẩy qua WebSocket), không đổi
+hành vi. Đây chính là bằng chứng cho lý do `broker/base.py::ExchangeClient`
+tồn tại: đổi sàn hoàn toàn (Bybit/pybit -> Binance/ccxt) và đổi cả cơ chế
+polling (WebSocket -> REST) mà tầng thực thi phía trên không hề biết.
+
+**Chi tiết kỹ thuật đáng ghi lại** (verify bằng gọi thật/introspection,
+không suy luận từ tài liệu):
+- `ccxt.NetworkError` (và lớp con: `RequestTimeout`, `ExchangeNotAvailable`,
+  `RateLimitExceeded`, `DDoSProtection`, `InvalidNonce`, `OnMaintenance`)
+  = nhất thời, retry có backoff mũ; `ccxt.ExchangeError` (và lớp con:
+  `AuthenticationError`, `InsufficientFunds`, `InvalidOrder`, `BadSymbol`,
+  `OrderNotFound`, `PermissionDenied`...) = sàn cố tình từ chối, thất bại
+  ngay — cùng triết lý whitelist đã áp dụng cho `bybit_client.py`, dựng
+  trên cây kế thừa exception khác của ccxt.
+- `orderLinkId` -> `params={"clientOrderId": ...}` khi gọi
+  `create_order()` — ccxt tự map sang `newClientOrderId` gốc của Binance
+  (xác nhận bằng grep trực tiếp `ccxt/binance.py::create_order`, không
+  suy luận từ tài liệu ccxt).
+- Binance có CẢ market spot (`"BTC/USDT"`) LẪN USDT-M perpetual
+  (`"BTC/USDT:USDT"`) cùng chia sẻ id thô `"BTCUSDT"` trong
+  `markets_by_id` — `CCXTClient._to_ccxt_symbol()` cố tình KHÔNG dùng
+  `exchange.market("BTCUSDT")` (thứ tự giải quyết nhập nhằng không đảm
+  bảo ổn định qua phiên bản ccxt), mà tách hậu tố `quote_asset` tường
+  minh rồi tra theo ký hiệu hợp nhất `"BTC/USDT"` — luôn đúng spot, đúng
+  phạm vi dự án (không leverage).
+- `fetch_open_orders()`/`cancel_order()` không kèm `symbol` bị chính ccxt
+  chặn trên Binance (`ExchangeError` "WARNING... 10 times more" rate-limit
+  weight) — khác Bybit v5 cho phép query "mọi symbol" miễn phí. Vì dự án
+  chỉ giao dịch một symbol duy nhất, `CCXTClient` lưu `symbol` đã cấu hình
+  từ constructor (bắt buộc truyền, không default ngầm) và luôn truyền
+  tường minh — tránh cả lỗi lẫn phí rate-limit thừa, đồng thời đơn giản
+  hơn cách `BybitClient` phải tra `symbol` từ danh sách lệnh mở trước khi
+  huỷ.
+
+**`ops/health_check.py`** cũng đổi theo (ngoài phạm vi yêu cầu ban đầu,
+nhưng để lại sẽ khiến health check kiểm tra nhầm sàn đã bị chặn thay vì
+sàn thật đang dùng — một bug ẩn khó phát hiện nếu không sửa cùng lúc):
+đọc `exchange.name` từ `settings.yaml` thay vì hardcode `ccxt.bybit`, biến
+môi trường đổi tên `BYBIT_API_KEY`/`BYBIT_API_SECRET`/`BYBIT_TESTNET` ->
+`EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET`/`EXCHANGE_TESTNET` (đọc được cả
+tên cũ làm fallback, `.env` có sẵn từ trước migration không bị hỏng ngay
+lập tức). Xác nhận bằng gọi thật (`testnet.binance.vision`): `exchange_reachable`
+OK 155ms, `exchange_authenticated` FAIL đúng lý do (thiếu key mới, không
+phải lỗi code).
+
+**`config/settings.yaml`**: `exchange.name: bybit -> binance`. KHÔNG thêm
+field `exchange.sandbox` như gợi ý ban đầu — giữ nguyên `exchange.testnet`
+(đã dùng ở CLAUDE.md #6, `ops/health_check.py`, `ops/RUNBOOK.md` từ trước);
+`CCXTClient` gọi `exchange.set_sandbox_mode(True)` khi `testnet=True`, tên
+tham số/field không cần trùng tên phương thức ccxt dùng nội bộ. Thêm field
+trùng nghĩa chỉ để khớp gợi ý ban đầu sẽ tạo hai nguồn sự thật cho cùng
+một khái niệm.

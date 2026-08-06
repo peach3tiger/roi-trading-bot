@@ -6,10 +6,11 @@ xử lý sự cố, không lặp lại nội dung đã có trong code/comment.
 
 ## Trạng thái hiện tại — đọc trước khi làm gì khác
 
-**`main.py` chưa có live loop.** Phase 9 (`broker/bybit_client.py`,
-`prompts/phase-09-bybit-broker.md`) và Phase 10 (main loop,
-`prompts/phase-10-main-loop.md`) đều còn là stub (`NotImplementedError`).
-Chạy container hôm nay (`docker compose up`) sẽ:
+**`main.py` chưa có live loop.** Phase 9 (`broker/ccxt_client.py` — đổi từ
+`broker/bybit_client.py` ngày 2026-08-06, xem `docs/DECISIONS.md`,
+`broker/bybit_client.py` vẫn còn trong repo nhưng deprecated) và Phase 10
+(main loop, `prompts/phase-10-main-loop.md`) đều còn là stub
+(`NotImplementedError`). Chạy container hôm nay (`docker compose up`) sẽ:
 
 1. `ops/entrypoint.sh` chạy xong tiền kiểm (không có gì chặn trên máy sạch).
 2. `exec python main.py` → rơi vào nhánh cuối của `main()` → raise
@@ -67,7 +68,8 @@ container thoát vì lỗi "TỪ CHỐI: lệnh chứa...", đó là guard này 
 | `LOG_DIR` | `logs/` | thư mục log xoay vòng (`monitoring/logger.py`) |
 | `STATE_DIR` | `state/` (mặc định script) / `/app/state` (container) | `trading_halted.lock`, `state_snapshot.json` |
 | `REQUIRE_HMM_MODEL` | `true` | `false` để health check chỉ WARN thay vì FAIL khi chưa có model — dùng lúc bring-up trước khi Phase 10 train lần đầu |
-| `BYBIT_TESTNET` | `true` | health check ping testnet hay mainnet — **luôn để `true`** trừ khi đã qua đủ mốc ở CLAUDE.md bất biến #12 |
+| `EXCHANGE_TESTNET` | `true` | health check ping testnet hay mainnet — **luôn để `true`** trừ khi đã qua đủ mốc ở CLAUDE.md bất biến #12. Đổi tên từ `BYBIT_TESTNET` ngày 2026-08-06 (đổi sàn Bybit -> Binance, xem `docs/DECISIONS.md`) — `ops/health_check.py` vẫn đọc được tên cũ làm fallback |
+| `EXCHANGE_API_KEY` / `EXCHANGE_API_SECRET` | *(rỗng)* | credential cho `exchange_authenticated` check — sàn thật đọc từ `config/settings.yaml: exchange.name`, không hardcode. Đổi tên từ `BYBIT_API_KEY`/`BYBIT_API_SECRET` cùng đợt trên |
 
 ---
 
@@ -147,58 +149,68 @@ lỗi mạng lúc tải dữ liệu mới, hoặc exception từ chính quá tr�
 
 ---
 
-## Mất WebSocket
+## Mất dữ liệu giá (REST polling thất bại)
 
-**Triệu chứng:** không có bar/tick mới trong log quá **2× chu kỳ bar**
-(Brain-Crypto-Bybit.md §6.6 — timeframe `1D` nên ngưỡng là 2 ngày; đây là
-ngưỡng đã định nghĩa trong spec cho `data/market_data.py::subscribe_klines`,
-chưa implement tại thời điểm viết file này).
+**Đã bỏ WebSocket** (2026-08-06, xem `docs/DECISIONS.md`) — bot chạy bar
+`1D`, `data/market_data.py::get_latest_kline()` poll REST trực tiếp mỗi
+lần gọi, không cache, không heartbeat. Vì vậy KHÔNG còn kiểu lỗi "mất kết
+nối im lặng" mà WebSocket từng có (`is_feed_alive()`/`subscribe_klines()`
+đã bị xoá cùng đợt này — nếu bạn thấy code tham chiếu chúng, đó là tàn dư
+cần dọn, không phải tính năng còn sống): mỗi lần poll HOẶC thành công HOẶC
+raise ngay tại chỗ gọi, không có trạng thái lấp lửng "đã kết nối nhưng dữ
+liệu cũ" cần một cơ chế riêng để phát hiện.
 
-1. **Hành vi đúng khi mất feed** (§Phase 7 "Xử lý lỗi"): **tạm dừng sinh
-   signal mới, giữ stop loss đang hoạt động**. Không đóng vị thế chỉ vì
-   mất feed — mất feed không có nghĩa thị trường dừng, và đóng vị thế
+**Triệu chứng:** exception/traceback từ `get_latest_kline()` (hoặc bất kỳ
+lệnh gọi `ExchangeClient` nào) trong log, KHÔNG PHẢI một ngưỡng "quá lâu
+không có bar mới" như trước.
+
+1. **Hành vi đúng khi một lần poll lỗi** (§Phase 7 "Xử lý lỗi", áp dụng
+   tương tự): **tạm dừng sinh signal mới ở vòng đó, giữ stop loss đang
+   hoạt động, thử lại ở vòng poll kế tiếp**. Không đóng vị thế chỉ vì một
+   lần poll lỗi — lỗi REST không có nghĩa thị trường dừng, và đóng vị thế
    không có xác nhận giá mới là hành động rủi ro hơn là chờ.
-2. Kiểm tra kết nối mạng container → Bybit trước:
+2. Kiểm tra kết nối mạng container → sàn trước:
    `docker compose run --rm bot python ops/health_check.py` — mục
-   `exchange_reachable` cho biết REST API còn sống hay không (WebSocket
-   là kênh riêng, nhưng nếu REST cũng chết thì khả năng cao là vấn đề
-   mạng/DNS của container, không phải riêng WebSocket của Bybit). Mục này
-   CHỈ kiểm tra mạng, không kiểm tra key — xem mục "Xác thực Bybit thất
+   `exchange_reachable` cho biết REST API còn sống hay không. Mục này
+   CHỈ kiểm tra mạng, không kiểm tra key — xem mục "Xác thực sàn thất
    bại" bên dưới nếu `exchange_reachable` OK mà bot vẫn không giao dịch
    được.
-3. Bybit ngắt WebSocket im lặng theo chu kỳ (§6.6) — thiết kế đúng đã có
-   heartbeat ping/pong + tự kết nối lại; nếu tự kết nối lại liên tục thất
-   bại, kiểm tra rate limit (`retCode 10006` — backoff, không phải lỗi
-   nghiêm trọng, xem §Phase 7) trước khi nghi ngờ nguyên nhân khác.
-4. Nếu mất feed kéo dài bất thường (nhiều giờ) mà REST API vẫn sống bình
-   thường: nghi ngờ bug ở tầng subscribe/reconnect, không phải sự cố phía
-   Bybit — xem log traceback đầy đủ, không chỉ dòng cảnh báo đầu tiên.
+3. Nếu lỗi lặp lại liên tục dù `exchange_reachable` OK: kiểm tra
+   `broker/ccxt_client.py::CCXTClient._call_with_retry` đã retry đúng tập
+   lỗi nhất thời (`ccxt.NetworkError` và các lớp con) chưa hết log
+   WARNING trước khi raise — nếu raise ngay từ lần đầu với một lỗi lẽ ra
+   tự khỏi (rate limit, timeout), đó là bug ở whitelist retry, không phải
+   sự cố phía sàn.
+4. Rate limit (`ccxt.RateLimitExceeded`/`DDoSProtection`) tự retry có
+   backoff — không phải lỗi nghiêm trọng, xem log WARNING thay vì log
+   ERROR để phân biệt.
 
 ---
 
-## Xác thực Bybit thất bại (key hết hạn/bị revoke/sai môi trường)
+## Xác thực sàn thất bại (key hết hạn/bị revoke/sai môi trường)
 
 **Đây là chế độ hỏng phổ biến nhất khi vận hành thật** — phổ biến hơn cả
-mất WebSocket hay circuit breaker, vì nó có thể xảy ra ngay từ lần khởi
-động đầu tiên và dễ bị hiểu nhầm là "đã kết nối được rồi".
+lỗi poll dữ liệu giá hay circuit breaker, vì nó có thể xảy ra ngay từ lần
+khởi động đầu tiên và dễ bị hiểu nhầm là "đã kết nối được rồi".
 
 `ops/health_check.py` tách RÕ hai việc, đừng nhầm lẫn:
 
 - `exchange_reachable` — public endpoint (`fetch_time`), **không cần API
-  key**. OK chỉ có nghĩa là mạng/DNS/Bybit's server đang sống. **Không
-  chứng minh được key hợp lệ.**
+  key**. OK chỉ có nghĩa là mạng/DNS/server sàn đang sống. **Không chứng
+  minh được key hợp lệ.**
 - `exchange_authenticated` — một request CẦN xác thực thật
   (`fetch_balance`, không đặt lệnh, không đổi trạng thái tài khoản). Đây
   mới là check phát hiện: key hết hạn, bị revoke trên dashboard, thiếu
   quyền (permission scope), hoặc — lỗi hay gặp nhất — **dán nhầm key
-  MAINNET vào môi trường testnet hay ngược lại** (Bybit testnet/mainnet
-  có không gian API key HOÀN TOÀN TÁCH BIỆT, một key chỉ dùng được đúng
-  một môi trường).
+  MAINNET vào môi trường testnet hay ngược lại** (testnet/mainnet của
+  hầu hết sàn, kể cả Binance, có không gian API key HOÀN TOÀN TÁCH BIỆT,
+  một key chỉ dùng được đúng một môi trường).
 
 **Triệu chứng điển hình:** `exchange_reachable` báo OK (đôi khi latency
-rất tốt, < 300ms) nhưng `exchange_authenticated` FAIL với thông điệp dạng
-`API key is invalid. (ErrCode: 10003)` hoặc lỗi 401. Đây là tình huống
-THẬT đã gặp lúc kiểm thử Phase 9 (key trong `.env` bị Bybit từ chối ở
+rất tốt, < 300ms) nhưng `exchange_authenticated` FAIL với thông điệp báo
+lỗi xác thực (dạng "invalid API key" hoặc HTTP 401 — nội dung chính xác
+tuỳ sàn, xem `ccxt.AuthenticationError` trong log). Đây là tình huống
+THẬT đã gặp lúc kiểm thử Phase 9 với Bybit (key trong `.env` bị từ chối ở
 tầng xác thực dù server phản hồi bình thường ở tầng mạng) — chính là lý do
 `check_exchange_authenticated` được tách ra làm check riêng. **Trước khi
 có check này, `ops/health_check.py` chỉ gọi `fetch_time()` nên báo "kết
@@ -207,17 +219,17 @@ sẵn sàng mà không đặt được lệnh nào.**
 
 Quy trình xử lý:
 
-1. Đọc kỹ thông điệp lỗi của `exchange_authenticated` — retCode/retMsg từ
-   chính Bybit, KHÔNG chứa credential (an toàn để dán vào ticket/log).
-   `401`/`10003` = key không được sàn công nhận (sai/hết hạn/revoke/sai
-   môi trường); các retCode khác (vd. `10004` chữ ký sai) có thể chỉ ra
-   nguyên nhân khác (đồng hồ lệch quá — xem `exchange_reachable`'s cảnh
-   báo lệch đồng hồ, hoặc secret bị gõ sai).
-2. Vào **testnet.bybit.com** (không phải bybit.com) → API Management —
-   xác nhận key trong `.env` còn tồn tại, chưa hết hạn, chưa bị revoke, và
-   có đủ quyền (ít nhất "Read" cho tài khoản; "Trade" khi cần đặt lệnh
-   thật). So khớp `BYBIT_TESTNET` trong `.env` với đúng dashboard đang mở
-   (testnet vs mainnet là hai trang, hai bộ key khác nhau).
+1. Đọc kỹ thông điệp lỗi của `exchange_authenticated` — message nguyên
+   văn từ ccxt (đã bọc mã lỗi gốc của sàn), KHÔNG chứa credential (an
+   toàn để dán vào ticket/log).
+2. Vào trang testnet của đúng sàn đang cấu hình
+   (`config/settings.yaml: exchange.name` — Binance:
+   **testnet.binance.vision**, không phải binance.com) → API Management —
+   xác nhận key trong `.env` (`EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET`)
+   còn tồn tại, chưa hết hạn, chưa bị revoke, và có đủ quyền (ít nhất
+   "Read" cho tài khoản; "Trade" khi cần đặt lệnh thật). So khớp
+   `EXCHANGE_TESTNET` trong `.env` với đúng dashboard đang mở (testnet vs
+   mainnet là hai trang, hai bộ key khác nhau).
 3. Nếu phải tạo key mới: cập nhật `.env` (không commit — đã có trong
    `.gitignore`/`.dockerignore`), chạy lại
    `docker compose run --rm bot python ops/health_check.py` để xác nhận

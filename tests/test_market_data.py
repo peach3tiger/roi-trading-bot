@@ -1,15 +1,15 @@
-"""tests.test_market_data — MarketDataService: heartbeat/feed-alive, uỷ quyền.
+"""tests.test_market_data — MarketDataService: poll REST, uỷ quyền cho ExchangeClient.
 
-File MỚI. `is_feed_alive()` là cơ chế bắt "mất WebSocket im lặng" duy nhất
-(Brain-Crypto-Bybit.md §6.6) — sai ngưỡng ở đây nghĩa là bot giao dịch mù
-trên dữ liệu cũ mà không biết, đáng để test thật.
+REST polling thay WebSocket (2026-08-06, xem `docs/DECISIONS.md`) — không
+còn heartbeat/`is_feed_alive` để test; mỗi `get_latest_kline()` là một lần
+gọi REST trực tiếp, kiểm tra bằng cách đếm/xác nhận nội dung lời gọi
+`get_historical_klines` bên dưới.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Callable
 
 import pandas as pd
 import pytest
@@ -32,8 +32,6 @@ _SYMBOL = "BTCUSDT"
 class _FakeExchange(ExchangeClient):
     def __init__(self) -> None:
         self.historical_calls: list[tuple[str, str, datetime, datetime]] = []
-        self.subscribed: list[tuple[str, str]] = []
-        self._kline_callback: Callable[[pd.Series], None] | None = None
         self.historical_df = pd.DataFrame(
             {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1.0]},
             index=pd.DatetimeIndex([pd.Timestamp("2026-08-01", tz="UTC")]),
@@ -70,20 +68,6 @@ class _FakeExchange(ExchangeClient):
             asks=[(Decimal("64010"), Decimal("1"))],
             timestamp=datetime.now(timezone.utc),
         )
-
-    def subscribe_klines(
-        self, symbol: str, interval: str, callback: Callable[[pd.Series], None]
-    ) -> None:
-        self.subscribed.append((symbol, interval))
-        self._kline_callback = callback
-
-    def subscribe_executions(self, callback: Callable[[OrderResult], None]) -> None:
-        raise NotImplementedError
-
-    def fire_kline(self, kline: pd.Series) -> None:
-        """Test helper — mô phỏng một bar mới tới qua WebSocket."""
-        assert self._kline_callback is not None, "chưa subscribe_klines"
-        self._kline_callback(kline)
 
 
 def _make_service() -> tuple[MarketDataService, _FakeExchange]:
@@ -125,83 +109,47 @@ def test_get_orderbook_delegates_to_exchange_client() -> None:
 
 
 # ----------------------------------------------------------------------
-# Heartbeat / feed-alive (§6.6)
+# get_latest_kline — REST trực tiếp mỗi lần gọi, không cache
 # ----------------------------------------------------------------------
 
 
-def test_feed_not_alive_before_any_data_received() -> None:
-    service, _ = _make_service()
-    assert service.is_feed_alive() is False
-
-
-def test_feed_alive_right_after_receiving_a_bar() -> None:
+def test_get_latest_kline_calls_rest_every_time() -> None:
     service, exchange = _make_service()
-    service.subscribe_klines(lambda k: None)
 
-    bar = pd.Series({"open": 1, "high": 1, "low": 1, "close": 1}, name=pd.Timestamp.now(tz="UTC"))
-    exchange.fire_kline(bar)
+    service.get_latest_kline()
+    service.get_latest_kline()
 
-    assert service.is_feed_alive() is True
+    assert len(exchange.historical_calls) == 2, "không cache — mỗi lần gọi phải là một REST call mới"
 
 
-def test_feed_dead_after_more_than_2x_bar_period_silent() -> None:
-    """`1D` -> ngưỡng chết là > 2 ngày không nhận bar mới (§6.6)."""
+def test_get_latest_kline_returns_last_row_of_rest_result() -> None:
     service, exchange = _make_service()
-    service.subscribe_klines(lambda k: None)
-    exchange.fire_kline(pd.Series({"close": 1}, name=pd.Timestamp.now(tz="UTC")))
-    assert service.is_feed_alive() is True
+    exchange.historical_df = pd.DataFrame(
+        {
+            "open": [1.0, 2.0],
+            "high": [1.0, 2.0],
+            "low": [1.0, 2.0],
+            "close": [1.0, 65000.0],
+            "volume": [1.0, 1.0],
+        },
+        index=pd.DatetimeIndex(
+            [pd.Timestamp("2026-08-04", tz="UTC"), pd.Timestamp("2026-08-05", tz="UTC")]
+        ),
+    )
 
-    # Giả lập thời gian trôi qua > 2x chu kỳ bar mà không có bar mới nào —
-    # chỉnh thẳng _last_received_at thay vì mock datetime.now() toàn cục.
-    service._last_received_at = datetime.now(timezone.utc) - timedelta(days=2, minutes=1)
-
-    assert service.is_feed_alive() is False
-
-
-def test_feed_alive_just_under_2x_bar_period_boundary() -> None:
-    service, exchange = _make_service()
-    service.subscribe_klines(lambda k: None)
-    exchange.fire_kline(pd.Series({"close": 1}, name=pd.Timestamp.now(tz="UTC")))
-
-    # Cách biên `2 * bar_period` một khoảng an toàn (1 phút) — kiểm tra
-    # đúng phía "còn sống" của ngưỡng mà không phụ thuộc thời gian thực
-    # thi giữa lúc set và lúc gọi is_feed_alive() (tránh flaky ở đúng biên).
-    service._last_received_at = datetime.now(timezone.utc) - timedelta(days=2) + timedelta(minutes=1)
-
-    assert service.is_feed_alive() is True
-
-
-def test_subscribe_klines_forwards_kline_to_caller_callback() -> None:
-    service, exchange = _make_service()
-    received: list[pd.Series] = []
-    service.subscribe_klines(received.append)
-
-    kline = pd.Series({"close": 64000.0}, name=pd.Timestamp.now(tz="UTC"))
-    exchange.fire_kline(kline)
-
-    assert len(received) == 1
-    assert received[0]["close"] == 64000.0
-
-
-# ----------------------------------------------------------------------
-# get_latest_kline
-# ----------------------------------------------------------------------
-
-
-def test_get_latest_kline_returns_cached_bar_after_subscribe() -> None:
-    service, exchange = _make_service()
-    service.subscribe_klines(lambda k: None)
-    kline = pd.Series({"close": 65000.0}, name=pd.Timestamp.now(tz="UTC"))
-    exchange.fire_kline(kline)
-
-    assert service.get_latest_kline()["close"] == 65000.0
-
-
-def test_get_latest_kline_falls_back_to_rest_when_never_subscribed() -> None:
-    service, exchange = _make_service()
     latest = service.get_latest_kline()
-    assert latest["close"] == exchange.historical_df["close"].iloc[-1]
-    assert exchange.historical_calls  # đã gọi REST để bootstrap
+
+    assert latest["close"] == 65000.0
+    assert latest.name == pd.Timestamp("2026-08-05", tz="UTC")
+
+
+def test_get_latest_kline_requests_a_window_covering_at_least_three_bars() -> None:
+    service, exchange = _make_service()
+
+    service.get_latest_kline()
+
+    (_, _, start, end) = exchange.historical_calls[0]
+    assert end - start >= service._bar_period * 3
 
 
 def test_get_latest_kline_raises_when_no_data_anywhere() -> None:
