@@ -146,6 +146,16 @@ Không magic number trong code. Nếu một con số có thể cần chỉnh, n�
 
 Năm file này không được skip, không được xfail, không được comment out.
 
+### 16. Mọi phép kiểm tra mới phải được chứng minh bằng đột biến trước khi tin
+
+Cố tình phá thứ nó đáng lẽ bắt được, xác nhận nó đỏ, rồi revert.
+
+Chế độ hỏng chủ đạo của dự án này là lỗi xác minh, không phải lỗi logic — ba lần đã xảy ra: health_check chỉ gọi public endpoint, health_check hardcode sàn cũ, và pipe qua tail nuốt mất exit code.
+
+### 17. Không bao giờ đọc exit code sau pipe
+
+`cmd | tail; echo $?` trả về exit code của tail. Dùng `PIPESTATUS`, hoặc bỏ pipe khi cần exit code.
+
 ---
 
 ## Phong cách code
