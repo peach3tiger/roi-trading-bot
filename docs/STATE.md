@@ -42,12 +42,20 @@ tại — xem "Việc còn treo" bên dưới, thứ tự đã đổi để trá
    "Lấp 4 test skip trong test_hmm.py". Tự kiểm chứng bằng mutation
    (CLAUDE.md #16): 11/14 test đỏ đúng theo 5 mutation, 3 không liên quan
    vẫn xanh, đã revert.
-3. **Lỗi mypy trong `tests/test_forward_logger.py`** (8 lỗi, pre-existing,
-   không ai xử lý qua nhiều phiên) — ưu tiên thật hiện tại, nợ kỹ thuật
-   tồn đọng.
-4. **`prompts/phase-10-main-loop.md`** — xây được và test được bằng
-   `--dry-run`, KHÔNG cần sàn thật. Chỉ phần nghiệm thu đặt lệnh thật mới
-   cần testnet (bị chặn, xem trên) — không chặn việc xây main loop.
+3. ~~Lỗi mypy trong `tests/test_forward_logger.py`~~ — **XONG.** 2 nguyên
+   nhân gốc: (a) `dict.fromkeys(fields, "")` khiến mypy suy ra
+   `dict[str, str]` từ giá trị điền mặc định thay vì tôn trọng chữ ký hàm
+   `dict[str, object]` — annotate biến tường minh; (b) fixture
+   `_forward_harness` thiếu return type + 5 chỗ dùng nó thiếu type param
+   — thêm alias `_ForwardHarness = tuple[Path, pd.DataFrame, Path]`, gắn
+   vào cả fixture lẫn mọi hàm test dùng nó. Chỉ thêm type hint, không đổi
+   logic — 23/23 test cũ pass nguyên vẹn. `mypy .` toàn repo sạch (50
+   file, 0 lỗi) — trước đây (kể cả nhiều phiên trước phiên này) luôn còn
+   sót 8 lỗi ở đúng file này.
+4. **`prompts/phase-10-main-loop.md`** — ưu tiên thật hiện tại. Xây được
+   và test được bằng `--dry-run`, KHÔNG cần sàn thật. Chỉ phần nghiệm thu
+   đặt lệnh thật mới cần testnet (bị chặn, xem trên) — không chặn việc
+   xây main loop.
 5. Điền `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` + nghiệm thu `CCXTClient`
    qua mạng thật — **TẠM DỪNG**, chờ testnet hết bị chặn ở tầng tài khoản
    GitHub. Không phải việc kế tiếp.
@@ -71,8 +79,8 @@ HẲN (không còn đọc, kể cả làm dự phòng) — thiếu biến nào t
 
 ## Việc tiếp theo
 
-mypy test_forward_logger.py -> Phase 10 main loop (`--dry-run`, không cần
-testnet) -> [testnet hết bị chặn] -> nghiệm thu CCXTClient qua mạng thật.
+Phase 10 main loop (`--dry-run`, không cần testnet) -> [testnet hết bị
+chặn] -> nghiệm thu CCXTClient qua mạng thật.
 
 ## Quy tắc đã học, không lặp lại
 

@@ -26,7 +26,10 @@ import forward.logger as fwd
 
 
 def _sample_row(date_str: str) -> dict[str, object]:
-    row = dict.fromkeys(fwd._CSV_FIELDNAMES, "")
+    # Annotate tường minh — `dict.fromkeys(..., "")` khiến mypy suy ra
+    # dict[str, str] từ giá trị điền mặc định, dù chữ ký hàm khai
+    # dict[str, object] (cột "hmm_retrained" gán bool ngay dưới đây).
+    row: dict[str, object] = dict.fromkeys(fwd._CSV_FIELDNAMES, "")
     row["date"] = date_str
     row["hmm_retrained"] = False
     return row
@@ -243,8 +246,11 @@ def _stub_settings() -> dict:
     }
 
 
+_ForwardHarness = tuple[Path, pd.DataFrame, Path]
+
+
 @pytest.fixture
-def _forward_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _forward_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _ForwardHarness:
     """Trỏ log.csv/warnings.log sang tmp_path, chặn hoàn toàn mạng/config thật."""
     log_path = tmp_path / "log.csv"
     warnings_path = tmp_path / "warnings.log"
@@ -263,7 +269,7 @@ def _forward_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return log_path, synthetic, warnings_path
 
 
-def test_run_forward_test_first_run_appends_exactly_one_row(_forward_harness) -> None:
+def test_run_forward_test_first_run_appends_exactly_one_row(_forward_harness: _ForwardHarness) -> None:
     log_path, synthetic, _warnings_path = _forward_harness
     now = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()  # bar 160 vừa đóng
 
@@ -275,7 +281,7 @@ def test_run_forward_test_first_run_appends_exactly_one_row(_forward_harness) ->
     assert df.iloc[0]["date"] == synthetic.index[160].tz_localize(None)
 
 
-def test_run_forward_test_same_day_rerun_is_idempotent(_forward_harness) -> None:
+def test_run_forward_test_same_day_rerun_is_idempotent(_forward_harness: _ForwardHarness) -> None:
     log_path, synthetic, _warnings_path = _forward_harness
     now = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()
 
@@ -288,7 +294,9 @@ def test_run_forward_test_same_day_rerun_is_idempotent(_forward_harness) -> None
     assert log_path.read_text(encoding="utf-8") == content_after_first  # không ghi thêm gì
 
 
-def test_run_forward_test_backfills_gap_without_touching_prior_rows(_forward_harness) -> None:
+def test_run_forward_test_backfills_gap_without_touching_prior_rows(
+    _forward_harness: _ForwardHarness,
+) -> None:
     log_path, synthetic, _warnings_path = _forward_harness
     now_day1 = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()
     fwd.run_forward_test(now=now_day1)
@@ -368,7 +376,7 @@ def test_write_warnings_log_noop_when_no_lines(tmp_path: Path) -> None:
 
 
 def test_run_forward_test_counts_and_logs_warnings_per_bar(
-    _forward_harness, monkeypatch: pytest.MonkeyPatch
+    _forward_harness: _ForwardHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Ép một warning thật xảy ra đúng 1 lần trong khối xử lý bar (qua
     `compose_layer_allocations`, gọi đúng 1 lần/bar) — kiểm chứng
@@ -398,7 +406,7 @@ def test_run_forward_test_counts_and_logs_warnings_per_bar(
     assert any("RuntimeWarning" in ln for ln in bar_lines)
 
 
-def test_run_forward_test_zero_warnings_when_none_raised(_forward_harness) -> None:
+def test_run_forward_test_zero_warnings_when_none_raised(_forward_harness: _ForwardHarness) -> None:
     log_path, synthetic, warnings_path = _forward_harness
     now = (synthetic.index[160] + pd.Timedelta(days=1)).to_pydatetime()
 
