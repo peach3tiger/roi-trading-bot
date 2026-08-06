@@ -133,8 +133,16 @@ Không magic number trong code. Nếu một con số có thể cần chỉnh, n�
 - `test_precision.py` — làm tròn qty/price đúng ở mọi biên
 - `test_layer_composition.py` — các tầng chỉ giảm
 - `test_cost_model.py` — phí tính đúng
+- `test_forward_golden.py` — output pipeline forward (feature → HMM →
+  strategy → trend gate → `compose_layer_allocations`) khớp
+  `tests/golden/forward_baseline.json` đã commit, trên dữ liệu tổng hợp
+  seed cố định. FAIL nghĩa là `core/` đã đổi hành vi — **không được sửa
+  file test hay chạy `--regenerate` để cho qua**. Thay đổi vô tình → revert.
+  Thay đổi cố ý → thí nghiệm forward test hiện tại (`forward/log.csv`) coi
+  như kết thúc tại đó, ghi lý do + ngày vào `docs/DECISIONS.md` TRƯỚC, rồi
+  mới regenerate golden cho thí nghiệm mới. Xem docstring đầu file.
 
-Bốn file này không được skip, không được xfail, không được comment out.
+Năm file này không được skip, không được xfail, không được comment out.
 
 ---
 
