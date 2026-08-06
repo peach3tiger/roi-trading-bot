@@ -160,9 +160,12 @@ chưa implement tại thời điểm viết file này).
    không có xác nhận giá mới là hành động rủi ro hơn là chờ.
 2. Kiểm tra kết nối mạng container → Bybit trước:
    `docker compose run --rm bot python ops/health_check.py` — mục
-   `exchange_connectivity` cho biết REST API còn sống hay không (WebSocket
+   `exchange_reachable` cho biết REST API còn sống hay không (WebSocket
    là kênh riêng, nhưng nếu REST cũng chết thì khả năng cao là vấn đề
-   mạng/DNS của container, không phải riêng WebSocket của Bybit).
+   mạng/DNS của container, không phải riêng WebSocket của Bybit). Mục này
+   CHỈ kiểm tra mạng, không kiểm tra key — xem mục "Xác thực Bybit thất
+   bại" bên dưới nếu `exchange_reachable` OK mà bot vẫn không giao dịch
+   được.
 3. Bybit ngắt WebSocket im lặng theo chu kỳ (§6.6) — thiết kế đúng đã có
    heartbeat ping/pong + tự kết nối lại; nếu tự kết nối lại liên tục thất
    bại, kiểm tra rate limit (`retCode 10006` — backoff, không phải lỗi
@@ -170,6 +173,58 @@ chưa implement tại thời điểm viết file này).
 4. Nếu mất feed kéo dài bất thường (nhiều giờ) mà REST API vẫn sống bình
    thường: nghi ngờ bug ở tầng subscribe/reconnect, không phải sự cố phía
    Bybit — xem log traceback đầy đủ, không chỉ dòng cảnh báo đầu tiên.
+
+---
+
+## Xác thực Bybit thất bại (key hết hạn/bị revoke/sai môi trường)
+
+**Đây là chế độ hỏng phổ biến nhất khi vận hành thật** — phổ biến hơn cả
+mất WebSocket hay circuit breaker, vì nó có thể xảy ra ngay từ lần khởi
+động đầu tiên và dễ bị hiểu nhầm là "đã kết nối được rồi".
+
+`ops/health_check.py` tách RÕ hai việc, đừng nhầm lẫn:
+
+- `exchange_reachable` — public endpoint (`fetch_time`), **không cần API
+  key**. OK chỉ có nghĩa là mạng/DNS/Bybit's server đang sống. **Không
+  chứng minh được key hợp lệ.**
+- `exchange_authenticated` — một request CẦN xác thực thật
+  (`fetch_balance`, không đặt lệnh, không đổi trạng thái tài khoản). Đây
+  mới là check phát hiện: key hết hạn, bị revoke trên dashboard, thiếu
+  quyền (permission scope), hoặc — lỗi hay gặp nhất — **dán nhầm key
+  MAINNET vào môi trường testnet hay ngược lại** (Bybit testnet/mainnet
+  có không gian API key HOÀN TOÀN TÁCH BIỆT, một key chỉ dùng được đúng
+  một môi trường).
+
+**Triệu chứng điển hình:** `exchange_reachable` báo OK (đôi khi latency
+rất tốt, < 300ms) nhưng `exchange_authenticated` FAIL với thông điệp dạng
+`API key is invalid. (ErrCode: 10003)` hoặc lỗi 401. Đây là tình huống
+THẬT đã gặp lúc kiểm thử Phase 9 (key trong `.env` bị Bybit từ chối ở
+tầng xác thực dù server phản hồi bình thường ở tầng mạng) — chính là lý do
+`check_exchange_authenticated` được tách ra làm check riêng. **Trước khi
+có check này, `ops/health_check.py` chỉ gọi `fetch_time()` nên báo "kết
+nối OK" trong đúng tình huống này — sai lệch nghiêm trọng, vì bot tưởng
+sẵn sàng mà không đặt được lệnh nào.**
+
+Quy trình xử lý:
+
+1. Đọc kỹ thông điệp lỗi của `exchange_authenticated` — retCode/retMsg từ
+   chính Bybit, KHÔNG chứa credential (an toàn để dán vào ticket/log).
+   `401`/`10003` = key không được sàn công nhận (sai/hết hạn/revoke/sai
+   môi trường); các retCode khác (vd. `10004` chữ ký sai) có thể chỉ ra
+   nguyên nhân khác (đồng hồ lệch quá — xem `exchange_reachable`'s cảnh
+   báo lệch đồng hồ, hoặc secret bị gõ sai).
+2. Vào **testnet.bybit.com** (không phải bybit.com) → API Management —
+   xác nhận key trong `.env` còn tồn tại, chưa hết hạn, chưa bị revoke, và
+   có đủ quyền (ít nhất "Read" cho tài khoản; "Trade" khi cần đặt lệnh
+   thật). So khớp `BYBIT_TESTNET` trong `.env` với đúng dashboard đang mở
+   (testnet vs mainnet là hai trang, hai bộ key khác nhau).
+3. Nếu phải tạo key mới: cập nhật `.env` (không commit — đã có trong
+   `.gitignore`/`.dockerignore`), chạy lại
+   `docker compose run --rm bot python ops/health_check.py` để xác nhận
+   `exchange_authenticated` chuyển OK trước khi tin tưởng chạy tiếp.
+4. **Không** coi `exchange_reachable` OK là đủ để kết luận "hệ thống sẵn
+   sàng" ở bất kỳ đâu khác trong vận hành (dashboard, alert, quyết định
+   thủ công) — luôn nhìn cả hai check.
 
 ---
 

@@ -82,18 +82,24 @@ def check_config(config_path: Path) -> CheckResult:
     return CheckResult("config", "OK", f"{config_path} hợp lệ, testnet=true")
 
 
-def check_exchange_connectivity() -> CheckResult:
+def _is_testnet() -> bool:
+    return os.environ.get("BYBIT_TESTNET", "true").strip().lower() != "false"
+
+
+def check_exchange_reachable() -> CheckResult:
     """Ping public endpoint (fetch_time) — KHÔNG cần API key/secret, không
     bao giờ log giá trị credential dù có sẵn trong env. Chỉ kiểm tra kết
-    nối mạng + API sàn còn sống, không xác thực tài khoản (đó là việc của
-    main loop lúc khởi động thật, xem docs/Brain-Crypto-Bybit.md §Phase 7).
+    nối mạng + API sàn còn sống — KHÔNG xác thực được key, xem
+    `check_exchange_authenticated` cho việc đó. Hai check tách riêng có
+    chủ đích: "reachable" OK không có nghĩa "đặt lệnh được" — xem
+    ops/RUNBOOK.md.
     """
     try:
         import ccxt
     except ImportError:
-        return CheckResult("exchange_connectivity", "FAIL", "Thiếu thư viện ccxt")
+        return CheckResult("exchange_reachable", "FAIL", "Thiếu thư viện ccxt")
 
-    testnet = os.environ.get("BYBIT_TESTNET", "true").strip().lower() != "false"
+    testnet = _is_testnet()
     label = "testnet" if testnet else "MAINNET"
     try:
         exchange = ccxt.bybit({"enableRateLimit": True, "timeout": _EXCHANGE_TIMEOUT_MS})
@@ -103,7 +109,7 @@ def check_exchange_connectivity() -> CheckResult:
         server_time_ms = exchange.fetch_time()
         latency_ms = (time.monotonic() - t0) * 1000
     except Exception as exc:  # ccxt raise nhiều loại lỗi khác nhau (network, exchange, auth)
-        return CheckResult("exchange_connectivity", "FAIL", f"Không kết nối được Bybit ({label}): {exc}")
+        return CheckResult("exchange_reachable", "FAIL", f"Không kết nối được Bybit ({label}): {exc}")
 
     local_ms = time.time() * 1000
     drift_ms = abs(local_ms - server_time_ms)
@@ -112,12 +118,67 @@ def check_exchange_connectivity() -> CheckResult:
         # số 1 gây lỗi auth với Bybit. WARN chứ không FAIL — chưa chắc chặn
         # được kết nối, nhưng phải hiện ra để xử lý trước khi lệch nặng hơn.
         return CheckResult(
-            "exchange_connectivity",
+            "exchange_reachable",
             "WARN",
             f"Bybit {label} phản hồi sau {latency_ms:.0f}ms nhưng lệch đồng hồ "
             f"{drift_ms:.0f}ms > 1000ms (xem §6.3)",
         )
-    return CheckResult("exchange_connectivity", "OK", f"Bybit {label} phản hồi sau {latency_ms:.0f}ms")
+    return CheckResult("exchange_reachable", "OK", f"Bybit {label} phản hồi sau {latency_ms:.0f}ms")
+
+
+def check_exchange_authenticated() -> CheckResult:
+    """Một request CẦN xác thực (`fetch_balance` — nhẹ nhất có sẵn qua
+    ccxt cho Bybit, không đặt lệnh, không thay đổi trạng thái tài khoản).
+
+    Đây là check phát hiện chế độ hỏng phổ biến nhất khi vận hành thật:
+    key hết hạn, bị revoke, thiếu quyền, hoặc dán nhầm key MAINNET vào môi
+    trường testnet (hoặc ngược lại) — tất cả đều để `check_exchange_reachable`
+    PASS bình thường (đó là endpoint public) trong khi bot không thể đặt
+    lệnh được. Không bao giờ log giá trị `api_key`/`api_secret`, chỉ dùng
+    để dựng client — CLAUDE.md bất biến #6.
+    """
+    try:
+        import ccxt
+    except ImportError:
+        return CheckResult("exchange_authenticated", "FAIL", "Thiếu thư viện ccxt")
+
+    api_key = os.environ.get("BYBIT_API_KEY", "")
+    api_secret = os.environ.get("BYBIT_API_SECRET", "")
+    if not api_key or not api_secret:
+        return CheckResult(
+            "exchange_authenticated",
+            "FAIL",
+            "Thiếu BYBIT_API_KEY/BYBIT_API_SECRET trong env — không xác thực được (không log giá trị)",
+        )
+
+    testnet = _is_testnet()
+    label = "testnet" if testnet else "MAINNET"
+    try:
+        exchange = ccxt.bybit(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "enableRateLimit": True,
+                "timeout": _EXCHANGE_TIMEOUT_MS,
+            }
+        )
+        if testnet:
+            exchange.set_sandbox_mode(True)
+        exchange.fetch_balance()
+    except ccxt.AuthenticationError as exc:
+        # Thông điệp lỗi ccxt/Bybit không chứa credential (chỉ retCode/retMsg
+        # dạng "API key is invalid." — đã xác nhận bằng gọi thật lúc viết
+        # check này), an toàn để in ra.
+        return CheckResult(
+            "exchange_authenticated",
+            "FAIL",
+            f"Xác thực Bybit {label} THẤT BẠI — key sai/hết hạn/bị revoke/sai môi trường "
+            f"testnet-mainnet (Brain-Crypto-Bybit.md §6.3): {exc}",
+        )
+    except Exception as exc:
+        return CheckResult("exchange_authenticated", "FAIL", f"Lỗi khi xác thực Bybit {label}: {exc}")
+
+    return CheckResult("exchange_authenticated", "OK", f"Xác thực Bybit {label} thành công")
 
 
 def check_hmm_model(model_path: Path, *, required: bool) -> CheckResult:
@@ -186,7 +247,8 @@ def run_all() -> list[CheckResult]:
 
     return [
         check_config(config_path),
-        check_exchange_connectivity(),
+        check_exchange_reachable(),
+        check_exchange_authenticated(),
         check_hmm_model(model_path, required=require_model),
         check_disk_space(log_dir),
         check_log_dir_writable(log_dir),
