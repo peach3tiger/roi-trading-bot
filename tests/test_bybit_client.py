@@ -17,10 +17,16 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from pybit.exceptions import InvalidRequestError
+import requests
+from pybit.exceptions import FailedRequestError, InvalidRequestError
 
 from broker.base import OrderRequest, OrderSide, OrderType
-from broker.bybit_client import BybitClient, OrderStatus, _TokenBucketRateLimiter
+from broker.bybit_client import (
+    _PYBIT_INTERNAL_RETRYABLE_MESSAGE,
+    BybitClient,
+    OrderStatus,
+    _TokenBucketRateLimiter,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -28,10 +34,40 @@ def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
 
-def _invalid_request_error(status_code: int) -> InvalidRequestError:
+def _invalid_request_error(status_code: int, message: str = "err") -> InvalidRequestError:
+    """`status_code` ở đây là retCode Bybit (vd. 10003, 10006), KHÔNG phải
+    HTTP status — khớp đúng những gì pybit gán vào field này cho
+    InvalidRequestError (xem broker/bybit_client.py, đã xác nhận bằng gọi
+    thật)."""
     return InvalidRequestError(
-        request="POST /x", message="err", status_code=status_code, time="t", resp_headers=None
+        request="POST /v5/order/create: {'symbol': 'BTCUSDT'}",
+        message=message,
+        status_code=status_code,
+        time="t",
+        resp_headers=None,
     )
+
+
+def _failed_request_error(http_status_code: int, message: str = "err") -> FailedRequestError:
+    """`status_code` ở đây là HTTP status thật (vd. 401, 500) — khớp đúng
+    những gì pybit gán vào field này cho FailedRequestError khi response
+    HTTP không phải 200 (xem broker/bybit_client.py, đã xác nhận bằng gọi
+    thật)."""
+    return FailedRequestError(
+        request="GET /v5/account/wallet-balance: {}",
+        message=message,
+        status_code=http_status_code,
+        time="t",
+        resp_headers=None,
+    )
+
+
+def _pybit_internal_retryable_exception() -> Exception:
+    """pybit tự raise Exception THƯỜNG (không status_code) cho retCode nội
+    bộ của nó (rate limit, recv_window...) sau khi đã tự sleep — xác nhận
+    bằng gọi thẳng HTTP._handle_response() với response giả lập retCode
+    =10006, xem comment ở broker/bybit_client.py::_PYBIT_INTERNAL_RETRYABLE_MESSAGE."""
+    return Exception(_PYBIT_INTERNAL_RETRYABLE_MESSAGE)
 
 
 class _FakeSession:
@@ -236,17 +272,23 @@ def test_rate_limiter_sleeps_when_over_capacity(monkeypatch: pytest.MonkeyPatch)
 
 
 # ----------------------------------------------------------------------
-# Retry / backoff
+# Retry / backoff — WHITELIST: chỉ 3 tập lỗi nhất thời được thử lại (rate
+# limit nội bộ pybit, mạng, HTTP 5xx). Mọi lỗi khác thất bại NGAY, không
+# retry, không backoff — xem docstring _call_with_retry.
 # ----------------------------------------------------------------------
 
 
-def test_retries_on_rate_limited_retcode_then_succeeds() -> None:
+def test_retries_on_pybit_internal_retryable_exception_then_succeeds() -> None:
+    """Đường THẬT pybit đi qua cho retCode 10006/10002/... — Exception
+    thường, không status_code (xác nhận bằng gọi thật, xem comment
+    _PYBIT_INTERNAL_RETRYABLE_MESSAGE). Gọi lại NGAY, không cộng backoff
+    (pybit đã tự sleep hộ)."""
     session = _FakeSession()
-    client, _ = _make_client(session)  # tiêu 1 lần gọi get_server_time lúc khởi tạo
+    client, _ = _make_client(session)
 
     session.raise_n_times["get_wallet_balance"] = [
-        _invalid_request_error(10006),
-        _invalid_request_error(10006),
+        _pybit_internal_retryable_exception(),
+        _pybit_internal_retryable_exception(),
     ]
     balance = client.get_balance()
 
@@ -254,27 +296,125 @@ def test_retries_on_rate_limited_retcode_then_succeeds() -> None:
     assert session.calls.count("get_wallet_balance") == 3  # 2 lần fail + 1 lần thành công
 
 
-def test_retries_generic_error_up_to_3_times_then_raises() -> None:
+def test_retries_on_pybit_internal_retry_retcode_as_invalid_request_error() -> None:
+    """Đường DỰ PHÒNG — nếu một phiên bản pybit khác lại để retCode nội bộ
+    (10006...) lọt qua thành InvalidRequestError thay vì Exception thường,
+    vẫn phải retry (status_code nằm trong _PYBIT_INTERNAL_RETRY_CODES)."""
+    session = _FakeSession()
+    client, _ = _make_client(session)
+
+    session.raise_n_times["get_wallet_balance"] = [_invalid_request_error(10006)]
+    balance = client.get_balance()
+
+    assert balance.total == Decimal("10000.5")
+    assert session.calls.count("get_wallet_balance") == 2
+
+
+def test_non_whitelisted_retcode_fails_immediately_no_retry() -> None:
+    """retCode KHÔNG nằm trong tập nhất thời (vd. 10003 key sai, hay bất
+    kỳ lỗi tham số/nghiệp vụ nào) -> thất bại ở LẦN GỌI ĐẦU TIÊN, không có
+    lần thử thứ hai."""
     session = _FakeSession()
     client, _ = _make_client(session)
 
     session.raise_n_times["get_wallet_balance"] = [
-        _invalid_request_error(500),
-        _invalid_request_error(500),
-        _invalid_request_error(500),
-        _invalid_request_error(500),
+        _invalid_request_error(10003, message="API key is invalid."),
+        _invalid_request_error(10003, message="API key is invalid."),  # sẽ KHÔNG bị tiêu tới
     ]
     with pytest.raises(InvalidRequestError):
         client.get_balance()
 
+    assert session.calls.count("get_wallet_balance") == 1  # đúng 1 lần, không retry
 
-def test_succeeds_after_2_generic_errors_within_retry_budget() -> None:
+
+def test_non_whitelisted_retcode_logs_full_retcode_and_retmsg(caplog: pytest.LogCaptureFixture) -> None:
+    session = _FakeSession()
+    client, _ = _make_client(session)
+    session.raise_n_times["place_order"] = [
+        _invalid_request_error(110001, message="Order link ID is duplicate.")
+    ]
+
+    request = OrderRequest(
+        symbol="BTCUSDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        qty=Decimal("0.01"),
+        price=Decimal("64000"),
+        order_link_id="link-1",
+    )
+    with pytest.raises(InvalidRequestError):
+        client.submit_order(request)
+
+    log_text = caplog.text
+    assert "110001" in log_text
+    assert "Order link ID is duplicate." in log_text
+    assert "KHÔNG retry" in log_text
+
+
+def test_http_5xx_retries_then_succeeds() -> None:
     session = _FakeSession()
     client, _ = _make_client(session)
 
-    session.raise_n_times["get_wallet_balance"] = [_invalid_request_error(500), _invalid_request_error(500)]
+    session.raise_n_times["get_wallet_balance"] = [_failed_request_error(502), _failed_request_error(503)]
     balance = client.get_balance()
+
     assert balance.total == Decimal("10000.5")
+    assert session.calls.count("get_wallet_balance") == 3
+
+
+def test_http_5xx_exhausts_retries_then_raises() -> None:
+    session = _FakeSession()
+    client, _ = _make_client(session)
+
+    session.raise_n_times["get_wallet_balance"] = [
+        _failed_request_error(500),
+        _failed_request_error(500),
+        _failed_request_error(500),
+        _failed_request_error(500),
+    ]
+    with pytest.raises(FailedRequestError):
+        client.get_balance()
+
+
+def test_http_4xx_fails_immediately_no_retry() -> None:
+    """4xx (lỗi phía CLIENT — request sai, không phải sàn) không thuộc
+    whitelist -> thất bại ngay, khác hẳn 5xx."""
+    session = _FakeSession()
+    client, _ = _make_client(session)
+
+    session.raise_n_times["get_wallet_balance"] = [_failed_request_error(404)]
+    with pytest.raises(FailedRequestError):
+        client.get_balance()
+
+    assert session.calls.count("get_wallet_balance") == 1
+
+
+def test_network_error_retries_then_succeeds() -> None:
+    session = _FakeSession()
+    client, _ = _make_client(session)
+
+    session.raise_n_times["get_wallet_balance"] = [
+        requests.exceptions.ConnectionError("connection reset"),
+        requests.exceptions.Timeout("read timeout"),
+    ]
+    balance = client.get_balance()
+
+    assert balance.total == Decimal("10000.5")
+    assert session.calls.count("get_wallet_balance") == 3
+
+
+def test_network_error_exhausts_retries_then_raises() -> None:
+    session = _FakeSession()
+    client, _ = _make_client(session)
+
+    session.raise_n_times["get_wallet_balance"] = [
+        requests.exceptions.ConnectionError("x"),
+        requests.exceptions.ConnectionError("x"),
+        requests.exceptions.ConnectionError("x"),
+        requests.exceptions.ConnectionError("x"),
+    ]
+    with pytest.raises(requests.exceptions.ConnectionError):
+        client.get_balance()
 
 
 # ----------------------------------------------------------------------

@@ -19,6 +19,7 @@ from decimal import Decimal
 from typing import Any, Callable, Optional
 
 import pandas as pd
+import requests
 from pybit.exceptions import FailedRequestError, InvalidRequestError
 from pybit.unified_trading import HTTP
 
@@ -49,8 +50,27 @@ _RATE_LIMIT_WINDOW_SECONDS = 5.0
 _CLOCK_DRIFT_WARN_MS = 1000.0
 
 _MAX_KLINES_PER_REQUEST = 1000
-_RETCODE_RATE_LIMITED = 10006
 _MAX_RETRIES = 3
+
+# pybit (5.14.0, phiên bản đang dùng — xác nhận bằng cách gọi thẳng
+# HTTP._handle_response() với response giả lập retCode=10006, không suy
+# luận từ đọc source) tự chặn một số retCode "retryable" CỦA RIÊNG NÓ
+# TRƯỚC KHI chúng trở thành InvalidRequestError: nó tự sleep đúng thời
+# gian (đọc header X-Bapi-Limit-Reset-Timestamp cho riêng retCode 10006),
+# rồi raise một `Exception` THƯỜNG với message cố định này, KHÔNG có
+# status_code. pybit không tự lặp lại sau đó — Exception đó không được
+# vòng lặp retry của chính nó bắt lại (một lỗ hổng trong pybit, không phải
+# thiết kế có chủ đích) — nên việc gọi lại phải làm ở tầng này. Vì pybit
+# đã sleep đúng khoảng rồi, không cộng thêm backoff của riêng mình.
+_PYBIT_INTERNAL_RETRYABLE_MESSAGE = "Retryable error occurred, retrying..."
+
+# retCode mà pybit coi là "retryable" nội bộ (đọc từ chính source
+# pybit._http_manager._V5HTTPManager.__post_init__ — 10002 recv_window,
+# 10006 rate limit, 30034/30035/130035/130150 lỗi khớp lệnh nội bộ sàn).
+# Bình thường không đường nào tới đây thấy các mã này dưới dạng
+# InvalidRequestError (pybit đã chặn trước, xem hằng số trên) — giữ lại
+# CHỈ để phòng thủ nếu hành vi pybit đổi ở phiên bản khác.
+_PYBIT_INTERNAL_RETRY_CODES = frozenset({10002, 10006, 30034, 30035, 130035, 130150})
 
 # "1D" (quy ước timeframe của settings.yaml/toàn hệ thống) -> "D" (quy ước
 # interval của Bybit v5 kline). Chỉ hỗ trợ đúng khung đang dùng — thêm khi
@@ -172,9 +192,25 @@ class BybitClient(ExchangeClient):
             )
 
     # ------------------------------------------------------------------
-    # Gọi API có rate-limit + retry/backoff (§Phase 7 "Xử lý lỗi": lỗi API
-    # thử lại 3 lần exponential backoff; retCode 10006 backoff không tính
-    # là lỗi nghiêm trọng — thử lại tới khi qua, không đếm vào 3 lần đó).
+    # Gọi API — WHITELIST retry, không phải blacklist. CHỈ thử lại khi lỗi
+    # thuộc tập nhất thời đã biết:
+    #   1. pybit tự chặn retCode rate-limit/nội bộ của chính nó, đã sleep
+    #      sẵn (xem _PYBIT_INTERNAL_RETRYABLE_MESSAGE) — gọi lại ngay,
+    #      không cộng thêm backoff.
+    #   2. Lỗi mạng thật (timeout/connection reset/SSL) — pybit mặc định
+    #      KHÔNG tự retry (force_retry=False, giá trị mặc định của
+    #      pybit.unified_trading.HTTP, không đổi ở đây) — backoff mũ ở tầng
+    #      này.
+    #   3. HTTP 5xx (`FailedRequestError.status_code` 500-599) — lỗi phía
+    #      sàn, có cơ hội tự khỏi — backoff mũ ở tầng này.
+    #
+    # MỌI lỗi khác — retCode != 0 không nằm trong hai tập trên (tham số
+    # sai, số dư không đủ, symbol không tồn tại, orderLinkId trùng, key
+    # sai...) hoặc HTTP 4xx — THẤT BẠI NGAY, không retry, không backoff.
+    # Các lỗi này không tự khỏi theo thời gian; thử lại chỉ tốn thời gian
+    # (7s cho 3 lần backoff mũ cũ) và làm nhiễu log. Log đủ retCode + retMsg
+    # NGUYÊN VĂN trước khi raise — cách duy nhất biết được mã lỗi thật của
+    # những trường hợp như orderLinkId trùng khi chạy được với mạng thật.
     # ------------------------------------------------------------------
 
     def _call_with_retry(self, fn: Callable[..., dict], **kwargs: Any) -> dict:
@@ -183,25 +219,70 @@ class BybitClient(ExchangeClient):
             self._rate_limiter.acquire()
             try:
                 return fn(**kwargs)
-            except (InvalidRequestError, FailedRequestError) as exc:
-                if getattr(exc, "status_code", None) == _RETCODE_RATE_LIMITED:
-                    backoff = 2**attempt
-                    logger.warning("Bybit retCode 10006 (rate limit sàn) — backoff %ss, thử lại.", backoff)
-                    time.sleep(backoff)
-                    attempt += 1
+
+            except InvalidRequestError as exc:
+                if exc.status_code in _PYBIT_INTERNAL_RETRY_CODES:
+                    attempt = self._retry_wait(
+                        attempt, "retCode nội bộ pybit (dự phòng)", extra_backoff=False
+                    )
                     continue
-                attempt += 1
-                if attempt > _MAX_RETRIES:
-                    raise
-                backoff = 2 ** (attempt - 1)
-                logger.warning(
-                    "Lỗi API Bybit (lần %d/%d): %s — backoff %ss, thử lại.",
-                    attempt,
-                    _MAX_RETRIES,
-                    exc,
-                    backoff,
+                logger.error(
+                    "Bybit từ chối yêu cầu — KHÔNG retry. retCode=%s retMsg=%s request=%s",
+                    exc.status_code,
+                    exc.message,
+                    exc.request,
                 )
-                time.sleep(backoff)
+                raise
+
+            except FailedRequestError as exc:
+                status = exc.status_code
+                if isinstance(status, int) and 500 <= status < 600:
+                    attempt = self._retry_wait(attempt, f"HTTP {status}", extra_backoff=True)
+                    continue
+                logger.error(
+                    "Bybit trả lỗi HTTP — KHÔNG retry. status_code=%s message=%s request=%s",
+                    status,
+                    exc.message,
+                    exc.request,
+                )
+                raise
+
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.SSLError,
+            ) as exc:
+                attempt = self._retry_wait(attempt, f"lỗi mạng ({type(exc).__name__})", extra_backoff=True)
+                continue
+
+            except Exception as exc:
+                if str(exc) == _PYBIT_INTERNAL_RETRYABLE_MESSAGE:
+                    attempt = self._retry_wait(
+                        attempt, "rate limit/retCode nội bộ pybit", extra_backoff=False
+                    )
+                    continue
+                raise
+
+    def _retry_wait(self, attempt: int, label: str, *, extra_backoff: bool) -> int:
+        """Tăng `attempt`, sleep nếu cần, trả `attempt` mới để caller tiếp
+        tục vòng lặp — hoặc raise (giữ traceback gốc bằng bare `raise`,
+        không bọc lại exception) nếu đã hết `_MAX_RETRIES`.
+
+        `extra_backoff=False` khi pybit đã tự sleep đúng khoảng cho ta rồi
+        (rate limit) — gọi lại ngay không cộng thêm backoff mũ của riêng
+        module này; `True` cho lỗi mạng/HTTP 5xx, nơi không ai đã sleep hộ.
+        """
+        attempt += 1
+        if attempt > _MAX_RETRIES:
+            logger.error("%s — hết %d lần thử, dừng.", label, _MAX_RETRIES)
+            raise
+        if extra_backoff:
+            backoff = 2 ** (attempt - 1)
+            logger.warning("%s (lần %d/%d) — backoff %ss, thử lại.", label, attempt, _MAX_RETRIES, backoff)
+            time.sleep(backoff)
+        else:
+            logger.warning("%s (lần %d/%d) — pybit đã tự sleep, gọi lại ngay.", label, attempt, _MAX_RETRIES)
+        return attempt
 
     # ------------------------------------------------------------------
     # Tài khoản
