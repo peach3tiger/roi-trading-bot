@@ -325,21 +325,46 @@ cũng khó diễn giải vì bản thân ngưỡng đã bị thổi phồng bở
 **Tạm dừng trước khi chạy ablation Tầng 2, chờ quyết định cách xử lý phát
 hiện này** — không tự ý chọn hướng đi tiếp.
 
-### Trạng thái
+### KẾT LUẬN — thí nghiệm Tầng 2 BỎ (2026-08-06)
 
-- Baseline pruned-8 cùng cửa sổ ngắn, cả 4 offset: **xong**
-  (`reports/tier2_shortwin_baseline`, `reports/tier2_shortwin_baseline_offsets`).
-  Đây là mốc so sánh cho ngưỡng Sharpe, tiêu chí 1–4, VÀ đã đồng thời phát
-  hiện tiêu chí 6 fail trên cửa sổ ngắn — xem mục trên.
-- `compute_tier2_features` + `compute_all_features` + wiring qua
-  `DerivativesLoader`/`main.py`/`backtest/backtester.py`: **đã implement**,
-  lint/mypy/pytest xanh, đã smoke-test bằng dữ liệu thật (căn index đúng,
-  z-score hợp lý).
-- Ablation Tầng 2 (13 cột): **TẠM DỪNG** — chưa có kết quả nào được in ra,
-  chờ quyết định về phát hiện tiêu chí 6 fail ở trên trước khi chạy tiếp.
-- Bước tiếp theo: chạy baseline cửa sổ ngắn ở offset 6/12/18 (đã có offset0
-  từ báo cáo trên), tính biên độ, điền ngưỡng cuối cùng vào mục ngay trên,
-  rồi mới chạy lại ablation Tầng 2.
+Chọn phương án: **bỏ hẳn cửa sổ ngắn này, kết luận ràng buộc dữ liệu
+derivatives (funding/OI chỉ từ ~2020) làm phép so sánh quá nhiễu để rút ra
+kết luận gì, ghi lại, dừng ở đây.**
+
+**Quan trọng — phân biệt rõ:** đây KHÔNG phải kết luận "Tầng 2 không mang
+thêm thông tin". Chưa từng chạy một cấu hình Tầng 2 nào để biết điều đó.
+Kết luận đúng là: **không đo được** — cửa sổ ngắn duy nhất mà dữ liệu
+derivatives cho phép có bất ổn walk-forward đủ lớn (biên độ bar-offset
+0.4909, tự nó đã fail tiêu chí 6 dù không có Tầng 2) để nuốt chửng bất kỳ
+tín hiệu Tầng 2 nào có thể có. Câu hỏi "funding/OI/basis có thêm thông tin
+độc lập không" vẫn **để ngỏ**, không phải đã trả lời là không.
+
+Không thử thu hẹp/mở rộng cửa sổ để tìm một cửa sổ ổn định hơn — đó sẽ là
+đúng kiểu "tìm cần gạt" mà tiền đăng ký đã cam kết dừng lại khi không đạt
+ngưỡng.
+
+**Không ảnh hưởng tới bảng §4.9 hiện có** (6 PASS / 2 FAIL, đo trên cửa sổ
+DÀI 2018-02-09→2026-08-04) — cửa sổ dài không có ràng buộc derivatives này,
+tiêu chí 6 của nó (biên độ 0.217) không đổi.
+
+### Trạng thái cuối
+
+- Baseline pruned-8 cùng cửa sổ ngắn, cả 4 offset: xong, dùng để phát hiện
+  vấn đề rồi dừng (`reports/tier2_shortwin_baseline`,
+  `reports/tier2_shortwin_baseline_offsets`).
+- Ablation Tầng 2: **không chạy** — bỏ thí nghiệm trước khi có bất kỳ số
+  Tầng 2 nào.
+- Code hạ tầng (`compute_tier2_features`, `compute_all_features`,
+  `DerivativesLoader.load_perp_close`/`load_tier2_bundle`, wiring qua
+  `main.py`/`backtest/backtester.py`) **giữ nguyên trong codebase** — đã
+  implement đúng, lint/mypy/pytest xanh, smoke-test bằng dữ liệu thật xác
+  nhận cơ chế đúng (căn index, z-score hợp lý). Không xoá vì bản thân code
+  không sai — vấn đề là dữ liệu derivatives hiện có không đủ dài để đo
+  trong điều kiện ổn định, không phải lỗi implementation. Có thể dùng lại
+  nếu sau này có cách khác để kiểm định (vd. dữ liệu derivatives dài hơn từ
+  nguồn khác, hoặc sửa được bất ổn walk-forward ở cửa sổ ngắn trước).
+- Câu hỏi "Tầng 2 có thêm thông tin không" quay lại trạng thái **chưa biết**,
+  không phải "không".
 
 ## Câu hỏi mở cho phiên sau
 
@@ -352,3 +377,12 @@ hiện này** — không tự ý chọn hướng đi tiếp.
   không phải bug hay bất ổn cấu trúc. Hướng nào để thu hẹp — thêm return
   signal (chỉ `log_return_5` đã xác nhận resolvable qua ablation), tăng
   `is_bars`, đổi rebalance threshold — chưa được quyết định, để phiên sau.
+- Thí nghiệm Tầng 2 đã bỏ (xem mục ngay trên) — câu hỏi "funding/OI/basis
+  có thêm thông tin độc lập không" vẫn mở, chưa có cách đo trong điều kiện
+  ổn định với dữ liệu hiện có (funding/OI chỉ từ ~2020).
+- Bất ổn walk-forward (biên độ bar-offset) tăng mạnh khi cửa sổ ngắn lại:
+  0.217 ở cửa sổ dài (~8.5 năm) nhưng 0.4909 ở cửa sổ ngắn (~6 năm, cùng bộ
+  8 feature, cùng mọi tham số khác). Chưa rõ cơ chế — có thể liên quan tới
+  ít window walk-forward độc lập hơn (`samples_per_param`-kiểu vấn đề nhưng
+  theo trục số WINDOW thay vì số feature). Chưa điều tra, để phiên sau nếu
+  cần dùng cửa sổ ngắn cho việc gì khác.
