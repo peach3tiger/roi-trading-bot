@@ -1,3 +1,5 @@
+> Đọc `docs/STATE.md` trước tiên mỗi phiên.
+
 # CLAUDE.md — regime-trader-crypto
 
 Dự án: bot phân bổ danh mục theo chế độ biến động, BTC/USDT spot trên Bybit.
