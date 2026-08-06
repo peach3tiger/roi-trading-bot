@@ -355,6 +355,19 @@ def build_orchestrator(settings: dict[str, Any]) -> Any:
     )
 
 
+def build_risk_manager(settings: dict[str, Any]) -> Any:
+    """`RiskManager(config: dict)` nhận thẳng `settings["risk"]` — khác quy
+    ước "named Decimal params" của các builder khác, vì đó là chữ ký spec
+    §5.7 (xem docstring core/risk_manager.py::RiskManager). Builder này vẫn
+    tồn tại (dù chưa có caller nào trong repo — main loop là Phase 10/
+    phase-10-main-loop.md, chưa implement) để giữ đúng quy ước "settings.yaml
+    → object chỉ dịch ở một chỗ" khi Phase 10 cần tới.
+    """
+    from core.risk_manager import RiskManager
+
+    return RiskManager(settings["risk"])
+
+
 # ----------------------------------------------------------------------
 # Backtest
 # ----------------------------------------------------------------------

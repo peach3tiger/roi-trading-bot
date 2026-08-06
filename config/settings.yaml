@@ -58,11 +58,28 @@ risk:
   max_position_pct: 100        # một tài sản duy nhất
   max_risk_per_trade_pct: 1.0
   min_order_value_usdt: 5      # > mức tối thiểu 1 USDT của sàn, có biên
+  min_cash_buffer_pct: 5.0     # §5.1 — giữ USDT trả phí + lệnh khớp một phần
+  max_trades_per_day: 6        # thấp hơn nhiều so với 20 của equities — phí cao hơn
+  max_leverage: 1.0            # spot, cứng — không có margin
+  spread_max_pct: 0.10         # §5.4 — BTC/USDT bình thường < 0.02%
+  usdt_depeg_threshold_pct: 0.5  # §5.4 — tạm dừng lệnh mới nếu lệch peg quá mức này
+  duplicate_order_window_seconds: 60  # §5.5 — chặn lệnh trùng symbol+hướng trong cửa sổ này
   circuit_breaker:
-    daily_dd_reduce_pct: 4.0
-    daily_dd_halt_pct: 6.0
-    weekly_dd_reduce_pct: 10.0
-    weekly_dd_halt_pct: 14.0
+    # Hiệu chỉnh bằng phân vị phân phối lợi nhuận ngày/tuần thật từ
+    # reports/pruned8_base/equity_curve.csv (Phase 6, 2290 bar, 2018-02-09
+    # → 2026-08-04) — KHÔNG phải số mặc định đoán, xem docs/DECISIONS.md
+    # "Hiệu chỉnh ngưỡng circuit breaker (Phase 8)" cho toàn bộ phân vị đã
+    # in ra và cách tính. Quy tắc: "giảm size" ở phân vị 2-3%, "dừng" ở
+    # phân vị 0.5% (Brain-Crypto-Bybit.md §5.2).
+    daily_dd_reduce_pct: 3.85   # |p2.5 daily return| — mặc định gốc 4.0, xấp xỉ
+    daily_dd_halt_pct: 6.34     # |p0.5 daily return| — mặc định gốc 6.0
+    weekly_dd_reduce_pct: 9.48  # |p2.5 weekly(7d) return| — mặc định gốc 10.0
+    weekly_dd_halt_pct: 13.72   # |p0.5 weekly(7d) return| — mặc định gốc 14.0
+    # peak_dd_halt_pct KHÔNG hiệu chỉnh bằng phân vị — đây là trần tuyệt
+    # đối toàn kỳ (spec §5.2), không phải phân vị của một cửa sổ ngày/tuần.
+    # Giữ 20.0 theo spec: max drawdown lịch sử thật của hệ thống là -54.80%
+    # (docs/VALIDATION_REPORT.md) nên 20% sẽ kích hoạt sớm, đúng vai trò
+    # "phanh khẩn cấp" chứ không phải ngưỡng đo bằng thống kê thông thường.
     peak_dd_halt_pct: 20.0
     day_boundary_utc: "00:00"
 

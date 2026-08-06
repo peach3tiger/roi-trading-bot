@@ -510,3 +510,62 @@ thật (chiến lược).
 hoặc trước khi §4.9 đánh giá lại trên dữ liệu forward), quy tắc vẫn yêu
 cầu nhắc rằng chính người đó đã viết ra nó, và hỏi lại một lần nữa trước
 khi làm — không tự động vượt qua chỉ vì đã có một lần nới lỏng trước đó.
+
+---
+
+## Phase 8 — Risk manager: hiệu chỉnh ngưỡng circuit breaker bằng dữ liệu
+
+Theo `prompts/phase-08-risk-manager.md`: "Hiệu chỉnh ngưỡng bằng dữ liệu,
+không dùng số mặc định." Lấy phân phối lợi nhuận ngày/tuần thật từ
+`reports/pruned8_base/equity_curve.csv` (Phase 6, 2290 bar daily return,
+2284 bar weekly 7-ngày rolling return, cửa sổ 2018-02-09 → 2026-08-04 —
+cùng dữ liệu đã cho kết quả §4.9 trong `docs/VALIDATION_REPORT.md`).
+
+**Phân vị đã in ra** (âm = ngày/tuần lỗ, magnitude = trị tuyệt đối):
+
+| phân vị | daily return | weekly (7d) return |
+|---|---|---|
+| p0.5 | −6.344% | −13.718% |
+| p1 | −5.479% | −12.042% |
+| p2 | −4.300% | −9.946% |
+| p2.5 | −3.850% | −9.481% |
+| p3 | −3.614% | −9.172% |
+| p5 | −2.912% | −7.441% |
+| p10 | −1.746% | −4.922% |
+
+Max drawdown peak-to-trough toàn kỳ (tham khảo, không dùng để hiệu chỉnh
+reduce/halt daily-weekly): **−54.80%**.
+
+**Quy tắc áp dụng** (Brain-Crypto-Bybit.md §5.2): ngưỡng "giảm size" ở
+phân vị 2–3%, ngưỡng "dừng" ở phân vị 0.5%. Chọn p2.5 cho "giảm size" (giữa
+khoảng 2–3%) và p0.5 cho "dừng":
+
+| tham số | giá trị cũ (đoán) | giá trị mới (hiệu chỉnh) | nguồn |
+|---|---|---|---|
+| `daily_dd_reduce_pct` | 4.0% | **3.85%** | \|p2.5 daily\| |
+| `daily_dd_halt_pct` | 6.0% | **6.34%** | \|p0.5 daily\| |
+| `weekly_dd_reduce_pct` | 10.0% | **9.48%** | \|p2.5 weekly\| |
+| `weekly_dd_halt_pct` | 14.0% | **13.72%** | \|p0.5 weekly\| |
+| `peak_dd_halt_pct` | 20.0% | **20.0% (giữ nguyên)** | trần tuyệt đối, không phải phân vị — xem dưới |
+
+Bốn ngưỡng daily/weekly đầu chỉ lệch số mặc định gốc **0.15–0.52 điểm
+phần trăm** — số mặc định trong spec hoá ra đã khá gần với phân vị thật
+của chính dữ liệu này, không phải đoán tuỳ tiện, nhưng vẫn hiệu chỉnh đúng
+theo dữ liệu thay vì giữ nguyên số tròn theo quán tính.
+
+`peak_dd_halt_pct` **không** hiệu chỉnh bằng phân vị — đây là trần tuyệt
+đối cho một sự kiện hiếm/nghiêm trọng (dừng vô thời hạn, cần can thiệp thủ
+công), không phải ngưỡng đo trên phân phối ngày/tuần thông thường. Giữ
+20.0% theo spec: thấp hơn nhiều so với max drawdown lịch sử thật (−54.80%)
+nên sẽ kích hoạt sớm, đúng vai trò phanh khẩn cấp.
+
+Đã cập nhật `config/settings.yaml`, mục `risk.circuit_breaker` — kèm
+comment trỏ lại đúng bảng này. Cũng thêm các tham số §5.1/§5.4/§5.5 trước
+đó chưa có field trong settings.yaml (`min_cash_buffer_pct`,
+`max_trades_per_day`, `max_leverage`, `spread_max_pct`,
+`usdt_depeg_threshold_pct`, `duplicate_order_window_seconds`) — đúng
+CLAUDE.md bất biến #14 (không magic number ngoài config).
+
+**Không ảnh hưởng gì tới forward test đang chạy** — `forward/config_frozen.yaml`
+là bản copy độc lập, không đọc lại `config/settings.yaml`, và
+`forward/logger.py` không dùng `risk_manager` (xem `forward/README.md`).
