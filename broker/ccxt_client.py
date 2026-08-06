@@ -17,6 +17,7 @@ from broker.base import (
     Balance,
     ExchangeClient,
     Order,
+    OrderBook,
     OrderRequest,
     OrderResult,
     Position,
@@ -57,6 +58,9 @@ class CCXTClient(ExchangeClient):
         raise NotImplementedError
 
     def get_open_orders(self) -> list[Order]:
+        raise NotImplementedError
+
+    def get_orderbook(self, symbol: str) -> OrderBook:
         raise NotImplementedError
 
     def subscribe_klines(

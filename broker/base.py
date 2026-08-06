@@ -89,6 +89,27 @@ class Order:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class OrderBook:
+    """Sổ lệnh rút gọn — đủ để kiểm tra spread trước khi risk_manager
+    duyệt lệnh (Brain-Crypto-Bybit.md §5.4/§6.6), không phải full L2 depth.
+    `bids`/`asks`: (price, qty), sắp theo giá tốt nhất trước.
+    """
+
+    symbol: str
+    bids: list[tuple[Decimal, Decimal]]
+    asks: list[tuple[Decimal, Decimal]]
+    timestamp: datetime
+
+    @property
+    def best_bid(self) -> Decimal:
+        return self.bids[0][0] if self.bids else Decimal("0")
+
+    @property
+    def best_ask(self) -> Decimal:
+        return self.asks[0][0] if self.asks else Decimal("0")
+
+
 class ExchangeClient(ABC):
     """Interface mà BybitClient và CCXTClient đều phải implement."""
 
@@ -114,6 +135,9 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     def get_open_orders(self) -> list[Order]: ...
+
+    @abstractmethod
+    def get_orderbook(self, symbol: str) -> OrderBook: ...
 
     @abstractmethod
     def subscribe_klines(
