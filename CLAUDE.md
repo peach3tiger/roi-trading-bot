@@ -143,8 +143,17 @@ Không magic number trong code. Nếu một con số có thể cần chỉnh, n�
   Thay đổi cố ý → thí nghiệm forward test hiện tại (`forward/log.csv`) coi
   như kết thúc tại đó, ghi lý do + ngày vào `docs/DECISIONS.md` TRƯỚC, rồi
   mới regenerate golden cho thí nghiệm mới. Xem docstring đầu file.
+- `test_wiring_equivalence.py` — ba bản dựng song song của cùng một
+  composition logic (`_run_golden_pipeline()`, `forward/logger.py`
+  (đóng băng, không sửa được), `core/signal_generator.py::SignalGenerator`
+  — đường `main.py` dùng thật) cho `hmm_allocation`/`trend_gate_cap`/
+  `final_allocation` giống hệt nhau trên mọi bar. Ba đường này KHÔNG được
+  hợp nhất (đường `forward/logger.py` đóng băng) — test này chỉ đảm bảo
+  chúng không trôi lệch. FAIL nghĩa là `SignalGenerator` (đường duy nhất
+  trong ba đường còn sống, có thể bị sửa) đã trôi khỏi hai đường kia —
+  xem docstring đầu file để biết cách chẩn đoán.
 
-Năm file này không được skip, không được xfail, không được comment out.
+Sáu file này không được skip, không được xfail, không được comment out.
 
 ### 16. Mọi phép kiểm tra mới phải được chứng minh bằng đột biến trước khi tin
 

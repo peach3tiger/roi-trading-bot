@@ -898,3 +898,57 @@ thay vì thiết kế) — kiểm tra hồi tố kiểu này xác nhận trực 
 suy luận gián tiếp từ "test đang xanh".
 
 Dọn `git worktree remove /tmp/pre-p10` sau khi xong.
+
+---
+
+## `tests/test_wiring_equivalence.py` — bảo vệ ba đường composition không hợp nhất được (2026-08-07)
+
+Hệ quả trực tiếp của phát hiện ở mục trên: `SignalGenerator` là đường nối
+dây thứ ba (bên cạnh `_run_golden_pipeline()` và `forward/logger.py`),
+không được golden test lẫn forward test hằng ngày bảo vệ. Ba đường KHÔNG
+được hợp nhất thành một hàm dùng chung — `forward/logger.py` là thí
+nghiệm đóng băng 12 tháng, không được sửa dù chỉ để gọi qua
+`SignalGenerator` — nên giải pháp là một test XÁC NHẬN TƯƠNG ĐƯƠNG
+(equivalence), không phải refactor.
+
+**Thiết kế đáng chú ý — vì sao không dùng chung một `HMMRegimeEngine` cho
+cả ba đường:** `predict_regime_filtered()` có tác dụng phụ tích luỹ (bộ
+lọc ổn định, cache alpha). Gọi nó hai lần cho "cùng một bar" (một lần
+trực tiếp, một lần gián tiếp qua `SignalGenerator.generate()`) sẽ cộng
+dồn bộ đếm ổn định hai lần, làm hỏng phép so sánh. Giải pháp: hai
+`HMMRegimeEngine` độc lập, train giống hệt (xác định luận hoàn toàn — chỉ
+`random_state=seed` cố định, không nguồn ngẫu nhiên nào khác trong
+`scan_bic`), cho ăn cùng chuỗi bar theo cùng thứ tự — xác nhận đồng bộ
+bằng `assert` tường minh mỗi bar (`regime_id`/`regime_label`/
+`is_flickering`), không giả định suông rằng train giống hệt thì suy luận
+cũng giống hệt.
+
+`StrategyOrchestrator`/`StructuralTrendGate` xác nhận KHÔNG có tác dụng
+phụ (đọc lại code, không chỉ tin docstring) — dùng chung một instance an
+toàn cho cả ba đường.
+
+`bars_window`: dùng `ohlcv.loc[:ts]` (không giới hạn, khớp quy ước
+`_run_golden_pipeline()`) cho cả ba đường. Xác nhận bằng thực nghiệm
+(không suy luận): với dải bar mục tiêu của test, `get_allocation_cap()`
+với `ohlcv.loc[:ts]` và với `ohlcv.loc[:ts].tail(300)` (quy ước
+`forward/logger.py`/`main.py`) cho CÙNG kết quả ở cả 60/60 bar — nên chọn
+quy ước nào không ảnh hưởng tới việc test đo đúng thứ cần đo.
+
+**SignalGenerator không lộ `hmm_allocation` (giá trị trước khi áp
+trend_gate cap)** qua kết quả trả về — tính lại bằng CHÍNH `orchestrator`
+(đã xác nhận thuần, gọi lại với cùng input luôn cho cùng kết quả
+bit-for-bit).
+
+`risk_manager` cấu hình PASS-THROUGH hoàn toàn (không cap, không circuit
+breaker, không chặn trùng, không halt lock) — nó không tồn tại ở hai
+đường kia, không được phép là biến số trong phép so sánh.
+
+**Xác nhận bằng mutation (CLAUDE.md #16):** đổi `min()` thành `max()`
+trong `SignalGenerator._apply_layer_caps()` — test đỏ NGAY bar đầu tiên
+(`bar 150`), thông điệp lỗi tự chẩn đoán đúng vị trí (`hmm_allocation`
+khớp, `trend_gate_cap` khớp, nên lệch nằm ở công thức kết hợp) — revert
+sạch (`git diff --stat` rỗng).
+
+Thêm vào CLAUDE.md #15 (6 file bắt buộc, tăng từ 5).
+
+228 passed / 0 skipped. ruff + mypy sạch.
