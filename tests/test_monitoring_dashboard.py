@@ -35,8 +35,9 @@ def _state(**overrides: object) -> DashboardState:
         peak_dd_limit_pct=Decimal("20"),
         monthly_fees_paid=Decimal("24"),
         monthly_fees_pct_of_gross=Decimal("8.1"),
-        ws_connected=True,
-        ws_last_message_seconds_ago=12.0,
+        poll_latency_ms=45.0,
+        last_poll_at="2026-08-07T00:01:03+00:00",
+        bars_behind=0,
         api_latency_ms=89.0,
         clock_drift_ms=34.0,
         hmm_last_trained_days_ago=2,
@@ -130,5 +131,36 @@ def test_risk_style_danger_at_or_above_limit() -> None:
 
     assert _risk_style(Decimal("10"), Decimal("10")) == _STYLE_DANGER
     assert _risk_style(Decimal("11"), Decimal("10")) == _STYLE_DANGER
+
+
+# ----------------------------------------------------------------------
+# HỆ THỐNG — schema REST polling (không còn ws_connected/ws_last_message_
+# seconds_ago, xem monitoring/dashboard.py::DashboardState)
+# ----------------------------------------------------------------------
+
+
+def test_dashboard_state_has_no_websocket_fields() -> None:
+    import dataclasses
+
+    field_names = {f.name for f in dataclasses.fields(DashboardState)}
+    assert "ws_connected" not in field_names
+    assert "ws_last_message_seconds_ago" not in field_names
+    assert {"poll_latency_ms", "last_poll_at", "bars_behind"} <= field_names
+
+
+def test_system_panel_shows_poll_latency_and_last_poll_at() -> None:
+    text = Dashboard().render_text(_state(poll_latency_ms=123.0, last_poll_at="2026-08-07T00:01:03+00:00"))
+    assert "123ms" in text
+    assert "2026-08-07T00:01:03+00:00" in text
+
+
+def test_bars_behind_zero_shows_ok_icon() -> None:
+    text = Dashboard().render_text(_state(bars_behind=0))
+    assert "Trễ: 0 bar ✅" in text
+
+
+def test_bars_behind_nonzero_shows_warning_icon() -> None:
+    text = Dashboard().render_text(_state(bars_behind=2))
+    assert "Trễ: 2 bar ❌" in text
 
 

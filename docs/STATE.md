@@ -5,7 +5,7 @@
 
 ## Đang ở đâu
 
-- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới). 288 passed
+- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới). 300 passed
   / 0 skipped.
 - **`tests/test_frozen_files.py` mới (2026-08-07):** ghim SHA256 của
   `forward/logger.py`/`forward/config_frozen.yaml` vào
@@ -260,16 +260,25 @@ này implement thật, không viết lại scaffold.
 - `LARGE_PNL` chỉ phát hiện chiều LỖ (đọc `CircuitBreaker.check().daily_dd`,
   vốn chỉ đo drawdown) — chưa có theo dõi equity TĂNG bar-over-bar để phát
   hiện P&L DƯƠNG lớn bất thường.
-- `main.py --dashboard` vẫn `raise NotImplementedError` — KHÔNG đổi.
-  `Dashboard` class đã xong/test đầy đủ, nhưng dựng `DashboardState` sống
-  cần dữ liệu `LiveLoopState`/`state_snapshot.json` hiện KHÔNG lưu
-  (`regime_probability` chính xác tại thời điểm gần nhất, chi tiết cửa sổ
-  flicker, và `ws_connected`/`ws_last_message_seconds_ago`/`api_latency_ms`
-  vốn dành cho kiến trúc WebSocket — hệ thống này REST polling, xem mục
-  "Đổi sàn Bybit -> Binance" — hai field đó không có nghĩa thật để điền).
-  Quyết định CÓ CHỦ Ý: không fabricate giá trị placeholder cho những field
-  này chỉ để `--dashboard` "chạy được" — cần một thiết kế riêng (lưu thêm
-  gì vào snapshot, hay tính lại từ đầu) trước khi wire.
+- **[2026-08-07, sau] Schema `ws_connected`/`ws_last_message_seconds_ago` đã
+  SỬA** — hai field đó mô tả kiến trúc WebSocket không còn tồn tại (hệ
+  thống đã là REST polling từ đợt đổi sàn Bybit -> Binance). Thay bằng
+  `poll_latency_ms`/`last_poll_at` (persist trong `LiveLoopState`/
+  `state_snapshot.json`, cập nhật mỗi lần `run_live_loop()` thật sự gọi
+  `history_loader.load()` — không phải mỗi lần lặp vòng poll) và
+  `bars_behind` (`main.py::compute_bars_behind()`, THUẦN, tính lại mỗi lần
+  gọi từ `last_processed_bar` + đồng hồ hiện tại, CỐ Ý không persist —
+  một giá trị lưu sẵn sẽ đứng yên "0" đúng lúc tiến trình chính đã chết).
+  `monitoring/dashboard.py::DashboardState` + `_system_panel` đã cập nhật,
+  mutation-verified (CLAUDE.md #16). Xem docs/DECISIONS.md mục cùng ngày.
+- `main.py --dashboard` VẪN `raise NotImplementedError` — KHÔNG đổi. Sửa
+  schema WS ở trên gỡ MỘT trong ba lý do chặn đã ghi trước đây; còn lại
+  HAI: `regime_probability` chính xác tại thời điểm gần nhất và chi tiết
+  cửa sổ flicker (`flicker_count`/`flicker_window`/`stability_bars`) vẫn
+  KHÔNG được `LiveLoopState`/`state_snapshot.json` lưu. Quyết định CÓ CHỦ
+  Ý: không fabricate giá trị placeholder cho hai nhóm field này chỉ để
+  `--dashboard` "chạy được" — cần thiết kế riêng (lưu thêm gì vào
+  snapshot, hay tính lại từ đầu mỗi lần render) trước khi wire.
 
 **KHÔNG xác nhận được (cần testnet thật, đang bị chặn — xem mục dưới):**
 - Nghiệm thu "Dashboard chạy được với dữ liệu thật từ testnet, chụp lại

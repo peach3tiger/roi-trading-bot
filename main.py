@@ -767,6 +767,29 @@ def _latest_closed_bar_date(now: datetime) -> Any:
     return today - pd.Timedelta(days=1)
 
 
+def compute_bars_behind(last_processed_bar: str | None, now: datetime) -> int:
+    """Số bar giữa bar ĐÃ ĐÓNG mới nhất (tính tới `now`) và
+    `last_processed_bar` đã lưu — 0 nghĩa là đồng bộ.
+
+    THUẦN, tính lại mỗi lần gọi — KHÔNG lưu kết quả vào `state_snapshot.json`
+    (xem `monitoring/dashboard.py::DashboardState.bars_behind`): một giá
+    trị lưu sẵn từ lần `process_one_bar()` thành công gần nhất sẽ đứng yên
+    ở "0" ngay cả khi tiến trình chính đã chết từ lâu — đúng lúc field này
+    tồn tại để báo động. `--dashboard` (khi wire xong, xem docs/STATE.md)
+    gọi hàm này tại THỜI ĐIỂM RENDER, dùng đồng hồ thật của tiến trình đọc
+    dashboard, không phải đồng hồ của tiến trình `run_live_loop` lúc ghi
+    snapshot lần cuối.
+    """
+    import pandas as pd
+
+    if last_processed_bar is None:
+        return 0
+
+    latest = _latest_closed_bar_date(now)
+    last = pd.Timestamp(last_processed_bar, tz="UTC")
+    return max(0, int((latest - last).days))
+
+
 @dataclass
 class LiveLoopState:
     """Ghi vào `state_snapshot.json` MỖI BAR (spec Phase 7 — không chỉ lúc
@@ -798,6 +821,18 @@ class LiveLoopState:
     # dùng cho current_regime_id (so state.current_regime_id CŨ với
     # regime_id MỚI ngay trong process_one_bar()).
     current_trend_structure: str | None = None
+    # Poll telemetry (2026-08-07) — REST polling thay WebSocket (xem
+    # docs/DECISIONS.md "Đổi sàn Bybit -> Binance"), nên KHÔNG có khái
+    # niệm "đang kết nối"/"bao lâu kể từ tin nhắn cuối" như trước. Hai
+    # field dưới đây thay thế đúng vai trò "cho biết feed dữ liệu còn
+    # sống không" bằng ngôn ngữ đúng kiến trúc: thời điểm VÀ độ trễ của
+    # lần fetch OHLCV thật gần nhất (`history_loader.load()` trong
+    # `run_live_loop()`), KHÔNG phải mỗi lần lặp vòng poll — phần lớn chu
+    # kỳ 60s không có bar mới nên không gọi mạng, xem docstring
+    # run_live_loop. None = chưa poll lần nào (phiên mới/snapshot cũ
+    # trước hai field này tồn tại).
+    last_poll_at: str | None = None
+    poll_latency_ms: float | None = None
 
 
 def write_state_snapshot(path: Path, state: LiveLoopState) -> None:
@@ -1376,11 +1411,22 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
                 time.sleep(poll_interval)
                 continue
 
+            poll_started_at = time.monotonic()
             ohlcv = history_loader.load(ccxt_symbol, "1D", data_start, latest_bar.to_pydatetime())
+            poll_latency_ms = (time.monotonic() - poll_started_at) * 1000
+            last_poll_at = datetime.now(timezone.utc).isoformat()
+            # Gắn ngay vào `state` — cả hai nhánh dưới đây (warmup chưa đủ
+            # HOẶC xử lý bar bình thường) đều phải mang theo, không chỉ
+            # nhánh thành công. `process_one_bar()` dựng `LiveLoopState`
+            # MỚI qua constructor (không phải `replace()`), nên field này
+            # PHẢI được gắn lại SAU khi nó trả về — xem bên dưới.
+            state = replace(state, last_poll_at=last_poll_at, poll_latency_ms=poll_latency_ms)
+
             features = compute_all_features(ohlcv, feature_config)
 
             if latest_bar not in features.index:
                 logger.warning("Bar %s chưa đủ warmup feature — chờ vòng poll sau.", latest_bar.date())
+                write_state_snapshot(snapshot_path, state)
                 time.sleep(poll_interval)
                 continue
 
@@ -1421,6 +1467,11 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
                 regime_state_logger=regime_state_logger,
                 large_pnl_alert_pct=large_pnl_alert_pct,
             )
+            # process_one_bar() dựng LiveLoopState MỚI qua constructor —
+            # gắn lại poll telemetry đã đo ở trên (KHÔNG sống sót qua
+            # constructor mới, khác `replace()` vốn giữ nguyên field không
+            # được chỉ định tường minh).
+            state = replace(state, last_poll_at=last_poll_at, poll_latency_ms=poll_latency_ms)
             write_state_snapshot(snapshot_path, state)
 
         except Exception as exc:

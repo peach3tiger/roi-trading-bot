@@ -77,8 +77,25 @@ class DashboardState:
     peak_dd_limit_pct: Decimal
     monthly_fees_paid: Decimal
     monthly_fees_pct_of_gross: Decimal
-    ws_connected: bool
-    ws_last_message_seconds_ago: float
+    # HỆ THỐNG — REST polling (không WebSocket, xem docs/DECISIONS.md "Đổi
+    # sàn Bybit -> Binance"). `ws_connected`/`ws_last_message_seconds_ago`
+    # đã bị bỏ (2026-08-07): không có kết nối bền để "connected"/"disconnected",
+    # không có message đẩy tới để đo "bao lâu kể từ tin nhắn cuối" — hai
+    # field đó mô tả một kiến trúc không còn tồn tại trong hệ thống này.
+    # Thay bằng:
+    # round-trip của lần fetch OHLCV gần nhất (history_loader.load()).
+    poll_latency_ms: float
+    # ISO UTC — lúc lần fetch OHLCV gần nhất XẢY RA. KHÔNG phải mỗi lần
+    # lặp vòng poll: main.py::run_live_loop chỉ gọi mạng khi phát hiện có
+    # bar mới (so sánh ngày cục bộ trước, không tốn round-trip nào ở phần
+    # lớn chu kỳ 60s không có gì mới) — xem docstring run_live_loop.
+    last_poll_at: str
+    # Bar đã đóng - bar đã xử lý xong gần nhất; 0 = đồng bộ. TÍNH LẠI mỗi
+    # lần dựng DashboardState (xem main.py::compute_bars_behind), KHÔNG
+    # lưu trong state_snapshot.json: một giá trị lưu sẵn sẽ đứng yên "0"
+    # ngay lúc tiến trình chính đã chết — đúng lúc field này cần báo động
+    # nhất, một con số đông cứng sẽ nói dối đúng lúc quan trọng nhất.
+    bars_behind: int
     api_latency_ms: float
     clock_drift_ms: float
     hmm_last_trained_days_ago: int
@@ -222,22 +239,29 @@ class Dashboard:
         grid.add_column()
         grid.add_column()
         grid.add_column()
-        ws_text = Text(
-            f"WS: {_bool_icon(state.ws_connected)} {state.ws_last_message_seconds_ago:.0f}s trước",
-            style=_bool_style(state.ws_connected),
+
+        bars_behind_ok = state.bars_behind == 0
+        if bars_behind_ok:
+            bars_behind_style = _STYLE_OK
+        elif state.bars_behind == 1:
+            bars_behind_style = _STYLE_WARN
+        else:
+            bars_behind_style = _STYLE_DANGER
+        bars_behind_text = Text(
+            f"Trễ: {state.bars_behind} bar {_bool_icon(bars_behind_ok)}", style=bars_behind_style
         )
         drift_style = _STYLE_OK if abs(state.clock_drift_ms) <= 1000 else _STYLE_DANGER
         grid.add_row(
-            ws_text,
-            f"API: ✅ {state.api_latency_ms:.0f}ms",
+            f"Poll: {state.poll_latency_ms:.0f}ms lúc {state.last_poll_at}",
+            f"API: {state.api_latency_ms:.0f}ms",
             Text(f"Lệch giờ: {state.clock_drift_ms:.0f}ms", style=drift_style),
         )
         env_label = "TESTNET" if state.is_testnet else "MAINNET"
         env_style = _STYLE_OK if state.is_testnet else _STYLE_DANGER
         grid.add_row(
+            bars_behind_text,
             f"HMM: {state.hmm_last_trained_days_ago} ngày trước",
             Text(env_label, style=env_style),
-            "",
         )
         return Panel(grid, title="HỆ THỐNG", title_align="left")
 

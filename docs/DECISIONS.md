@@ -1141,3 +1141,73 @@ dashboard chạy với dữ liệu testnet thật (phụ thuộc cả hai gap �
 Test mới: `tests/test_monitoring_logger.py` (8), `tests/test_monitoring_alerts.py`
 (18), `tests/test_monitoring_dashboard.py` (10), mở rộng
 `tests/test_main_loop.py` (+12). 288 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## 2026-08-07 (sau) — Sửa schema DashboardState: bỏ tàn dư WebSocket
+
+Phát hiện: `monitoring/dashboard.py::DashboardState` còn `ws_connected: bool`/
+`ws_last_message_seconds_ago: float` — mô tả kiến trúc WebSocket đã bị bỏ
+từ đợt đổi sàn Bybit -> Binance (xem mục "Bỏ WebSocket, chuyển hẳn sang
+REST polling" ở trên). Hai field đó không có nghĩa thật để điền trong kiến
+trúc REST polling: không có kết nối bền để "connected"/"disconnected",
+không có message đẩy tới để đo "bao lâu kể từ tin nhắn cuối".
+
+**Sửa:**
+- Bỏ `ws_connected`/`ws_last_message_seconds_ago`.
+- Thêm `poll_latency_ms` (round-trip của lần fetch OHLCV gần nhất qua
+  `history_loader.load()`) + `last_poll_at` (ISO UTC, lúc lần fetch đó xảy
+  ra) — CẢ HAI persist trong `LiveLoopState`/`state_snapshot.json`, cập
+  nhật ở `run_live_loop()` đúng chỗ gọi `history_loader.load()` (không
+  phải mỗi lần lặp vòng poll — phần lớn chu kỳ 60s không có bar mới nên
+  không gọi mạng, xem docstring `run_live_loop`). Cả hai có default `None`
+  — backward-compat với snapshot cũ, xác nhận bằng test riêng.
+- Thêm `bars_behind` (bar đã đóng - bar đã xử lý gần nhất). KHÔNG persist
+  — `main.py::compute_bars_behind()` là hàm THUẦN, tính lại từ
+  `last_processed_bar` (đã có sẵn trong snapshot) + đồng hồ hiện tại mỗi
+  lần gọi. Quyết định có chủ đích: một giá trị `bars_behind` lưu sẵn từ
+  lần ghi snapshot cuối sẽ đứng yên ở "0" ngay cả khi tiến trình chính đã
+  chết từ lâu — đúng lúc field này tồn tại để báo động nhất, một con số
+  đông cứng sẽ nói dối đúng lúc quan trọng nhất.
+- `monitoring/dashboard.py::_system_panel` vẽ lại panel HỆ THỐNG với ba
+  field mới; màu `bars_behind` (xanh=0, vàng=1, đỏ>=2).
+
+**Xác nhận bằng mutation (CLAUDE.md #16):** đổi `_bool_icon(bars_behind_ok)`
+thành `_bool_icon(True)` cố định trong `_system_panel` — test
+`test_bars_behind_nonzero_shows_warning_icon` đỏ đúng, khôi phục sạch
+(`git diff --stat` rỗng). Tương tự cho `compute_bars_behind()`: hàm giả
+luôn trả 0 làm test staleness đỏ.
+
+**Grep toàn repo tìm tàn dư WebSocket khác** (`ws_`, `websocket`,
+`heartbeat`, `reconnect`, `subscribe_`) — báo cáo cho người dùng, KHÔNG tự
+sửa (yêu cầu tường minh):
+- `tests/test_orders.py::_FakeExchange` còn định nghĩa `subscribe_klines`/
+  `subscribe_executions` dù `ExchangeClient` ABC đã bỏ hai method này —
+  xác nhận KHÔNG được gọi ở đâu (`grep ".subscribe_klines(\|.subscribe_executions("`
+  rỗng). Đúng như `ops/RUNBOOK.md` đã tự cảnh báo trước: "nếu bạn thấy
+  code tham chiếu chúng, đó là tàn dư cần dọn, không phải tính năng còn
+  sống".
+- `broker/bybit_client.py` (đã đánh dấu deprecated, giữ làm bằng chứng —
+  quyết định trước đó, không xoá) vẫn có implementation đầy đủ của
+  `subscribe_klines()`/`subscribe_executions()` qua `pybit.unified_trading.WebSocket`
+  — dead code bên trong một file đã cố ý giữ lại nguyên trạng.
+- `README.md` dòng mô tả `ops/RUNBOOK.md` còn ghi "mất WebSocket" — nội
+  dung RUNBOOK thật đã đổi thành "Mất dữ liệu giá (REST polling thất
+  bại)", dòng mô tả một-câu trong README chưa cập nhật theo.
+- `docs/Brain-Crypto-Bybit.md`, `prompts/phase-09-bybit-broker.md`,
+  `prompts/phase-10-main-loop.md`, `prompts/phase-12b-harness-engineering.md`
+  (field ví dụ `"ws_latency_ms": 45` trong JSON mẫu của `monitoring/health.py`
+  đề xuất) — spec/prompt gốc viết TRƯỚC quyết định bỏ WebSocket, còn mô tả
+  luồng WebSocket (heartbeat ping/pong, "Mở WebSocket feed", checklist "Mô
+  phỏng mất WebSocket"). Là tài liệu spec/kế hoạch, không phải code sống —
+  không tự sửa, để người dùng quyết định (ghi chú "đã lỗi thời" hay viết
+  lại).
+- Hai worktree cũ `.claude/worktrees/cranky-easley-107d17`/`kind-clarke-98bb91`
+  (từ agent chạy `isolation: "worktree"` phiên trước, chưa được dọn tự
+  động) đứng ở commit cũ (`479495d`/`155259a`, trước đợt đổi sàn) — chứa
+  bản sao stale của `broker/base.py`/`data/market_data.py`/... với đầy đủ
+  WebSocket. Không phải một phần cây làm việc chính, chỉ ghi nhận sự tồn
+  tại — có thể dọn bằng `git worktree remove` nếu không còn cần.
+
+Test mới/sửa: `tests/test_monitoring_dashboard.py` (+5),
+`tests/test_main_loop.py` (+7). 300 passed / 0 skipped. ruff + mypy sạch.

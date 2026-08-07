@@ -33,6 +33,7 @@ from main import (
     _check_spread_and_alert,
     _fire_bar_alerts,
     _latest_closed_bar_date,
+    compute_bars_behind,
     load_state_snapshot,
     process_one_bar,
     write_state_snapshot,
@@ -1004,3 +1005,85 @@ def test_process_one_bar_alert_manager_receives_regime_change(tmp_path: Path) ->
     )
 
     assert AlertType.REGIME_CHANGE in [a.alert_type for a in manager.sent]
+
+
+# ----------------------------------------------------------------------
+# Phase 11 (bổ sung) — poll telemetry thay ws_connected/ws_last_message_
+# seconds_ago: compute_bars_behind(), last_poll_at/poll_latency_ms trong
+# LiveLoopState/state_snapshot.json.
+# ----------------------------------------------------------------------
+
+
+def test_compute_bars_behind_none_last_processed_is_zero() -> None:
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+    assert compute_bars_behind(None, now) == 0
+
+
+def test_compute_bars_behind_zero_when_caught_up() -> None:
+    # Bar đã đóng mới nhất tính tới 2026-08-07 12:00 UTC là 2026-08-06
+    # (ranh giới ngày 00:00 UTC, xem _latest_closed_bar_date).
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+    assert compute_bars_behind("2026-08-06", now) == 0
+
+
+def test_compute_bars_behind_positive_when_stale() -> None:
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+    assert compute_bars_behind("2026-08-03", now) == 3
+
+
+def test_compute_bars_behind_never_negative_when_ahead() -> None:
+    """last_processed_bar trong TƯƠNG LAI so với now (không nên xảy ra
+    thật, nhưng hàm không được trả số âm — max(0, ...))."""
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+    assert compute_bars_behind("2026-08-10", now) == 0
+
+
+def test_compute_bars_behind_mutation_kill_ignores_last_processed() -> None:
+    """Đột biến kiểm chứng (CLAUDE.md #16): nếu compute_bars_behind() LUÔN
+    trả 0 bất kể input, test staleness ở trên PHẢI đỏ."""
+
+    def _broken(last_processed_bar: str | None, now: datetime) -> int:
+        return 0
+
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+    assert _broken("2026-08-03", now) != 3
+
+
+def test_live_loop_state_has_no_websocket_fields() -> None:
+    import dataclasses
+
+    field_names = {f.name for f in dataclasses.fields(LiveLoopState)}
+    assert "ws_connected" not in field_names
+    assert {"last_poll_at", "poll_latency_ms"} <= field_names
+
+
+def test_write_then_load_state_snapshot_roundtrips_poll_telemetry(tmp_path: Path) -> None:
+    path = tmp_path / "state_snapshot.json"
+    state = replace(_fresh_state(), last_poll_at="2026-08-07T00:01:03+00:00", poll_latency_ms=123.0)
+    write_state_snapshot(path, state)
+
+    loaded = load_state_snapshot(path)
+    assert loaded is not None
+    assert loaded.last_poll_at == "2026-08-07T00:01:03+00:00"
+    assert loaded.poll_latency_ms == 123.0
+
+
+def test_load_state_snapshot_backward_compatible_missing_poll_telemetry(tmp_path: Path) -> None:
+    """Snapshot ghi TRƯỚC khi last_poll_at/poll_latency_ms tồn tại vẫn
+    phải load được — dùng default None, không bị coi là hỏng."""
+    old_snapshot = {
+        "last_processed_bar": "2026-08-06",
+        "current_stop_loss": None,
+        "current_allocation_pct": "0.5",
+        "current_regime_id": 1,
+        "current_regime_label": "BULL",
+        "session_started_at_utc": "2026-08-06T00:00:00+00:00",
+        "written_at_utc": "2026-08-06T00:00:00+00:00",
+    }
+    path = tmp_path / "state_snapshot.json"
+    path.write_text(json.dumps(old_snapshot), encoding="utf-8")
+
+    loaded = load_state_snapshot(path)
+    assert loaded is not None
+    assert loaded.last_poll_at is None
+    assert loaded.poll_latency_ms is None
