@@ -46,10 +46,17 @@ nhận bằng `assert` tường minh mỗi bar (`regime_id`/`regime_label`/
 `is_flickering` phải khớp) thay vì GIẢ ĐỊNH suông rằng train giống hệt
 thì suy luận cũng giống hệt.
 
-`StrategyOrchestrator`/`StructuralTrendGate` KHÔNG có tác dụng phụ (thuần,
-tự xác nhận qua docstring của chính hai lớp đó) — dùng CHUNG một instance
-an toàn cho cả ba đường, gọi lại nhiều lần cho cùng input luôn cho cùng
-kết quả.
+`StrategyOrchestrator`/`StructuralTrendGate` KHÔNG có tác dụng phụ — dùng
+CHUNG một instance an toàn cho cả ba đường, gọi lại nhiều lần cho cùng
+input luôn cho cùng kết quả. Tiền đề này KHÔNG chỉ dựa vào đọc docstring
+của hai lớp đó — khoá bằng một `assert` runtime NGAY ĐẦU hàm test (gọi
+`orchestrator.generate_signal()` hai lần với input giống hệt, khẳng định
+output giống hệt): rẻ hơn nhiều so với đọc lại code mỗi lần nghi ngờ, và
+tự động phát hiện nếu ai đó sau này thêm state ẩn vào
+`StrategyOrchestrator`. Cùng assertion, độc lập, cũng có ở
+`tests/test_strategies.py::test_generate_signal_is_idempotent_no_hidden_state`
+— lặp lại NGAY TẠI ĐÂY vì toàn bộ so sánh trong file này dựa trên đúng
+giả định đó, không nên chỉ tin một test ở file khác.
 
 `bars_window` dùng `ohlcv.loc[:ts]` (KHÔNG giới hạn) cho cả ba đường —
 khớp đúng quy ước của `_run_golden_pipeline()`. Đã xác nhận bằng thực
@@ -63,13 +70,14 @@ ghi riêng ở docstring `tests/test_forward_golden.py`).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from core.hmm_engine import HMMRegimeEngine
+from core.hmm_engine import HMMRegimeEngine, RegimeInfo, RegimeState
 from core.regime_strategies import StrategyOrchestrator
 from core.risk_manager import PortfolioState, RiskManager
 from core.signal_generator import SignalGenerator, compose_layer_allocations
@@ -190,6 +198,60 @@ def test_three_wiring_paths_produce_identical_allocations(tmp_path: Path) -> Non
         min_confidence=0.55, rebalance_threshold_pct=Decimal("25"), uncertainty_mode="halve"
     )
     trend_gate = StructuralTrendGate(TrendGateConfig())
+
+    # Tiền đề bên trên ("StrategyOrchestrator THUẦN") trước đây chỉ được
+    # xác nhận bằng ĐỌC LẠI code mỗi lần nghi ngờ — khoá lại bằng một
+    # assertion runtime NGAY TẠI ĐÂY thay vì đọc code: gọi
+    # generate_signal() HAI LẦN với đầu vào giống hệt, khẳng định output
+    # giống hệt. Toàn bộ vòng lặp bên dưới (dùng `orchestrator` nhiều lần
+    # cho các bar khác nhau, và hai lần trên cùng bar để so (1)+(2) với
+    # (3)) dựa trên đúng giả định này — nếu nó sai, mọi so sánh sau đó vô
+    # nghĩa, nên dừng NGAY ở đây thay vì để lộ ra thành một lệch
+    # `final_allocation` khó chẩn đoán ở bar nào đó về sau.
+    #
+    # Dùng `regime_state`/`bars` TỰ TẠO (KHÔNG lấy từ `engine_golden`/
+    # `engine_sg`): `predict_regime_filtered()` có tác dụng phụ tích luỹ
+    # (bộ lọc ổn định) — gọi nó ở đây để "mượn" một regime_state thật sẽ
+    # làm lệch đồng bộ hai engine TRƯỚC KHI vòng lặp chính bắt đầu, đúng
+    # loại lỗi mà docstring module này đã cảnh báo.
+    _idempotency_regime_state = RegimeState(
+        label="TEST",
+        state_id=0,
+        probability=0.9,
+        state_probabilities=np.array([0.9, 0.1]),
+        timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        is_confirmed=True,
+        consecutive_bars=5,
+    )
+    _idempotency_regime_infos = [
+        RegimeInfo(
+            regime_id=0,
+            regime_name="A",
+            expected_return=0.0,
+            expected_volatility=0.1,
+            recommended_strategy_type="placeholder",
+            max_allocation_pct=1.0,
+            min_confidence_to_act=0.55,
+        )
+    ]
+    _idempotency_bars = ohlcv.iloc[:_TRAIN_BARS]  # đủ dài cho EMA50/ATR14, độc lập với engine
+    _idempotency_args = (
+        _SYMBOL,
+        _idempotency_regime_state,
+        _idempotency_regime_infos,
+        _idempotency_bars,
+        Decimal("0.4"),
+        False,
+    )
+    _idempotency_first = orchestrator.generate_signal(*_idempotency_args)
+    _idempotency_second = orchestrator.generate_signal(*_idempotency_args)
+    assert _idempotency_first == _idempotency_second, (
+        "orchestrator.generate_signal() với ĐÚNG CÙNG input cho kết quả khác nhau ở lần gọi thứ "
+        f"hai — StrategyOrchestrator có state ẩn: first={_idempotency_first!r} "
+        f"second={_idempotency_second!r}. TOÀN BỘ phép so sánh dưới đây (dùng chung một "
+        "orchestrator cho nhiều bar, và hai lần trên cùng bar để so (1)+(2) với (3)) dựa trên "
+        "giả định orchestrator THUẦN — dừng ở đây, không so sánh tiếp."
+    )
 
     risk_manager = _passthrough_risk_manager(tmp_path / "trading_halted.lock")
     signal_generator = SignalGenerator(engine_sg, trend_gate, orchestrator, risk_manager)
