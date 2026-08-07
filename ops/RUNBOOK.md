@@ -240,6 +240,72 @@ Quy trình xử lý:
 
 ---
 
+## CLOCK_DRIFT — đồng hồ máy lệch so với sàn
+
+**Triệu chứng:** giống HỆT mục "Xác thực sàn thất bại" ở trên —
+`exchange_reachable` OK nhưng request ký (order, `fetch_balance`, ...) bị
+sàn từ chối. Với Binance cụ thể: lỗi `-1021` ("Timestamp for this request
+is outside of the recvWindow"), dễ bị chẩn đoán NHẦM thành key
+sai/hết hạn vì bề ngoài (auth thất bại) giống nhau — **luôn kiểm tra lệch
+đồng hồ TRƯỚC khi nghi ngờ key** nếu message lỗi có chữ "timestamp"/
+"recvWindow"/"-1021".
+
+**Nguyên nhân thường gặp:**
+- NTP bị tắt (thủ công hoặc do chính sách hệ thống) — đồng hồ trôi dần,
+  có thể tới hàng giây sau vài ngày không đồng bộ.
+- Máy vừa ngủ đông/ngủ dậy (suspend/resume) — đồng hồ hệ thống có thể
+  không tự đồng bộ lại ngay, đặc biệt trên máy dev/laptop chạy bot thủ
+  công (không phải server 24/7).
+- Đồng hồ CMOS trôi trên máy chạy lâu không reboot.
+- Container không đồng bộ NTP độc lập với host (hiếm nhưng có thể xảy ra
+  tuỳ cấu hình Docker/hypervisor).
+
+**Cách phát hiện:** hai lớp kiểm tra, KHÔNG dùng công thức ngây thơ (xem
+`monitoring/clock.py` — công thức trừ trực tiếp `server_time - now()` báo
+lệch giả, cộng gộp cả round-trip mạng vào kết quả):
+
+- Khởi động: `run_live_loop()` gọi `monitoring.clock.measure_clock_drift()`
+  qua `ExchangeClient.get_server_time()` (đã hiệu chỉnh round-trip, trung
+  vị 3 lần đo) — **FAIL rõ ràng, thoát exit 1**, in số đo thực tế
+  (`drift_ms`/`round_trip_ms`) nếu vượt `monitoring.clock_drift_halt_ms`
+  (`config/settings.yaml`, mặc định 2500ms — quá nửa `recvWindow` mặc
+  định 5000ms của Binance).
+- Mỗi bar trong vòng lặp chính: đo lại, ghi vào `logs/regime.log`
+  (`event: clock_check`) — vượt `monitoring.clock_drift_alert_ms` (mặc
+  định 1000ms) → `AlertType.CLOCK_DRIFT` (rate limit 15 phút như mọi
+  alert khác); vượt `clock_drift_halt_ms` → bot **dừng gửi lệnh mới bar
+  đó, giữ nguyên vị thế/stop hiện có** tới khi đo lại thấy đã đồng bộ (KHÔNG
+  tự đóng vị thế — một breach stop-loss thật trong đúng bar bị halt sẽ
+  không được enforce cho tới bar kế tiếp đồng hồ đã đồng bộ, đánh đổi có
+  chủ đích: cố gắng đóng vị thế lúc đồng hồ lệch chỉ tốn một request chắc
+  chắn thất bại).
+
+**Cách sửa:**
+
+- **macOS** (máy dev chạy bot thủ công, không phải container):
+  System Settings → General → Date & Time → bật "Set date and time
+  automatically". Nếu đã bật mà vẫn lệch (thường sau khi máy ngủ dậy lâu):
+  tắt rồi bật lại, hoặc `sudo sntp -sS time.apple.com` từ Terminal để ép
+  đồng bộ ngay lập tức.
+- **Linux/container** (triển khai thật, xem "Trạng thái hiện tại" đầu
+  file): xác nhận `systemd-timesyncd`/`chronyd`/`ntpd` đang chạy trên
+  HOST (`timedatectl status` — trường `System clock synchronized` phải
+  `yes`). Container KHÔNG có đồng hồ riêng — nó dùng đồng hồ của host qua
+  kernel, sửa NTP ở container không có tác dụng nếu host đang sai.
+
+**TUYỆT ĐỐI KHÔNG** bật ccxt `options={'adjustForTimeDifference': True}`
+để "vá" việc này — xem docstring `monitoring/clock.py` cho lý do đầy đủ:
+cờ đó giấu triệu chứng (request vẫn đi lọt) mà không sửa nguyên nhân
+(đồng hồ hệ thống vẫn sai), và một hệ thống KHÁC đọc cùng chiếc máy đó
+(log timestamp, cron job khác) vẫn sẽ tin vào giờ sai.
+
+Sau khi sửa: chạy lại `python ops/health_check.py` (WARN sớm ở >1000ms,
+công thức ngây thơ — chỉ để heads-up nhanh, không phải nguồn quyết định
+chính thức) rồi `python main.py --dry-run` để xác nhận bước kiểm tra
+khởi động (FAIL cứng ở >2500ms) qua được.
+
+---
+
 ## Khôi phục sau crash
 
 Thị trường 24/7 — container **sẽ** crash-restart giữa lúc có lệnh đang

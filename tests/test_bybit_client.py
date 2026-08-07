@@ -499,3 +499,15 @@ def test_get_historical_klines_returns_sorted_ascending() -> None:
     df = client.get_historical_klines("BTCUSDT", "1D", start, end)
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
     assert df.index.is_monotonic_increasing
+
+
+def test_get_server_time_not_overridden_raises_not_implemented() -> None:
+    """`ExchangeClient.get_server_time()` (broker/base.py) KHÔNG phải
+    `@abstractmethod` — có chủ đích, để không buộc phải sửa file deprecated
+    này (xem docstring module) chỉ để thoả một tính năng mới (đo lệch đồng
+    hồ, xem monitoring/clock.py). BybitClient KHÔNG override, nên gọi
+    method này phải raise NotImplementedError RÕ RÀNG, không phải một
+    phép tính im lặng dùng số sai."""
+    client, _ = _make_client()
+    with pytest.raises(NotImplementedError):
+        client.get_server_time()

@@ -5,7 +5,7 @@
 
 ## Đang ở đâu
 
-- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới). 300 passed
+- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới). 317 passed
   / 0 skipped.
 - **`tests/test_frozen_files.py` mới (2026-08-07):** ghim SHA256 của
   `forward/logger.py`/`forward/config_frozen.yaml` vào
@@ -252,11 +252,31 @@ này implement thật, không viết lại scaffold.
   sẵn từ trước (Phase 5/§5.4) nhưng cần một nguồn giá USDT/USD đáng tin —
   chưa chọn/xác nhận nguồn nào trên Binance spot, không bịa bằng cặp proxy
   (vd. USDC/USDT) chưa kiểm chứng.
-- `AlertType.CLOCK_DRIFT` liên tục mỗi bar: `ops/health_check.py::check_exchange_reachable`
-  đã đo lệch giờ nhưng chỉ chạy MỘT LẦN lúc khởi động (bước 1-2). Đo liên
-  tục cần `ExchangeClient.get_server_time()` — chưa thêm vào ABC
-  (`broker/base.py`), chưa đánh giá ảnh hưởng lên `broker/bybit_client.py`
-  (deprecated, vẫn phải thoả ABC).
+- **[2026-08-07, sau] `AlertType.CLOCK_DRIFT` liên tục mỗi bar — XONG.**
+  `ExchangeClient.get_server_time()` (`broker/base.py`, NON-abstract, mặc
+  định `NotImplementedError` — cố ý không `@abstractmethod` để không buộc
+  sửa `broker/bybit_client.py` deprecated) + `CCXTClient.get_server_time()`
+  (`exchange.fetch_time()` thật) + `monitoring/clock.py::measure_clock_drift()`
+  (hiệu chỉnh round-trip kiểu NTP, median-of-3, **KHÔNG** dùng công thức
+  ngây thơ `server - now()` mà `ops/health_check.py::check_exchange_reachable`
+  vẫn dùng — check đó GIỮ NGUYÊN, chỉ còn vai trò heads-up WARN sớm,
+  KHÔNG còn là nguồn quyết định chính cho ngưỡng dừng lệnh). Wire: khởi
+  động (`run_live_loop`, FAIL cứng exit 1 nếu |drift| > 2500ms) + mỗi bar
+  (`process_one_bar`, qua `_check_clock_drift()` — log MỌI bar vào
+  `regime.log` (`event: clock_check`), cảnh báo ở 1000ms, DỪNG gửi lệnh
+  mới ở 2500ms giữ nguyên vị thế/stop hiện có — xem docstring
+  `process_one_bar` cho đánh đổi CÓ CHỦ Ý: một breach stop-loss thật đúng
+  bar bị halt sẽ KHÔNG được enforce). Ngưỡng trong
+  `config/settings.yaml: monitoring.clock_drift_alert_ms/clock_drift_halt_ms`.
+  `ops/RUNBOOK.md` có mục CLOCK_DRIFT đầy đủ (triệu chứng giống hệt "xác
+  thực thất bại", nguyên nhân, cách sửa macOS/Linux). TUYỆT ĐỐI KHÔNG bật
+  ccxt `adjustForTimeDifference` — lý do đầy đủ trong docstring
+  `monitoring/clock.py`. Test mới: `tests/test_monitoring_clock.py` (7,
+  mutation-verified: bỏ hiệu chỉnh round_trip/2, 2 test đỏ), +9 trong
+  `tests/test_main_loop.py` (ngưỡng alert/halt, mutation-verified: ép
+  `halted=False` cố định, 2 test halt-behavior đỏ), +2 trong
+  `tests/test_ccxt_client.py`, +1 `tests/test_bybit_client.py` (default
+  ABC raise). Xem docs/DECISIONS.md mục cùng ngày.
 - `LARGE_PNL` chỉ phát hiện chiều LỖ (đọc `CircuitBreaker.check().daily_dd`,
   vốn chỉ đo drawdown) — chưa có theo dõi equity TĂNG bar-over-bar để phát
   hiện P&L DƯƠNG lớn bất thường.

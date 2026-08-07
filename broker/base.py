@@ -173,3 +173,25 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     def get_orderbook(self, symbol: str) -> OrderBook: ...
+
+    def get_server_time(self) -> int:
+        """Epoch milliseconds theo đồng hồ SÀN — dùng để đo lệch đồng hồ
+        cục bộ, xem `monitoring/clock.py::measure_clock_drift()`.
+
+        KHÔNG `@abstractmethod`, khác 8 method còn lại của interface này —
+        có chủ đích. `broker/bybit_client.py` (deprecated kể từ 2026-08-06,
+        docstring module đó ghi rõ "giữ nguyên, không sửa logic, không
+        xoá") sẽ raise `TypeError` NGAY LÚC KHỞI TẠO nếu method này là
+        abstract mà không được implement ở đó — buộc phải sửa một file đã
+        cố tình đóng băng làm bằng chứng lịch sử, chỉ để thoả mãn một tính
+        năng mới (đo lệch đồng hồ) mà file đó không cần tới (nó không còn
+        được dùng để giao dịch thật). Mặc định raise `NotImplementedError`
+        — lộ ra RÕ RÀNG ngay lúc bị gọi nếu một subclass không override,
+        không phải một phép tính im lặng dùng số sai. `broker/ccxt_client.py::CCXTClient`
+        override bằng `exchange.fetch_time()` thật — đường duy nhất được
+        dùng trong vận hành sống.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}.get_server_time() chưa implement — cần cho "
+            "monitoring/clock.py::measure_clock_drift()."
+        )

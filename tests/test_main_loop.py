@@ -88,8 +88,8 @@ class _FakeOrderResult:
 
 
 class _FakeOrderExecutor:
-    def __init__(self, fee_cost: str | None = None) -> None:
-        self.exchange_client = _FakeExchangeClient()
+    def __init__(self, fee_cost: str | None = None, exchange_client: Any = None) -> None:
+        self.exchange_client = exchange_client if exchange_client is not None else _FakeExchangeClient()
         self.submit_order_calls: list[Any] = []
         self.modify_stop_calls: list[tuple[str, Decimal]] = []
         self.close_position_calls: list[str] = []
@@ -1087,3 +1087,215 @@ def test_load_state_snapshot_backward_compatible_missing_poll_telemetry(tmp_path
     assert loaded is not None
     assert loaded.last_poll_at is None
     assert loaded.poll_latency_ms is None
+
+
+# ----------------------------------------------------------------------
+# Lệch đồng hồ (2026-08-07) — main.py::_check_clock_drift(), halt gate ở
+# đầu process_one_bar(). Không dùng monitoring.clock trực tiếp ở đây (đã
+# test riêng, chính xác, ở tests/test_monitoring_clock.py) — chỉ kiểm tra
+# NGƯỠNG và HÀNH ĐỘNG (alert/halt) được kích hoạt đúng lúc main.py gọi nó.
+# ----------------------------------------------------------------------
+
+
+class _FakeExchangeClientWithClockAndOrderbook(_FakeExchangeClient):
+    """`drift_ms` xấp xỉ (không tuyệt đối chính xác — round-trip trong
+    tiến trình test gần như 0, nên sai số cỡ vài ms, đủ nhỏ so với biên
+    1000/2500ms mà các test này kiểm tra). `get_orderbook()` trả spread
+    hẹp để `_check_spread_and_alert()` (cũng chạy khi alert_manager được
+    truyền) không tự phát sinh alert gây nhiễu assertion."""
+
+    def __init__(self, drift_ms: float = 0.0) -> None:
+        super().__init__()
+        self._drift_ms = drift_ms
+
+    def get_server_time(self) -> int:
+        import time
+
+        return int(time.time() * 1000 + self._drift_ms)
+
+    def get_orderbook(self, symbol: str) -> _FakeOrderBook:
+        return _FakeOrderBook("50000", "50005")
+
+
+def _clock_process_one_bar(
+    tmp_path: Path, *, drift_ms: float, manager: _SpyAlertManager, state: LiveLoopState | None = None
+) -> LiveLoopState:
+    generator = _signal_generator(tmp_path)
+    exchange_client = _FakeExchangeClientWithClockAndOrderbook(drift_ms=drift_ms)
+    order_executor = _FakeOrderExecutor(exchange_client=exchange_client)
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    return process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=state if state is not None else _fresh_state(),
+        dry_run=True,
+        alert_manager=manager,
+    )
+
+
+def test_clock_drift_below_alert_threshold_no_alert(tmp_path: Path) -> None:
+    manager = _SpyAlertManager()
+    _clock_process_one_bar(tmp_path, drift_ms=500.0, manager=manager)
+    assert AlertType.CLOCK_DRIFT not in [a.alert_type for a in manager.sent]
+
+
+def test_clock_drift_between_alert_and_halt_thresholds_alerts_but_does_not_halt(tmp_path: Path) -> None:
+    manager = _SpyAlertManager()
+    exchange_client = _FakeExchangeClientWithClockAndOrderbook(drift_ms=1500.0)
+    order_executor = _FakeOrderExecutor(exchange_client=exchange_client)
+    generator = _signal_generator(tmp_path)
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    new_state = process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=_fresh_state(),
+        dry_run=True,
+        alert_manager=manager,
+    )
+
+    assert AlertType.CLOCK_DRIFT in [a.alert_type for a in manager.sent]
+    # KHÔNG halt ở 1500ms (< 2500ms mặc định) — signal vẫn được sinh ra
+    # bình thường (declining bars -> BEAR_STRUCTURE, regime được gán).
+    assert new_state.current_regime_id is not None
+
+
+def test_clock_drift_above_halt_threshold_halts_no_order_and_keeps_state(tmp_path: Path) -> None:
+    manager = _SpyAlertManager()
+    exchange_client = _FakeExchangeClientWithClockAndOrderbook(drift_ms=3000.0)
+    order_executor = _FakeOrderExecutor(exchange_client=exchange_client)
+    generator = _signal_generator(tmp_path)
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    base = _fresh_state()
+    state = replace(
+        base,
+        current_stop_loss="40",
+        current_allocation_pct="0.5",
+        current_regime_id=1,
+        current_regime_label="BULL",
+    )
+
+    new_state = process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=state,
+        dry_run=False,
+        alert_manager=manager,
+    )
+
+    assert AlertType.CLOCK_DRIFT in [a.alert_type for a in manager.sent]
+    # "Giữ vị thế và stop hiện có" — KHÔNG đổi allocation/stop/regime dù
+    # đang ở dry_run=False (đủ điều kiện gửi lệnh thật nếu không bị halt).
+    assert new_state.current_stop_loss == "40"
+    assert new_state.current_allocation_pct == "0.5"
+    assert new_state.current_regime_id == 1
+    assert order_executor.submit_order_calls == []
+    assert order_executor.close_position_calls == []
+    assert order_executor.modify_stop_calls == []
+
+
+def test_clock_drift_halt_still_updates_telemetry_and_last_processed_bar(tmp_path: Path) -> None:
+    manager = _SpyAlertManager()
+    new_state = _clock_process_one_bar(tmp_path, drift_ms=3000.0, manager=manager)
+
+    assert new_state.last_clock_drift_ms is not None
+    assert abs(new_state.last_clock_drift_ms - 3000.0) < 50.0
+    assert new_state.last_processed_bar is not None
+
+
+def test_clock_drift_negative_offset_also_triggers_halt(tmp_path: Path) -> None:
+    """Ngưỡng so trên |drift|, không phải drift dương — đồng hồ CHẬM hơn
+    sàn cũng nguy hiểm như NHANH hơn."""
+    manager = _SpyAlertManager()
+    new_state = _clock_process_one_bar(tmp_path, drift_ms=-3000.0, manager=manager)
+
+    assert AlertType.CLOCK_DRIFT in [a.alert_type for a in manager.sent]
+    assert new_state.current_allocation_pct == "0"  # _fresh_state() mặc định, không đổi
+
+
+def test_clock_check_logged_every_bar_even_without_alert(tmp_path: Path) -> None:
+    manager = _SpyAlertManager()
+    regime_logger = get_logger("regime_clock_test", str(tmp_path / "logs"))
+    exchange_client = _FakeExchangeClientWithClockAndOrderbook(drift_ms=100.0)
+    order_executor = _FakeOrderExecutor(exchange_client=exchange_client)
+    generator = _signal_generator(tmp_path)
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=_fresh_state(),
+        dry_run=True,
+        alert_manager=manager,
+        regime_state_logger=regime_logger,
+    )
+    for h in regime_logger.handlers:
+        h.flush()
+
+    log_text = (tmp_path / "logs" / "regime_clock_test.log").read_text(encoding="utf-8")
+    assert '"event": "clock_check"' in log_text
+    # 100ms < ngưỡng alert 1000ms mặc định — KHÔNG có CLOCK_DRIFT alert...
+    assert AlertType.CLOCK_DRIFT not in [a.alert_type for a in manager.sent]
+    # ... nhưng vẫn được LOG (spec: "mỗi bar, phát ClockCheck vào log").
+
+
+def test_check_clock_drift_measurement_failure_does_not_halt(tmp_path: Path) -> None:
+    """get_server_time() raise -> KHÔNG halt (đó là việc của DATA_FEED_LOST/
+    API_LOST, không phải CLOCK_DRIFT — xem docstring _check_clock_drift)."""
+
+    class _BrokenClockExchangeClient(_FakeExchangeClient):
+        def get_server_time(self) -> int:
+            raise ConnectionError("no network")
+
+        def get_orderbook(self, symbol: str) -> _FakeOrderBook:
+            return _FakeOrderBook("50000", "50005")
+
+    manager = _SpyAlertManager()
+    order_executor = _FakeOrderExecutor(exchange_client=_BrokenClockExchangeClient())
+    generator = _signal_generator(tmp_path)
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    new_state = process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=_fresh_state(),
+        dry_run=True,
+        alert_manager=manager,
+    )
+
+    assert AlertType.CLOCK_DRIFT not in [a.alert_type for a in manager.sent]
+    assert new_state.current_regime_id is not None  # tiếp tục xử lý bar bình thường
+
+

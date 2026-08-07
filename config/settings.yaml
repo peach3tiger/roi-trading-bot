@@ -139,3 +139,12 @@ monitoring:
   # vốn chỉ đo drawdown) — chưa có theo dõi equity tăng bar-over-bar để phát
   # hiện P&L DƯƠNG lớn, xem docs/STATE.md mục Phase 11 cho khoảng trống này.
   large_pnl_alert_pct: 2.0
+  # Lệch đồng hồ (monitoring/clock.py::measure_clock_drift(), hiệu chỉnh
+  # round-trip — KHÔNG dùng công thức ngây thơ, xem docstring module đó).
+  # 1000ms: cảnh báo (rate limit chung 15 phút như mọi AlertType khác).
+  # 2500ms: dừng gửi lệnh mới, giữ nguyên vị thế/stop hiện có tới khi đo
+  # lại thấy đồng hồ đã đồng bộ — Binance recvWindow mặc định 5000ms, vượt
+  # QUÁ NỬA cửa sổ đó thì request ký bắt đầu bị từ chối với -1021 (trông
+  # hệt như key sai, xem ops/RUNBOOK.md mục CLOCK_DRIFT).
+  clock_drift_alert_ms: 1000
+  clock_drift_halt_ms: 2500

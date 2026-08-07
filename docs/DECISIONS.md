@@ -1211,3 +1211,109 @@ sửa (yêu cầu tường minh):
 
 Test mới/sửa: `tests/test_monitoring_dashboard.py` (+5),
 `tests/test_main_loop.py` (+7). 300 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## 2026-08-07 (sau nữa) — Lệch đồng hồ: get_server_time() + monitoring/clock.py
+
+Hoàn thiện `AlertType.CLOCK_DRIFT` — trước đó chỉ có giá trị enum, chưa
+đo/wire gì (ghi nhận là khoảng trống ở mục Phase 11 phía trên).
+
+**1. `ExchangeClient.get_server_time() -> int` (`broker/base.py`)** —
+epoch milliseconds. **KHÔNG `@abstractmethod`** như 8 method còn lại của
+interface, có chủ đích: `broker/bybit_client.py` đánh dấu deprecated với
+lời cam kết "giữ nguyên, không sửa logic, không xoá" (docstring module) và
+ĐƯỢC instantiate trực tiếp trong `tests/test_bybit_client.py` — một
+abstractmethod mới sẽ làm `TypeError` ngay lúc khởi tạo, buộc phải sửa
+file đã cố tình đóng băng chỉ để thoả một tính năng nó không cần (không
+còn dùng để giao dịch thật). Method mặc định `raise NotImplementedError`
+— lộ RÕ RÀNG nếu bị gọi trên một subclass không override, không phải một
+phép tính im lặng dùng số sai. `CCXTClient.get_server_time()` override
+bằng `exchange.fetch_time()` thật, qua `_call_with_retry()` như mọi lời
+gọi mạng khác trong client.
+
+**2. `monitoring/clock.py::measure_clock_drift()`** — hiệu chỉnh
+round-trip kiểu NTP:
+
+    t0 = local_ms(); server = get_server_time(); t1 = local_ms()
+    round_trip = t1 - t0
+    local_at_server_response = t0 + round_trip / 2
+    drift_ms = server - local_at_server_response
+
+KHÔNG dùng công thức ngây thơ `server - now()` — nó cộng gộp gần như toàn
+bộ độ trễ MỘT CHIỀU vào kết quả (server đọc giờ ở GIỮA round-trip, không
+phải lúc `t1`). Xác nhận bằng test riêng (`test_naive_formula_would_disagree_by_round_trip_confirming_test_is_meaningful`):
+cùng dữ liệu giả lập, công thức ngây thơ cho hai round-trip (50ms/400ms)
+lệch nhau ~175ms, công thức đúng lệch nhau <2ms.
+
+Trung vị (median) của 3 lần đo liên tiếp — chọn NGUYÊN CẶP `(drift_ms,
+round_trip_ms)` của lần đo có drift ở giữa, KHÔNG lấy trung vị độc lập
+từng trường (sẽ tạo ra một cặp số không tương ứng với bất kỳ lần đo thật
+nào, vô nghĩa để audit lại).
+
+**Xác nhận `ops/health_check.py::check_exchange_reachable` DÙNG CÔNG THỨC
+NGÂY THƠ** (`abs(local_ms - server_time_ms)`, đã có từ Phase 9/10) — GIỮ
+NGUYÊN, không sửa: nó phục vụ mục đích khác (WARN sớm, không cần
+credential, dùng một ccxt instance trần dựng riêng, không qua
+`ExchangeClient`). `monitoring/clock.py` là kênh đo CHÍNH XÁC, có thẩm
+quyền quyết định thật ở ngưỡng dừng lệnh — `check_exchange_reachable` chỉ
+còn là heads-up sớm hơn, ít chính xác hơn.
+
+**3-4. Ngưỡng và wire:**
+- `config/settings.yaml: monitoring.clock_drift_alert_ms=1000`,
+  `clock_drift_halt_ms=2500` (Binance `recvWindow` mặc định 5000ms — quá
+  nửa cửa sổ đó, request ký bị từ chối `-1021`, trông hệt key sai).
+- Khởi động (`run_live_loop`, ngay sau `build_exchange_client()`): đo một
+  lần, **FAIL cứng** (`sys.exit(1)`, in `drift_ms`/`round_trip_ms` thật)
+  nếu vượt `clock_drift_halt_ms`.
+- Mỗi bar (`process_one_bar`, qua `_check_clock_drift()`, gọi khi
+  `alert_manager` được truyền — cùng pattern optional-param với
+  `_check_spread_and_alert`/`_fire_bar_alerts`, không đổi hành vi test cũ
+  không truyền `alert_manager`): log MỌI bar (kể cả không vượt ngưỡng nào)
+  vào `regime.log`; `AlertType.CLOCK_DRIFT` ở >1000ms; **DỪNG gửi lệnh
+  mới** ở >2500ms — return SỚM, TRƯỚC CẢ bước kiểm tra stop-loss breach,
+  giữ nguyên `current_stop_loss`/`current_allocation_pct`/`current_regime_id`
+  y hệt input. Đánh đổi CÓ CHỦ Ý, ghi rõ trong docstring: một breach
+  stop-loss THẬT xảy ra đúng bar bị halt sẽ KHÔNG được enforce (đóng vị
+  thế) cho tới bar kế tiếp đồng hồ đã đồng bộ — vì `close_position()` lúc
+  đó cũng là một request ký, sẽ thất bại với cùng lỗi `-1021`, thử vẫn
+  chắc chắn không thành công.
+- `LiveLoopState` +3 field (`last_clock_drift_ms`/`last_clock_round_trip_ms`/
+  `last_clock_check_at`, default `None`, backward-compat) — feed
+  `DashboardState.clock_drift_ms` (field đã có sẵn từ trước) khi
+  `--dashboard` được wire.
+
+**5. TUYỆT ĐỐI KHÔNG bật ccxt `adjustForTimeDifference`** — không có ở
+đâu trong `broker/ccxt_client.py`, lý do đầy đủ ghi trong docstring
+`monitoring/clock.py`: cờ đó giấu triệu chứng (request đi lọt) mà không
+sửa nguyên nhân (đồng hồ hệ thống vẫn sai), và một hệ thống KHÁC đọc cùng
+máy đó (log timestamp, cron job khác) vẫn tin vào giờ sai.
+
+**6. Test — mutation-verified (CLAUDE.md #16) cả hai lớp:**
+- `tests/test_monitoring_clock.py` (7 test: offset cố định +1500/-3000/0
+  với round-trip=0; hiệu chỉnh round-trip 50ms vs 400ms cho kết quả gần
+  nhau <2ms; median giữ đúng cặp từ một lần đo). Mutation: bỏ
+  `round_trip/2`, dùng `t1` trực tiếp — 2 test (hiệu chỉnh, median) đỏ
+  đúng vị trí, revert sạch.
+- `tests/test_main_loop.py` (+9: dưới ngưỡng alert không cảnh báo; giữa
+  hai ngưỡng cảnh báo nhưng không halt; vượt ngưỡng halt — không
+  submit_order/close_position/modify_stop nào được gọi, state giữ
+  nguyên; halt vẫn cập nhật telemetry + last_processed_bar; drift ÂM cũng
+  halt (so trên `abs()`); log mỗi bar kể cả không cảnh báo; đo lỗi mạng
+  không halt). Mutation: ép `halted = False` cố định trong `_check_clock_drift`
+  — 2 test (halt trên ngưỡng dương, halt trên ngưỡng âm) đỏ đúng, revert
+  sạch (`git diff --stat` rỗng).
+- `tests/test_ccxt_client.py` (+2: trả đúng int epoch ms; đi qua
+  `_call_with_retry` khi gặp `NetworkError`).
+- `tests/test_bybit_client.py` (+1: gọi `get_server_time()` không
+  override raise `NotImplementedError`).
+
+**7. `ops/RUNBOOK.md`** — mục mới "CLOCK_DRIFT — đồng hồ máy lệch so với
+sàn", đặt cạnh mục "Xác thực sàn thất bại" (triệu chứng bề ngoài giống
+hệt nhau, dễ chẩn đoán nhầm): nguyên nhân thường gặp (NTP tắt, máy ngủ
+dậy, CMOS trôi), cách sửa macOS (System Settings → General → Date & Time
+→ Set automatically, hoặc `sudo sntp -sS time.apple.com` để ép đồng bộ
+ngay) và Linux/container (`timedatectl status`, container dùng đồng hồ
+host qua kernel — sửa ở container không có tác dụng nếu host sai).
+
+317 passed / 0 skipped. ruff + mypy sạch.

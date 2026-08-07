@@ -73,6 +73,7 @@ class _FakeExchange:
             "timestamp": 1785900000000,
         }
         self.open_orders: list[dict] = []
+        self.server_time_ms = 1785900000000
         self.create_order_response: dict = {}
         self.last_create_order_args: tuple[Any, ...] | None = None
         self.last_create_order_params: dict | None = None
@@ -128,6 +129,11 @@ class _FakeExchange:
         self.calls.append("fetch_order_book")
         self._maybe_raise("fetch_order_book")
         return self.order_book
+
+    def fetch_time(self) -> int:
+        self.calls.append("fetch_time")
+        self._maybe_raise("fetch_time")
+        return self.server_time_ms
 
 
 def _client(exchange: _FakeExchange | None = None, **kwargs: Any) -> CCXTClient:
@@ -511,6 +517,32 @@ def test_get_orderbook_falls_back_to_now_when_timestamp_missing() -> None:
     ob = client.get_orderbook("BTCUSDT")
 
     assert ob.timestamp is not None
+
+
+def test_get_server_time_returns_int_epoch_ms() -> None:
+    exchange = _FakeExchange()
+    exchange.server_time_ms = 1785900123456
+    client = _client(exchange)
+
+    result = client.get_server_time()
+
+    assert result == 1785900123456
+    assert isinstance(result, int)
+    assert "fetch_time" in exchange.calls
+
+
+def test_get_server_time_retries_on_network_error() -> None:
+    """Đi qua `_call_with_retry` như mọi lời gọi mạng khác trong client
+    này — xác nhận bằng cách ép lỗi NetworkError một lần, retry thành
+    công."""
+    exchange = _FakeExchange()
+    exchange.raise_n_times["fetch_time"] = [ccxt.NetworkError("timeout")]
+    client = _client(exchange)
+
+    result = client.get_server_time()
+
+    assert result == exchange.server_time_ms
+    assert exchange.calls.count("fetch_time") == 2  # 1 lỗi + 1 thành công
 
 
 # ----------------------------------------------------------------------

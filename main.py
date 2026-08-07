@@ -833,6 +833,18 @@ class LiveLoopState:
     # trước hai field này tồn tại).
     last_poll_at: str | None = None
     poll_latency_ms: float | None = None
+    # Lệch đồng hồ (2026-08-07) — monitoring/clock.py::measure_clock_drift(),
+    # đo mỗi bar trong process_one_bar() khi alert_manager được truyền.
+    # Persist để một tiến trình --dashboard riêng (đọc snapshot, không
+    # chạy chung process với run_live_loop) có dữ liệu thật cho
+    # DashboardState.clock_drift_ms — KHÁC bars_behind (main.py::
+    # compute_bars_behind, cố tình KHÔNG persist): drift đồng hồ không tự
+    # "trôi thêm" giữa hai lần đo như độ trễ bar so với hiện tại, nên một
+    # giá trị đo gần nhất vẫn còn ý nghĩa tham khảo dù hơi cũ, không nói
+    # dối theo kiểu "đứng yên ở 0" mà bars_behind mắc phải.
+    last_clock_drift_ms: float | None = None
+    last_clock_round_trip_ms: float | None = None
+    last_clock_check_at: str | None = None
 
 
 def write_state_snapshot(path: Path, state: LiveLoopState) -> None:
@@ -1015,6 +1027,67 @@ def _check_spread_and_alert(
         )
 
 
+def _check_clock_drift(
+    *,
+    alert_manager: Any,
+    exchange_client: Any,
+    regime_state_logger: Any | None,
+    clock_drift_alert_ms: Decimal,
+    clock_drift_halt_ms: Decimal,
+) -> tuple[bool, Any]:
+    """Đo lệch đồng hồ qua `monitoring.clock.measure_clock_drift()`, ghi
+    log MỖI LẦN gọi (kể cả không vượt ngưỡng nào — spec: "mỗi bar, phát
+    ClockCheck vào log"), cảnh báo `AlertType.CLOCK_DRIFT` nếu vượt
+    `clock_drift_alert_ms`.
+
+    Trả `(halted, clock_check)` — `halted=True` nếu vượt
+    `clock_drift_halt_ms` (caller dừng gửi lệnh bar này); `clock_check` là
+    `monitoring.clock.ClockCheck` đo được, hoặc `None` nếu bản thân phép
+    đo lỗi — caller dùng nó để cập nhật telemetry vào `LiveLoopState`
+    (`last_clock_drift_ms`/`last_clock_round_trip_ms`/`last_clock_check_at`).
+
+    Không raise ra ngoài: nếu `exchange_client.get_server_time()` raise
+    (mất mạng, sàn lỗi), trả `(False, None)` — KHÔNG halt. Cố ý không coi
+    "đo lệch giờ thất bại" là lý do để dừng giao dịch — đó là việc của
+    DATA_FEED_LOST/API_LOST (`_check_spread_and_alert`, catch-all của
+    `run_live_loop`), không phải CLOCK_DRIFT: một giá trị đo được RÕ RÀNG
+    khác về bản chất với một phép đo không thực hiện được.
+    """
+    from monitoring.alerts import Alert, AlertType
+    from monitoring.clock import measure_clock_drift
+
+    try:
+        check = measure_clock_drift(exchange_client.get_server_time)
+    except Exception as exc:
+        logger.warning("Không đo được lệch đồng hồ bar này: %s", exc)
+        return False, None
+
+    if regime_state_logger is not None:
+        regime_state_logger.info(
+            "clock_check",
+            extra={
+                "event": "clock_check",
+                "drift_ms": check.drift_ms,
+                "round_trip_ms": check.round_trip_ms,
+                "measured_at": check.measured_at.isoformat(),
+            },
+        )
+
+    abs_drift = Decimal(str(abs(check.drift_ms)))
+    halted = abs_drift > clock_drift_halt_ms
+    if abs_drift > clock_drift_alert_ms:
+        alert_manager.send(
+            Alert(
+                AlertType.CLOCK_DRIFT,
+                f"Lệch đồng hồ {check.drift_ms:.0f}ms (round-trip {check.round_trip_ms:.0f}ms)"
+                + (" — ĐÃ DỪNG gửi lệnh mới" if halted else ""),
+                severity="ERROR" if halted else "WARNING",
+            )
+        )
+
+    return halted, check
+
+
 def process_one_bar(
     *,
     symbol: str,
@@ -1029,6 +1102,8 @@ def process_one_bar(
     alert_manager: Any | None = None,
     regime_state_logger: Any | None = None,
     large_pnl_alert_pct: Decimal = Decimal("2.0"),
+    clock_drift_alert_ms: Decimal = Decimal("1000"),
+    clock_drift_halt_ms: Decimal = Decimal("2500"),
 ) -> LiveLoopState:
     """Xử lý ĐÚNG MỘT bar đã đóng. Tách khỏi vòng lặp poll để test được
     bằng fake, không cần `time.sleep`/vòng lặp vô hạn thật — xem
@@ -1071,6 +1146,17 @@ def process_one_bar(
         log lại giá trị regime CŨ dán nhãn nhầm là "vừa tính").
       - `alert_manager`: xem `_fire_bar_alerts()` cho danh sách đầy đủ
         loại cảnh báo được phát từ bar này.
+
+    Lệch đồng hồ (`clock_drift_halt_ms`, mặc định 2500ms): kiểm tra TRƯỚC
+    CẢ bước 2 (stop-loss breach) — nếu vượt ngưỡng, hàm DỪNG NGAY ở đây,
+    KHÔNG đóng vị thế dù đang breach, KHÔNG sinh signal mới. Lý do: mọi
+    request ký (kể cả `close_position()`) sẽ bị sàn từ chối với `-1021`
+    khi đồng hồ lệch đủ xa recvWindow — cố gắng đóng vị thế lúc đó chỉ tốn
+    một lệnh gọi mạng thất bại chắc chắn, và giữ nguyên vị thế/stop hiện
+    có (không thử, không đổi) an toàn hơn một nỗ lực thất bại giữa chừng.
+    Đánh đổi CÓ CHỦ Ý: một breach stop-loss THẬT trong đúng bar này sẽ
+    KHÔNG được enforce cho tới khi đồng hồ đồng bộ lại — ghi lại rõ ràng ở
+    đây vì đây là hạn chế thật của thiết kế, không phải sơ suất.
     """
     risk_manager = signal_generator.risk_manager
     risk_manager.reset_daily()
@@ -1080,6 +1166,37 @@ def process_one_bar(
     close_price = Decimal(str(ohlcv.loc[bar_ts, "close"]))
     now_iso = datetime.now(timezone.utc).isoformat()
     cumulative_fees = Decimal(state.cumulative_fees_paid) if state.cumulative_fees_paid else Decimal("0")
+
+    clock_drift_ms = state.last_clock_drift_ms
+    clock_round_trip_ms = state.last_clock_round_trip_ms
+    clock_checked_at = state.last_clock_check_at
+    if alert_manager is not None:
+        halted, clock_check = _check_clock_drift(
+            alert_manager=alert_manager,
+            exchange_client=order_executor.exchange_client,
+            regime_state_logger=regime_state_logger,
+            clock_drift_alert_ms=clock_drift_alert_ms,
+            clock_drift_halt_ms=clock_drift_halt_ms,
+        )
+        if clock_check is not None:
+            clock_drift_ms = clock_check.drift_ms
+            clock_round_trip_ms = clock_check.round_trip_ms
+            clock_checked_at = clock_check.measured_at.isoformat()
+        if halted:
+            logger.error(
+                "Lệch đồng hồ vượt ngưỡng dừng lệnh (%sms) — GIỮ NGUYÊN vị thế/stop bar này, "
+                "KHÔNG gửi lệnh mới.",
+                clock_drift_halt_ms,
+            )
+            return replace(
+                state,
+                last_processed_bar=bar_ts.date().isoformat(),
+                written_at_utc=now_iso,
+                cumulative_fees_paid=str(cumulative_fees),
+                last_clock_drift_ms=clock_drift_ms,
+                last_clock_round_trip_ms=clock_round_trip_ms,
+                last_clock_check_at=clock_checked_at,
+            )
 
     current_stop = Decimal(state.current_stop_loss) if state.current_stop_loss else None
     if current_stop is not None and close_price <= current_stop:
@@ -1102,6 +1219,9 @@ def process_one_bar(
             current_allocation_pct="0",
             cumulative_fees_paid=str(cumulative_fees),
             written_at_utc=now_iso,
+            last_clock_drift_ms=clock_drift_ms,
+            last_clock_round_trip_ms=clock_round_trip_ms,
+            last_clock_check_at=clock_checked_at,
         )
 
     current_allocation = (
@@ -1226,6 +1346,9 @@ def process_one_bar(
         written_at_utc=now_iso,
         cumulative_fees_paid=str(cumulative_fees),
         current_trend_structure=new_trend_structure,
+        last_clock_drift_ms=clock_drift_ms,
+        last_clock_round_trip_ms=clock_round_trip_ms,
+        last_clock_check_at=clock_checked_at,
     )
 
 
@@ -1245,6 +1368,8 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
     ccxt_symbol = symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
     poll_interval = int(settings["execution"]["poll_interval_seconds"])
     retrain_interval_days = int(settings["hmm"]["retrain_interval_days"])
+    clock_drift_alert_ms = Decimal(str(settings["monitoring"]["clock_drift_alert_ms"]))
+    clock_drift_halt_ms = Decimal(str(settings["monitoring"]["clock_drift_halt_ms"]))
 
     state_dir = Path(os.environ.get("STATE_DIR", "state"))
     model_path = Path(os.environ.get("MODEL_PATH", "models/hmm_model.pkl"))
@@ -1287,6 +1412,30 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
         logger.info("--dry-run: bỏ qua exchange_authenticated (không cần đặt lệnh thật).")
 
     exchange_client = build_exchange_client(settings, testnet=testnet)
+
+    # Lệch đồng hồ (2026-08-07) — kiểm tra CHÍNH XÁC hơn WARN-only của
+    # `check_exchange_reachable` ở trên (công thức ngây thơ, không hiệu
+    # chỉnh round-trip — xem docstring monitoring/clock.py). Đây là cổng
+    # QUYẾT ĐỊNH THẬT ở ngưỡng clock_drift_halt_ms; check ở trên chỉ là
+    # heads-up sớm, không có ngưỡng FAIL. Dùng exchange_client THẬT (đã
+    # dựng xong) qua ExchangeClient.get_server_time(), không phải một
+    # instance ccxt trần như check_exchange_reachable.
+    from monitoring.clock import measure_clock_drift
+
+    startup_clock_check = measure_clock_drift(exchange_client.get_server_time)
+    logger.info(
+        "Lệch đồng hồ khởi động: %.0fms (round-trip %.0fms)",
+        startup_clock_check.drift_ms,
+        startup_clock_check.round_trip_ms,
+    )
+    if abs(Decimal(str(startup_clock_check.drift_ms))) > clock_drift_halt_ms:
+        print(
+            f"TỪ CHỐI KHỞI ĐỘNG: lệch đồng hồ {startup_clock_check.drift_ms:.0f}ms "
+            f"(round-trip {startup_clock_check.round_trip_ms:.0f}ms) vượt ngưỡng "
+            f"{clock_drift_halt_ms}ms — sửa đồng hồ hệ thống trước khi chạy lại "
+            "(xem ops/RUNBOOK.md mục CLOCK_DRIFT)."
+        )
+        sys.exit(1)
 
     # Bước 3
     instrument_rules = exchange_client.get_instrument_rules(symbol)
@@ -1466,6 +1615,8 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
                 alert_manager=alert_manager,
                 regime_state_logger=regime_state_logger,
                 large_pnl_alert_pct=large_pnl_alert_pct,
+                clock_drift_alert_ms=clock_drift_alert_ms,
+                clock_drift_halt_ms=clock_drift_halt_ms,
             )
             # process_one_bar() dựng LiveLoopState MỚI qua constructor —
             # gắn lại poll telemetry đã đo ở trên (KHÔNG sống sót qua

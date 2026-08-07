@@ -436,3 +436,11 @@ class CCXTClient(ExchangeClient):
             else datetime.now(timezone.utc)
         )
         return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=timestamp)
+
+    def get_server_time(self) -> int:
+        """Epoch milliseconds theo đồng hồ Binance — `fetch_time()` của
+        ccxt trả về int mili-giây trực tiếp (cùng lời gọi đã xác nhận qua
+        `ops/health_check.py::check_exchange_reachable`, xem
+        `monitoring/clock.py::measure_clock_drift()` cho cách dùng có
+        hiệu chỉnh round-trip)."""
+        return int(self._call_with_retry(self._exchange.fetch_time))
