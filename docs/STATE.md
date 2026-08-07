@@ -5,7 +5,7 @@
 
 ## Đang ở đâu
 
-- Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 228 passed
+- Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 229 passed
   / 0 skipped.
 - **Khoảng trống đã biết — GIẢM NHẸ, chưa đóng hẳn (2026-08-07):**
   `core/signal_generator.py::SignalGenerator` (dùng bởi
@@ -21,6 +21,19 @@
   khớp tuyệt đối. Xác nhận bằng mutation (CLAUDE.md #16): đổi `min()` ->
   `max()` trong `SignalGenerator._apply_layer_caps()`, test đỏ ngay bar
   đầu tiên, revert sạch. Đã thêm vào CLAUDE.md #15.
+- **`bars_window` (`ohlcv.loc[:ts].tail(300)` ở `forward/logger.py:558` vs
+  `ohlcv.loc[:ts]` không giới hạn ở golden/`test_wiring_equivalence.py`)
+  — ĐO XONG, ĐÓNG (2026-08-07).** Trước đó chỉ suy luận "vô hại" (EMA/ATR
+  hội tụ nhanh). Đo thật ở `tests/test_bars_window_sensitivity.py`: chạy
+  công thức wiring của `forward/logger.py` hai lần độc lập trên 300 bar
+  tổng hợp (đi qua đúng ranh giới nơi `.tail(300)` bắt đầu cắt thật),
+  `current_allocation` tích luỹ riêng từng lần (không reset) — KHỚP 100%,
+  0/300 lệch. Xác nhận test này không vô nghĩa (mutation): thu nhỏ
+  `_TAIL_LOOKBACK` xuống 235 (sát ngưỡng warmup 230) — LỘ RA lệch thật
+  ngay bar 230 (`cap=0.60` vs `0.30`), chứng minh test bắt được khác biệt
+  thật khi nó tồn tại. Kết quả ghi vào docstring `forward/logger.py`
+  (không sửa logic). Câu hỏi đóng — không cần đo lại trừ khi
+  `_STRATEGY_BARS_LOOKBACK` đổi.
 - Forward test chạy từ 2026-08-06, cấu hình đóng băng, launchd hằng ngày.
   Mốc đánh giá: 2026-11-06 / 2027-02-06 / 2027-08-06. Không đụng tới.
 - Cổng: `CLAUDE.md` #12 — xây tầng thực thi ở **testnet** được, **mainnet**

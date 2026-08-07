@@ -952,3 +952,46 @@ sạch (`git diff --stat` rỗng).
 Thêm vào CLAUDE.md #15 (6 file bắt buộc, tăng từ 5).
 
 228 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## Đo `bars_window`: `.tail(300)` (forward/logger.py) vs không giới hạn (golden) — ĐÓNG (2026-08-07)
+
+Câu hỏi tồn đọng từ phiên trước: `forward/logger.py:558` truyền
+`ohlcv.loc[:ts].tail(_STRATEGY_BARS_LOOKBACK)` (300 bar) vào
+`generate_signal()`/`get_allocation_cap()`, còn `tests/test_forward_golden.py`/
+`tests/test_wiring_equivalence.py` dùng `ohlcv.loc[:ts]` (không giới
+hạn). Kết luận trước đó ("vô hại") chỉ dựa trên đọc code (EMA50/ATR14 hội
+tụ nhanh trong vài chục bar) — **chưa đo**.
+
+**Phương pháp** (`tests/test_bars_window_sensitivity.py`, KHÔNG sửa
+`forward/logger.py`): tái tạo đúng công thức wiring của module đó (HMM →
+`StrategyOrchestrator.generate_signal()` → `StructuralTrendGate.get_allocation_cap()`
+→ `compose_layer_allocations()`) bằng component thật của `core/`, chạy
+HAI LẦN ĐỘC LẬP trên CÙNG 300 bar dữ liệu tổng hợp (seed cố định) — một
+lần `bars_window` cắt 300 bar, một lần không giới hạn — mỗi lần tự tích
+luỹ `current_allocation` RIÊNG (không reset giữa hai lần chạy), để một
+khác biệt nhỏ có cơ hội cộng dồn qua ngưỡng rebalance nếu nó thật sự tồn
+tại. Dải bar kiểm tra xác nhận (bằng `assert`, không chọn số rồi hy vọng)
+đi qua đúng ranh giới nơi `.tail(300)` bắt đầu cắt thật (ohlcv position
+300).
+
+**Kết quả: KHỚP 100%** — 0/300 bar lệch ở cả `hmm_allocation`,
+`trend_gate_cap`, `final_allocation`, kể cả sau khi hai chuỗi
+`current_allocation` tích luỹ độc lập suốt 300 bar (đối chứng cuối: hai
+giá trị cuối cùng bằng nhau tuyệt đối, không chỉ khớp bar-by-bar).
+
+**Xác nhận test không vô nghĩa (mutation, CLAUDE.md #16):** thu nhỏ
+`_TAIL_LOOKBACK` trong test xuống 235 (chỉ 5 bar trên ngưỡng warmup tối
+thiểu 230 của trend gate) — LỘ RA lệch thật ngay bar 230
+(`trend_gate_cap`: `0.60` cắt-235 vs `0.30` không giới hạn) — chứng minh
+phép đo THẬT SỰ nhạy với khác biệt cửa sổ khi nó tồn tại, không phải luôn
+xanh do lỗi thiết kế test. Ở giá trị PRODUCTION THẬT (300, dư 70 bar so
+với ngưỡng 230), khác biệt không xuất hiện.
+
+Kết quả ghi vào docstring `forward/logger.py` (mục "ĐO `bars_window`",
+chỉ thêm text, không đổi logic dòng nào) — câu hỏi đóng. Không cần đo lại
+trừ khi `_STRATEGY_BARS_LOOKBACK` (forward/logger.py) hoặc cấu hình
+`TrendGateConfig`/`sma_period`+`slope_lookback` đổi.
+
+229 passed / 0 skipped. ruff + mypy sạch.

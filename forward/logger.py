@@ -50,6 +50,22 @@ chạy — KHÔNG backfill ngược về quá khứ. Xem docs/VALIDATION_REPORT.
 không còn ngoài mẫu. Forward test chỉ có ý nghĩa với dữ liệu CHƯA từng được
 dùng để quyết định bất kỳ điều gì ở trên — lùi log về quá khứ sẽ chỉ là một
 backtest nữa đội lốt forward test.
+
+ĐO `bars_window` (2026-08-07, xem docs/DECISIONS.md) — dòng 558 dưới đây
+truyền `ohlcv.loc[:ts].tail(_STRATEGY_BARS_LOOKBACK)` (300 bar) vào
+`StrategyOrchestrator.generate_signal()`/`StructuralTrendGate.get_allocation_cap()`,
+khác `tests/test_forward_golden.py`/`tests/test_wiring_equivalence.py`
+(dùng `ohlcv.loc[:ts]`, không giới hạn). Câu hỏi "khác biệt này có làm
+lệch output không" từng chỉ được trả lời bằng suy luận (EMA50/ATR14 hội
+tụ nhanh) — ĐÃ ĐO THẬT ở `tests/test_bars_window_sensitivity.py`: chạy
+đúng công thức wiring của module này (HMM → `generate_signal()` →
+`get_allocation_cap()` → `compose_layer_allocations()`) hai lần độc lập
+trên cùng 300 bar dữ liệu tổng hợp, một lần cắt 300 bar một lần không giới
+hạn, mỗi lần tự tích luỹ `current_allocation` riêng (không reset giữa hai
+lần chạy, để một khác biệt nhỏ có cơ hội cộng dồn nếu nó thật sự tồn tại)
+— dải bar kiểm tra đi qua đúng ranh giới nơi `.tail(300)` bắt đầu cắt thật
+(ohlcv position 300). KẾT QUẢ: KHỚP 100%, 0/300 bar lệch, kể cả sau khi
+tích luỹ độc lập suốt 300 bar. Câu hỏi đóng — dòng 558 KHÔNG đổi.
 """
 
 from __future__ import annotations
