@@ -995,3 +995,30 @@ trừ khi `_STRATEGY_BARS_LOOKBACK` (forward/logger.py) hoặc cấu hình
 `TrendGateConfig`/`sma_period`+`slope_lookback` đổi.
 
 229 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## Khoá giả định "`StrategyOrchestrator.generate_signal()` thuần" bằng assertion runtime (2026-08-07)
+
+`tests/test_wiring_equivalence.py`/`tests/test_bars_window_sensitivity.py`
+đều gọi `orchestrator.generate_signal()` NHIỀU LẦN với cùng input, dựa
+trên giả định "không tác dụng phụ trên `self`" — trước đó chỉ xác nhận
+bằng ĐỌC LẠI code mỗi lần. Rẻ hơn nhiều để khoá giả định đó bằng một
+assertion runtime thường trực, thay vì đọc lại code mỗi lần nghi ngờ.
+
+`tests/test_strategies.py::test_generate_signal_is_idempotent_no_hidden_state`:
+gọi `generate_signal()` BA LẦN trên CÙNG một instance orchestrator với
+input giống hệt, khẳng định cả ba `Signal` trả về bằng nhau tuyệt đối
+(dataclass frozen — so toàn bộ field cùng lúc, không chỉ
+`target_allocation_pct`). Gọi trên CÙNG instance (không phải instance mới
+mỗi lần) — instance mới sẽ luôn khớp bất kể có state ẩn hay không, không
+kiểm tra được gì.
+
+**Xác nhận bằng mutation (CLAUDE.md #16):** thêm `self._call_count`
+(tăng dần mỗi lần gọi) vào `StrategyOrchestrator.__init__`/`generate_signal()`,
+rò rỉ giá trị đó vào `reasoning` của signal trả về — test đỏ NGAY ở lần
+gọi thứ hai (`reasoning` lệch `[MUTATION call=1]` vs `[MUTATION call=2]`),
+đúng cơ chế test được thiết kế để bắt. Revert sạch (`git diff --stat`
+rỗng).
+
+230 passed / 0 skipped. ruff + mypy sạch 54 file.

@@ -5,8 +5,18 @@
 
 ## Đang ở đâu
 
-- Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 229 passed
+- Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 230 passed
   / 0 skipped.
+- **`StrategyOrchestrator.generate_signal()` thuần — khoá bằng assertion,
+  không chỉ đọc code (2026-08-07):**
+  `tests/test_strategies.py::test_generate_signal_is_idempotent_no_hidden_state`
+  gọi 3 lần trên cùng instance, cùng input, khẳng định `Signal` trả về
+  bằng nhau tuyệt đối. `tests/test_wiring_equivalence.py`/
+  `tests/test_bars_window_sensitivity.py` cả hai dựa vào giả định này khi
+  gọi `generate_signal()` nhiều lần — giờ có test giữ giả định đó thay vì
+  phải đọc lại code mỗi lần nghi ngờ. Xác nhận bằng mutation (CLAUDE.md
+  #16): thêm `_call_count` rò rỉ vào `reasoning` — đỏ ngay lần gọi thứ
+  hai, revert sạch.
 - **Khoảng trống đã biết — GIẢM NHẸ, chưa đóng hẳn (2026-08-07):**
   `core/signal_generator.py::SignalGenerator` (dùng bởi
   `main.py::run_live_loop`, Phase 10) là đường nối dây thứ BA, độc lập với

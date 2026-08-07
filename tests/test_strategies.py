@@ -214,6 +214,41 @@ def test_generate_signal_returns_none_when_indicators_not_ready() -> None:
         assert strategy_cls().generate_signal("BTCUSDT", bars, regime_state) is None
 
 
+def test_generate_signal_is_idempotent_no_hidden_state() -> None:
+    """`StrategyOrchestrator.generate_signal()` được GIẢ ĐỊNH thuần (không
+    tác dụng phụ trên `self`) ở nhiều nơi khác trong repo —
+    `tests/test_wiring_equivalence.py`/`tests/test_bars_window_sensitivity.py`
+    gọi nó NHIỀU LẦN với cùng input, dựa trên giả định "cùng input luôn
+    cho cùng output". Giả định đó trước đây chỉ được xác nhận bằng ĐỌC LẠI
+    code (`generate_signal` không có dòng `self.<gì đó> = ...` nào) — rẻ
+    hơn nhiều để khoá nó lại bằng MỘT assertion runtime ở đây: nếu ai đó
+    sau này thêm state ẩn vào `StrategyOrchestrator` (một cache, một bộ
+    đếm, bất kỳ thứ gì làm lần gọi thứ hai khác lần đầu), test này đỏ
+    NGAY LẬP TỨC — không cần đọc lại code mỗi lần nghi ngờ.
+
+    Gọi HAI LẦN TRÊN CÙNG MỘT instance orchestrator (không phải hai
+    instance riêng — hai instance riêng sẽ luôn khớp bất kể có state ẩn
+    hay không, không kiểm tra được gì)."""
+    bars = _make_bars(n=100, trend=0.1)
+    regime_infos = [_make_regime_info(0, "A", volatility=0.1)]
+    regime_state = _make_regime_state(state_id=0, probability=0.90)
+    orchestrator = StrategyOrchestrator(min_confidence=0.55, rebalance_threshold_pct=Decimal("25"))
+
+    call_args = ("BTCUSDT", regime_state, regime_infos, bars, Decimal("0.4"), False)
+    first = orchestrator.generate_signal(*call_args)
+    second = orchestrator.generate_signal(*call_args)
+
+    assert first == second, (
+        f"generate_signal() với ĐÚNG CÙNG input cho hai kết quả khác nhau ở lần gọi thứ hai — "
+        f"StrategyOrchestrator có state ẩn: first={first!r} second={second!r}"
+    )
+
+    # Gọi thêm lần thứ ba sau khi đã "làm nóng" hai lần — bắt cả loại state
+    # ẩn chỉ lộ ra từ lần gọi thứ 3 trở đi (vd. bộ đếm bậc thang).
+    third = orchestrator.generate_signal(*call_args)
+    assert third == first
+
+
 def test_orchestrator_falls_back_gracefully_on_insufficient_data() -> None:
     bars = _make_bars(n=3)
     orchestrator = StrategyOrchestrator(min_confidence=0.55, rebalance_threshold_pct=Decimal("25"))
