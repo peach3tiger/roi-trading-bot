@@ -13,6 +13,7 @@ duy nhất chạm ra sàn thật) để đo được chính xác lệnh gì ĐÃ
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -29,11 +30,15 @@ from core.signal_generator import SignalGenerator
 from core.trend_gate import StructuralTrendGate, TrendGateConfig
 from main import (
     LiveLoopState,
+    _check_spread_and_alert,
+    _fire_bar_alerts,
     _latest_closed_bar_date,
     load_state_snapshot,
     process_one_bar,
     write_state_snapshot,
 )
+from monitoring.alerts import Alert, AlertManager, AlertType
+from monitoring.logger import get_logger
 
 _SYMBOL = "BTCUSDT"
 
@@ -70,23 +75,28 @@ class _FakeExchangeClient:
 
 
 class _FakeOrderResult:
-    def __init__(self) -> None:
+    def __init__(self, fee_cost: str | None = None) -> None:
         self.order_id = "1"
         self.order_link_id = "abc"
         self.status = "FILLED"
         self.filled_qty = Decimal("0.1")
+        # `raw_response` khớp cấu trúc ccxt thật (broker/ccxt_client.py::
+        # submit_order truyền thẳng response thô của sàn) — fee_cost=None
+        # mô phỏng lệnh chưa có thông tin phí (xem _extract_fee_paid()).
+        self.raw_response: dict = {"fee": {"cost": fee_cost, "currency": "USDT"}} if fee_cost else {}
 
 
 class _FakeOrderExecutor:
-    def __init__(self) -> None:
+    def __init__(self, fee_cost: str | None = None) -> None:
         self.exchange_client = _FakeExchangeClient()
         self.submit_order_calls: list[Any] = []
         self.modify_stop_calls: list[tuple[str, Decimal]] = []
         self.close_position_calls: list[str] = []
+        self._fee_cost = fee_cost
 
     def submit_order(self, signal: Any) -> _FakeOrderResult:
         self.submit_order_calls.append(signal)
-        return _FakeOrderResult()
+        return _FakeOrderResult(self._fee_cost)
 
     def modify_stop(self, symbol: str, new_stop: Decimal) -> bool:
         self.modify_stop_calls.append((symbol, new_stop))
@@ -94,7 +104,7 @@ class _FakeOrderExecutor:
 
     def close_position(self, symbol: str) -> _FakeOrderResult:
         self.close_position_calls.append(symbol)
-        return _FakeOrderResult()
+        return _FakeOrderResult(self._fee_cost)
 
 
 class _FakePositionTracker:
@@ -144,8 +154,8 @@ def _fitted_engine() -> HMMRegimeEngine:
     return engine
 
 
-def _risk_manager(tmp_path: Path) -> RiskManager:
-    config: dict[str, object] = {
+def _risk_manager_config() -> dict[str, object]:
+    return {
         "max_position_pct": 100,
         "max_risk_per_trade_pct": 1.0,
         "min_order_value_usdt": 5,
@@ -163,7 +173,10 @@ def _risk_manager(tmp_path: Path) -> RiskManager:
             "peak_dd_halt_pct": 90.0,
         },
     }
-    return RiskManager(config, halt_lock_path=tmp_path / "trading_halted.lock")
+
+
+def _risk_manager(tmp_path: Path) -> RiskManager:
+    return RiskManager(_risk_manager_config(), halt_lock_path=tmp_path / "trading_halted.lock")
 
 
 def _signal_generator(tmp_path: Path) -> SignalGenerator:
@@ -516,3 +529,478 @@ def test_process_one_bar_calls_reset_weekly_on_monday(
     )
 
     assert calls == ["daily", "weekly"]
+
+
+# ----------------------------------------------------------------------
+# cumulative_fees_paid — Phase 11 (monitoring), phí THẬT đọc từ
+# OrderResult.raw_response, cộng dồn qua state, ngược tương thích với
+# snapshot cũ chưa có field này.
+# ----------------------------------------------------------------------
+
+
+def test_live_submit_order_accumulates_real_fee(tmp_path: Path) -> None:
+    generator = _signal_generator(tmp_path)
+    order_executor = _FakeOrderExecutor(fee_cost="1.25")
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    new_state = process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=_fresh_state(),
+        dry_run=False,
+    )
+
+    assert new_state.cumulative_fees_paid == "1.25"
+
+
+def test_fees_accumulate_across_bars_not_overwritten(tmp_path: Path) -> None:
+    generator = _signal_generator(tmp_path)
+    order_executor = _FakeOrderExecutor(fee_cost="1.25")
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    state = replace(_fresh_state(), cumulative_fees_paid="10")
+    new_state = process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=state,
+        dry_run=False,
+    )
+
+    assert new_state.cumulative_fees_paid == "11.25"
+
+
+def test_dry_run_does_not_accumulate_fees(tmp_path: Path) -> None:
+    generator = _signal_generator(tmp_path)
+    order_executor = _FakeOrderExecutor(fee_cost="1.25")
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    new_state = process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=_fresh_state(),
+        dry_run=True,
+    )
+
+    assert new_state.cumulative_fees_paid == "0"
+    assert order_executor.submit_order_calls == []
+
+
+def test_stop_loss_breach_close_position_also_accumulates_fee(tmp_path: Path) -> None:
+    generator = _signal_generator(tmp_path)
+    order_executor = _FakeOrderExecutor(fee_cost="0.75")
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+    close_price = Decimal(str(ohlcv.loc[bar_ts, "close"]))
+
+    base = _fresh_state()
+    state = LiveLoopState(
+        last_processed_bar=None,
+        current_stop_loss=str(close_price + Decimal("1")),  # breach
+        current_allocation_pct="0.5",
+        current_regime_id=1,
+        current_regime_label="BULL",
+        session_started_at_utc=base.session_started_at_utc,
+        written_at_utc=base.written_at_utc,
+        cumulative_fees_paid="5",
+    )
+
+    new_state = process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=order_executor,
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=state,
+        dry_run=False,
+    )
+
+    assert new_state.cumulative_fees_paid == "5.75"
+
+
+def test_extract_fee_paid_returns_zero_when_no_fee_info() -> None:
+    from main import _extract_fee_paid
+
+    class _NoFeeResult:
+        raw_response: dict = {}
+
+    assert _extract_fee_paid(_NoFeeResult()) == Decimal("0")
+
+
+def test_extract_fee_paid_sums_multiple_fills() -> None:
+    from main import _extract_fee_paid
+
+    class _MultiFeeResult:
+        raw_response = {"fees": [{"cost": "0.5", "currency": "USDT"}, {"cost": "0.3", "currency": "USDT"}]}
+
+    assert _extract_fee_paid(_MultiFeeResult()) == Decimal("0.8")
+
+
+def test_extract_fee_paid_mutation_kill_ignores_fee_field() -> None:
+    """Đột biến kiểm chứng (CLAUDE.md #16): nếu _extract_fee_paid() LUÔN
+    trả 0 (bỏ qua hoàn toàn raw_response), test single-fee ở trên PHẢI đỏ.
+    Mô phỏng trực tiếp hành vi hỏng, xác nhận assertion gốc không vô nghĩa."""
+
+    def _broken_extract_fee_paid(order_result: Any) -> Decimal:
+        return Decimal("0")
+
+    class _FeeResult:
+        raw_response = {"fee": {"cost": "1.25", "currency": "USDT"}}
+
+    assert _broken_extract_fee_paid(_FeeResult()) != Decimal("1.25")
+
+
+def test_load_state_snapshot_backward_compatible_missing_fee_field(tmp_path: Path) -> None:
+    """Snapshot ghi TRƯỚC khi cumulative_fees_paid tồn tại (Phase 10) vẫn
+    phải load được — field mới dùng default "0", KHÔNG bị coi là hỏng."""
+    old_snapshot = {
+        "last_processed_bar": "2026-08-06",
+        "current_stop_loss": "50000",
+        "current_allocation_pct": "0.5",
+        "current_regime_id": 1,
+        "current_regime_label": "BULL",
+        "session_started_at_utc": "2026-08-06T00:00:00+00:00",
+        "written_at_utc": "2026-08-06T00:00:00+00:00",
+    }
+    path = tmp_path / "state_snapshot.json"
+    path.write_text(json.dumps(old_snapshot), encoding="utf-8")
+
+    loaded = load_state_snapshot(path)
+    assert loaded is not None
+    assert loaded.cumulative_fees_paid == "0"
+    assert loaded.current_regime_label == "BULL"
+
+
+def test_write_then_load_state_snapshot_roundtrips_fee_field(tmp_path: Path) -> None:
+    path = tmp_path / "state_snapshot.json"
+    state = replace(_fresh_state(), cumulative_fees_paid="123.45")
+    write_state_snapshot(path, state)
+
+    loaded = load_state_snapshot(path)
+    assert loaded is not None
+    assert loaded.cumulative_fees_paid == "123.45"
+
+
+# ----------------------------------------------------------------------
+# Phase 11 — monitoring/alerts.py wiring: _fire_bar_alerts(), _check_spread_and_alert()
+# ----------------------------------------------------------------------
+
+
+class _SpyAlertManager(AlertManager):
+    """Ghi lại mọi Alert đã "gửi" thay vì gọi mạng thật — kế thừa
+    AlertManager thật (không fake toàn bộ) để rate-limit vẫn hoạt động
+    đúng, chỉ chặn các kênh mạng (console/telegram/email/webhook đều tắt
+    qua tham số __init__)."""
+
+    def __init__(self) -> None:
+        super().__init__(rate_limit_seconds=0, console_enabled=False)
+        self.sent: list[Alert] = []
+
+    def send(self, alert: Alert) -> bool:
+        sent = super().send(alert)
+        if sent:
+            self.sent.append(alert)
+        return sent
+
+
+class _FakeBreakerLevel:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+class _FakeBreakerStatus:
+    def __init__(self, level: str, daily_dd: str = "0", weekly_dd: str = "0", peak_dd: str = "0") -> None:
+        self.level = _FakeBreakerLevel(level)
+        self.daily_dd = Decimal(daily_dd)
+        self.weekly_dd = Decimal(weekly_dd)
+        self.peak_dd = Decimal(peak_dd)
+
+
+class _FakeCircuitBreaker:
+    def __init__(self, history: list[_FakeBreakerStatus]) -> None:
+        self._history = history
+
+    def get_history(self) -> list[_FakeBreakerStatus]:
+        return self._history
+
+
+class _FakeRiskManagerForAlerts:
+    def __init__(self, history: list[_FakeBreakerStatus]) -> None:
+        self.circuit_breaker = _FakeCircuitBreaker(history)
+
+
+class _FakeSignalGeneratorForAlerts:
+    def __init__(self, history: list[_FakeBreakerStatus]) -> None:
+        self.risk_manager = _FakeRiskManagerForAlerts(history)
+
+
+class _FakeResult:
+    def __init__(self, is_flickering: bool) -> None:
+        self.is_flickering = is_flickering
+
+
+def test_fire_bar_alerts_regime_change() -> None:
+    manager = _SpyAlertManager()
+    state = replace(_fresh_state(), current_regime_id=0, current_regime_label="BEAR")
+
+    _fire_bar_alerts(
+        alert_manager=manager,
+        signal_generator=_FakeSignalGeneratorForAlerts([]),
+        state=state,
+        result=_FakeResult(is_flickering=False),
+        regime_id=1,
+        regime_label="BULL",
+        new_trend_structure="BULL_STRUCTURE",
+        large_pnl_alert_pct=Decimal("2.0"),
+    )
+
+    assert [a.alert_type for a in manager.sent] == [AlertType.REGIME_CHANGE]
+
+
+def test_fire_bar_alerts_no_regime_change_no_alert() -> None:
+    manager = _SpyAlertManager()
+    state = replace(_fresh_state(), current_regime_id=1, current_regime_label="BULL")
+
+    _fire_bar_alerts(
+        alert_manager=manager,
+        signal_generator=_FakeSignalGeneratorForAlerts([]),
+        state=state,
+        result=_FakeResult(is_flickering=False),
+        regime_id=1,
+        regime_label="BULL",
+        new_trend_structure="BULL_STRUCTURE",
+        large_pnl_alert_pct=Decimal("2.0"),
+    )
+
+    assert manager.sent == []
+
+
+def test_fire_bar_alerts_first_bar_no_regime_change_alert() -> None:
+    """state.current_regime_id is None (phiên mới) -> KHÔNG coi là "đổi
+    regime" (không có gì để so sánh), tránh cảnh báo giả ở bar đầu tiên."""
+    manager = _SpyAlertManager()
+    state = _fresh_state()
+    assert state.current_regime_id is None
+
+    _fire_bar_alerts(
+        alert_manager=manager,
+        signal_generator=_FakeSignalGeneratorForAlerts([]),
+        state=state,
+        result=_FakeResult(is_flickering=False),
+        regime_id=1,
+        regime_label="BULL",
+        new_trend_structure="BULL_STRUCTURE",
+        large_pnl_alert_pct=Decimal("2.0"),
+    )
+
+    assert manager.sent == []
+
+
+def test_fire_bar_alerts_trend_gate_change() -> None:
+    manager = _SpyAlertManager()
+    state = replace(_fresh_state(), current_regime_id=1, current_trend_structure="BEAR_STRUCTURE")
+
+    _fire_bar_alerts(
+        alert_manager=manager,
+        signal_generator=_FakeSignalGeneratorForAlerts([]),
+        state=state,
+        result=_FakeResult(is_flickering=False),
+        regime_id=1,
+        regime_label="BULL",
+        new_trend_structure="BULL_STRUCTURE",
+        large_pnl_alert_pct=Decimal("2.0"),
+    )
+
+    assert [a.alert_type for a in manager.sent] == [AlertType.TREND_GATE_CHANGE]
+
+
+def test_fire_bar_alerts_flicker() -> None:
+    manager = _SpyAlertManager()
+    state = replace(_fresh_state(), current_regime_id=1)
+
+    _fire_bar_alerts(
+        alert_manager=manager,
+        signal_generator=_FakeSignalGeneratorForAlerts([]),
+        state=state,
+        result=_FakeResult(is_flickering=True),
+        regime_id=1,
+        regime_label="BULL",
+        new_trend_structure="BULL_STRUCTURE",
+        large_pnl_alert_pct=Decimal("2.0"),
+    )
+
+    assert [a.alert_type for a in manager.sent] == [AlertType.FLICKER_THRESHOLD_EXCEEDED]
+
+
+def test_fire_bar_alerts_circuit_breaker_and_large_pnl() -> None:
+    manager = _SpyAlertManager()
+    state = replace(_fresh_state(), current_regime_id=1)
+    history = [_FakeBreakerStatus("DAILY_REDUCE", daily_dd="5.0")]
+
+    _fire_bar_alerts(
+        alert_manager=manager,
+        signal_generator=_FakeSignalGeneratorForAlerts(history),
+        state=state,
+        result=_FakeResult(is_flickering=False),
+        regime_id=1,
+        regime_label="BULL",
+        new_trend_structure="BULL_STRUCTURE",
+        large_pnl_alert_pct=Decimal("2.0"),
+    )
+
+    types = [a.alert_type for a in manager.sent]
+    assert AlertType.CIRCUIT_BREAKER in types
+    assert AlertType.LARGE_PNL in types  # 5.0% >= ngưỡng 2.0%
+
+
+def test_fire_bar_alerts_circuit_breaker_none_below_large_pnl_threshold_no_alert() -> None:
+    manager = _SpyAlertManager()
+    state = replace(_fresh_state(), current_regime_id=1)
+    history = [_FakeBreakerStatus("NONE", daily_dd="0.5")]
+
+    _fire_bar_alerts(
+        alert_manager=manager,
+        signal_generator=_FakeSignalGeneratorForAlerts(history),
+        state=state,
+        result=_FakeResult(is_flickering=False),
+        regime_id=1,
+        regime_label="BULL",
+        new_trend_structure="BULL_STRUCTURE",
+        large_pnl_alert_pct=Decimal("2.0"),
+    )
+
+    assert manager.sent == []
+
+
+class _FakeOrderBook:
+    def __init__(self, bid: str, ask: str) -> None:
+        self.best_bid = Decimal(bid)
+        self.best_ask = Decimal(ask)
+
+
+class _FakeExchangeClientWithOrderbook:
+    def __init__(self, orderbook: _FakeOrderBook | None = None, raises: bool = False) -> None:
+        self._orderbook = orderbook
+        self._raises = raises
+
+    def get_orderbook(self, symbol: str) -> _FakeOrderBook:
+        if self._raises:
+            raise ConnectionError("simulated feed loss")
+        assert self._orderbook is not None
+        return self._orderbook
+
+
+def test_check_spread_and_alert_normal_spread_no_alert(tmp_path: Path) -> None:
+    manager = _SpyAlertManager()
+    risk_manager = RiskManager(_risk_manager_config(), halt_lock_path=tmp_path / "halt.lock")
+    exchange_client = _FakeExchangeClientWithOrderbook(_FakeOrderBook("50000", "50005"))
+
+    _check_spread_and_alert(
+        alert_manager=manager, risk_manager=risk_manager, exchange_client=exchange_client, symbol=_SYMBOL
+    )
+
+    assert manager.sent == []
+
+
+def test_check_spread_and_alert_wide_spread_fires_abnormal_spread(tmp_path: Path) -> None:
+    manager = _SpyAlertManager()
+    risk_manager = RiskManager(_risk_manager_config(), halt_lock_path=tmp_path / "halt.lock")
+    # spread_max_pct mặc định 0.10% — bid/ask cách nhau 5% chắc chắn vượt.
+    exchange_client = _FakeExchangeClientWithOrderbook(_FakeOrderBook("50000", "52500"))
+
+    _check_spread_and_alert(
+        alert_manager=manager, risk_manager=risk_manager, exchange_client=exchange_client, symbol=_SYMBOL
+    )
+
+    assert [a.alert_type for a in manager.sent] == [AlertType.ABNORMAL_SPREAD]
+
+
+def test_check_spread_and_alert_orderbook_fetch_fails_fires_data_feed_lost(tmp_path: Path) -> None:
+    manager = _SpyAlertManager()
+    risk_manager = RiskManager(_risk_manager_config(), halt_lock_path=tmp_path / "halt.lock")
+    exchange_client = _FakeExchangeClientWithOrderbook(raises=True)
+
+    _check_spread_and_alert(
+        alert_manager=manager, risk_manager=risk_manager, exchange_client=exchange_client, symbol=_SYMBOL
+    )
+
+    assert [a.alert_type for a in manager.sent] == [AlertType.DATA_FEED_LOST]
+
+
+# ----------------------------------------------------------------------
+# process_one_bar() — wiring end-to-end với alert_manager/regime_state_logger thật
+# ----------------------------------------------------------------------
+
+
+def test_process_one_bar_writes_regime_state_log(tmp_path: Path) -> None:
+    generator = _signal_generator(tmp_path)
+    regime_logger = get_logger("regime", str(tmp_path / "logs"))
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+
+    process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=_FakeOrderExecutor(fee_cost="0.42"),
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=_fresh_state(),
+        dry_run=False,
+        regime_state_logger=regime_logger,
+    )
+    for h in regime_logger.handlers:
+        h.flush()
+
+    log_file = tmp_path / "logs" / "regime.log"
+    assert log_file.exists()
+    payload = json.loads(log_file.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert payload["cumulative_fees_paid"] == "0.42"
+    assert "regime" in payload
+    assert "probability" in payload
+
+
+def test_process_one_bar_alert_manager_receives_regime_change(tmp_path: Path) -> None:
+    generator = _signal_generator(tmp_path)
+    ohlcv = _bars(declining=True)
+    bar_ts = ohlcv.index[-1]
+    manager = _SpyAlertManager()
+
+    # regime_id chắc chắn khác bất kỳ id thật nào HMM có thể trả (0..6) —
+    # đảm bảo REGIME_CHANGE fire bất kể model thật gán regime nào.
+    state = replace(_fresh_state(), current_regime_id=-1, current_regime_label="UNKNOWN")
+
+    process_one_bar(
+        symbol=_SYMBOL,
+        signal_generator=generator,
+        order_executor=_FakeOrderExecutor(),
+        position_tracker=_FakePositionTracker(),
+        ohlcv=ohlcv,
+        features=_synthetic_features(),
+        bar_ts=bar_ts,
+        state=state,
+        dry_run=True,
+        alert_manager=manager,
+    )
+
+    assert AlertType.REGIME_CHANGE in [a.alert_type for a in manager.sent]

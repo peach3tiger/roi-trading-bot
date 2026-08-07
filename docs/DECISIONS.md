@@ -1061,3 +1061,83 @@ xác nhận riêng) — không mutate cả hai cùng lúc, để biết chắc t
 Thêm vào CLAUDE.md #15 (7 file bắt buộc, tăng từ 6).
 
 231 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## 2026-08-07 — Phase 11: Monitoring (`monitoring/logger.py`/`dashboard.py`/`alerts.py`)
+
+Xây theo `prompts/phase-11-monitoring.md` + `docs/Brain-Crypto-Bybit.md` §8.
+Ba file scaffold tồn tại từ trước (dataclass/enum đầy đủ, method
+`raise NotImplementedError`) — implement thật lần này.
+
+**`monitoring/logger.py`**: JSONL thật (mỗi dòng một object JSON hợp lệ),
+`RotatingFileHandler` 10MB/30 backup (proxy dung lượng, KHÔNG phải lịch 30
+ngày — ghi rõ trong docstring để không ai đọc nhầm là `TimedRotatingFileHandler`).
+Bug thật bắt được qua chính test (không phải mutation cố ý):
+`logging.getLogger(name)` tra registry TOÀN CỤC theo tên — `get_logger("main", dirA)`
+rồi `get_logger("main", dirB)` (khác `log_dir`, cùng `name`) cộng dồn
+handler trên CÙNG object logger. Sửa bằng dựng `logging.Logger(...)` trực
+tiếp thay vì qua `logging.getLogger()`.
+
+**`monitoring/alerts.py`**: `AlertManager` — rate limit 1/loại sự
+kiện/15 phút áp dụng CHUNG cho mọi kênh của một alert (không phải riêng
+từng kênh). Kênh console dùng `logging.StreamHandler` riêng, KHÔNG
+`print()` — nghiệm thu của phase-11-monitoring.md chạy
+`grep -rn "print(" monitoring/` và kỳ vọng không thấy vi phạm thật.
+`send()` cam kết không bao giờ raise; ban đầu chỉ bắt
+`requests.RequestException`/`(SMTPException, OSError)` — test tự đỏ khi
+mock ném `OSError` cho kênh Telegram/webhook (loại không nằm trong
+`requests.RequestException`), sửa bằng bắt `Exception` rộng ở cả ba kênh
+mạng, đúng tinh thần cam kết "không bao giờ raise" là tuyệt đối, không
+phải "trừ khi thư viện ném loại tôi chưa liệt kê". Thêm
+`AlertType.TREND_GATE_CHANGE` — scaffold gốc thiếu dù
+phase-11-monitoring.md liệt kê "đổi trạng thái trend gate" là trigger
+riêng.
+
+**`monitoring/dashboard.py`**: `Dashboard` (rich) — 6 panel đúng §8.2.
+Scaffold gốc thiếu field cho hai panel VỊ THẾ/SIGNAL GẦN ĐÂY — bổ sung vào
+`DashboardState` (`position_direction`/`position_entry_price`/.../
+`recent_signals: tuple[RecentSignal, ...]`). "Phí tháng này" luôn hiển thị
+kể cả bằng 0 (nghiệm thu riêng). `render_text()` (Console record=True)
+cho test không cần TTY thật và cho "chụp màn hình dạng text".
+
+**Wire vào `main.py`** (không chỉ viết ba module rồi để đó chưa gọi):
+- `LiveLoopState` +2 field, cả hai có default (backward-compat với
+  snapshot cũ, xác nhận bằng test riêng):
+  - `cumulative_fees_paid` — phí THẬT đọc từ `OrderResult.raw_response["fee"]`/
+    `["fees"]` (cấu trúc ccxt chuẩn), KHÔNG ước lượng bằng
+    `costs.taker_fee_pct` (đó là số cho backtest). Bug thật bắt được qua
+    test: `log_state()` ban đầu gọi TRƯỚC khi cộng phí bar hiện tại — log
+    trễ một bar. Sửa bằng dời lệnh gọi xuống ngay trước `return`, sau khi
+    `cumulative_fees` đã cập nhật xong cho cả hai nhánh (approved/rejected).
+  - `current_trend_structure` — để `_fire_bar_alerts()` phát hiện đổi
+    trend-gate-state so với bar trước, cùng kỹ thuật `current_regime_id`
+    đã dùng từ Phase 10 (so giá trị CŨ trong `state` với giá trị MỚI vừa
+    tính trong CHÍNH bar này, không cần biến rời sống ngoài hàm).
+- `process_one_bar()`: +3 tham số optional (`alert_manager`,
+  `regime_state_logger`, `large_pnl_alert_pct`), mặc định giữ nguyên hành
+  vi 23 test Phase 10 đã có (không truyền = không đổi gì).
+- `run_live_loop()`: build cả hai, truyền vào mỗi bar; thêm
+  `AlertType.HMM_RETRAINED` sau retrain, `AlertType.API_LOST` ở catch-all
+  vòng ngoài.
+
+**Cố ý CHƯA wire** (không fabricate để "cho đủ"): `AlertType.STABLECOIN_DEPEG`
+liên tục (thiếu nguồn giá USDT/USD đáng tin đã kiểm chứng),
+`AlertType.CLOCK_DRIFT` liên tục mỗi bar (cần `ExchangeClient.get_server_time()`
+chưa tồn tại trong ABC), `LARGE_PNL` chiều LÃI (chỉ đọc được
+`CircuitBreaker.check().daily_dd`, vốn chỉ đo drawdown — chưa có equity
+history bar-over-bar để phát hiện P&L dương lớn), `main.py --dashboard`
+CLI (Dashboard class xong/test đầy đủ, nhưng `state_snapshot.json` hiện
+không lưu đủ field để dựng `DashboardState` sống mà không bịa số — đặc
+biệt `ws_connected`/`ws_last_message_seconds_ago`/`api_latency_ms` vốn
+cho kiến trúc WebSocket, hệ thống này đã đổi sang REST polling từ trước,
+xem mục "Đổi sàn Bybit -> Binance"). Ghi đầy đủ vào `docs/STATE.md` mục
+Phase 11 thay vì âm thầm bỏ qua.
+
+**Không xác nhận được** (cần mạng thật): gửi Telegram thật (chưa có token
+thật để thử — độc lập với việc testnet bị chặn, có thể làm khi có token),
+dashboard chạy với dữ liệu testnet thật (phụ thuộc cả hai gap ở trên).
+
+Test mới: `tests/test_monitoring_logger.py` (8), `tests/test_monitoring_alerts.py`
+(18), `tests/test_monitoring_dashboard.py` (10), mở rộng
+`tests/test_main_loop.py` (+12). 288 passed / 0 skipped. ruff + mypy sạch.

@@ -11,3 +11,4 @@ python-dotenv
 websockets
 rich
 pyarrow               # cache OHLCV dạng parquet
+requests              # monitoring/alerts.py — Telegram Bot API + webhook (đã có sẵn qua ccxt trước đây, giờ khai rõ vì được import trực tiếp)

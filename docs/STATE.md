@@ -5,7 +5,7 @@
 
 ## Đang ở đâu
 
-- Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 231 passed
+- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới). 288 passed
   / 0 skipped.
 - **`tests/test_frozen_files.py` mới (2026-08-07):** ghim SHA256 của
   `forward/logger.py`/`forward/config_frozen.yaml` vào
@@ -22,33 +22,30 @@
   vào từng file, xác nhận đỏ, khôi phục nguyên văn từ backup — xác nhận
   bằng hash lẫn `git diff --stat` rỗng cho cả hai). Thêm vào CLAUDE.md #15
   (7 file bắt buộc, tăng từ 6).
-- **`StrategyOrchestrator.generate_signal()` thuần — khoá bằng assertion,
-  không chỉ đọc code (2026-08-07):**
+- **`StrategyOrchestrator.generate_signal()` thuần — ĐÃ KHOÁ bằng
+  assertion, ĐÓNG (2026-08-07):**
   `tests/test_strategies.py::test_generate_signal_is_idempotent_no_hidden_state`
-  (test độc lập, 3 lần gọi cùng instance cùng input) VÀ giờ CŨNG có ngay
-  đầu `tests/test_wiring_equivalence.py` (2 lần gọi, `assert` inline,
-  ngay trước vòng lặp chính — dừng SỚM nếu tiền đề sai, thay vì để lộ ra
-  thành một lệch `final_allocation` khó chẩn đoán ở bar nào đó về sau).
-  `tests/test_bars_window_sensitivity.py` vẫn dựa vào tiền đề này nhưng
-  chưa có bản inline riêng (chỉ có test độc lập ở `test_strategies.py`
-  bảo vệ chung). Xác nhận CẢ HAI vị trí bằng mutation (CLAUDE.md #16):
-  thêm `_call_count` rò rỉ vào `reasoning` — cả hai đỏ đúng vị trí thiết
-  kế (đỏ ngay lần gọi thứ hai / đỏ ngay ở assertion inline trước vòng
-  lặp), revert sạch cả hai lần.
-- **Khoảng trống đã biết — GIẢM NHẸ, chưa đóng hẳn (2026-08-07):**
-  `core/signal_generator.py::SignalGenerator` (dùng bởi
-  `main.py::run_live_loop`, Phase 10) là đường nối dây thứ BA, độc lập với
+  (test độc lập, 3 lần gọi cùng instance cùng input) VÀ
+  `tests/test_wiring_equivalence.py` (commit `645afff`, 2 lần gọi,
+  `assert` inline ngay trước vòng lặp chính — dừng SỚM nếu tiền đề sai)
+  — CẢ HAI đã có assertion, cả hai đã xác nhận bằng mutation (CLAUDE.md
+  #16: `_call_count` rò rỉ vào `reasoning`, đỏ đúng vị trí thiết kế, revert
+  sạch). Không còn việc gì mở ở mục này. (`tests/test_bars_window_sensitivity.py`
+  vẫn dựa vào tiền đề này qua test độc lập ở `test_strategies.py` mà
+  không có bản inline riêng — chưa từng được yêu cầu, chỉ ghi chú, không
+  phải việc treo.)
+- **`core/signal_generator.py::SignalGenerator` là đường nối dây thứ BA
+  — rủi ro đã kiểm soát bằng `tests/test_wiring_equivalence.py`, không
+  hợp nhất theo thiết kế (2026-08-07):** độc lập với
   `forward/logger.py`/`tests/test_forward_golden.py` (cả hai gọi thẳng
   HMM/strategy/trend_gate/`compose_layer_allocations`, bỏ qua class
-  `SignalGenerator` hoàn toàn). Ba đường này CỐ TÌNH không hợp nhất
-  (`forward/logger.py` đóng băng, không sửa được) — thêm
-  `tests/test_wiring_equivalence.py` để BẢO ĐẢM không trôi lệch thay vì
-  hợp nhất: chạy cả ba đường trên cùng input (đồng bộ bằng hai
-  `HMMRegimeEngine` train giống hệt + xác nhận từng bar, không giả định
-  suông), khẳng định `hmm_allocation`/`trend_gate_cap`/`final_allocation`
-  khớp tuyệt đối. Xác nhận bằng mutation (CLAUDE.md #16): đổi `min()` ->
-  `max()` trong `SignalGenerator._apply_layer_caps()`, test đỏ ngay bar
-  đầu tiên, revert sạch. Đã thêm vào CLAUDE.md #15.
+  `SignalGenerator` hoàn toàn) — CỐ Ý không hợp nhất vì
+  `forward/logger.py` đóng băng, không sửa được.
+  `tests/test_wiring_equivalence.py` chạy cả ba đường trên cùng input
+  (đồng bộ bằng hai `HMMRegimeEngine` train giống hệt + xác nhận từng
+  bar), khẳng định `hmm_allocation`/`trend_gate_cap`/`final_allocation`
+  khớp tuyệt đối — xác nhận bằng mutation (đổi `min()` -> `max()` trong
+  `_apply_layer_caps()`, đỏ ngay bar đầu). Trong CLAUDE.md #15.
 - **`bars_window` (`ohlcv.loc[:ts].tail(300)` ở `forward/logger.py:558` vs
   `ohlcv.loc[:ts]` không giới hạn ở golden/`test_wiring_equivalence.py`)
   — ĐO XONG, ĐÓNG (2026-08-07).** Trước đó chỉ suy luận "vô hại" (EMA/ATR
@@ -190,6 +187,112 @@ worktree (`git worktree remove /tmp/pre-p10`).
 hai lần chạy), revert sạch (`git diff --stat` rỗng), full suite 227
 passed lại.
 
+## Phase 11 — Monitoring (`monitoring/`) — 2026-08-07
+
+Xây theo `prompts/phase-11-monitoring.md` + `docs/Brain-Crypto-Bybit.md` §8.
+`monitoring/logger.py`/`dashboard.py`/`alerts.py` tồn tại từ trước (scaffold
+— dataclass/enum đầy đủ, mọi method `raise NotImplementedError`) — phiên
+này implement thật, không viết lại scaffold.
+
+**Xong, có test, mutation-verified (CLAUDE.md #16):**
+- `monitoring/logger.py`: `get_logger()` JSONL thật (mỗi dòng MỘT object
+  JSON hợp lệ, khác quy ước tạm "asctime + json" của `monitoring/watchdog.py::_log_event`
+  — TODO của chính watchdog.py giờ có thể đóng, chưa làm ở phiên này),
+  `RotatingFileHandler` 10MB/30 backup (xem docstring module cho lý do đây
+  là proxy dung lượng, không phải lịch 30 ngày thật). Bug THẬT bắt được
+  qua chính test (không phải mutation cố ý): `logging.getLogger(name)`
+  dùng registry TOÀN CỤC theo tên — hai `log_dir` khác nhau cùng `name`
+  cộng dồn handler trên CÙNG object. Sửa bằng dựng `logging.Logger(...)`
+  trực tiếp, không qua registry.
+- `monitoring/alerts.py`: `AlertManager` — rate limit 1/loại/15 phút (mặc
+  định, cấu hình qua `monitoring.alert_rate_limit_seconds`) áp dụng CHUNG
+  cho mọi kênh của MỘT alert; console qua `logging.StreamHandler` riêng
+  (KHÔNG `print()` — nghiệm thu grep, xem dưới); Telegram (Bot API
+  `sendMessage`, credential từ env); email (SMTP, tuỳ chọn); webhook (tuỳ
+  chọn). `send()` cam kết không bao giờ raise — bắt RỘNG (`Exception`,
+  không chỉ `requests.RequestException`) ở cả ba kênh mạng, phát hiện qua
+  test tự đỏ khi mock ném `OSError` thay vì đúng loại hẹp đã đoán trước.
+  Thêm `AlertType.TREND_GATE_CHANGE` — scaffold gốc thiếu, dù
+  phase-11-monitoring.md liệt kê "đổi trạng thái trend gate" là một trigger
+  riêng.
+- `monitoring/dashboard.py`: `Dashboard` (rich) — 6 panel đúng §8.2
+  (REGIME/PORTFOLIO/VỊ THẾ/SIGNAL GẦN ĐÂY/RISK/HỆ THỐNG; scaffold gốc
+  thiếu hẳn field cho hai panel VỊ THẾ/SIGNAL GẦN ĐÂY, đã bổ sung vào
+  `DashboardState`). "Phí tháng này" luôn hiển thị kể cả 0. `render_text()`
+  (Console record=True) — dùng cho test không cần TTY và cho "chụp màn
+  hình dạng text".
+- Test mới: `tests/test_monitoring_logger.py` (8), `tests/test_monitoring_alerts.py`
+  (18), `tests/test_monitoring_dashboard.py` (10) — cộng thêm mở rộng
+  `tests/test_main_loop.py` (+12: fee tracking, `_fire_bar_alerts`,
+  `_check_spread_and_alert`, wiring end-to-end).
+
+**Wire vào `main.py` (thật, không phải để đó chưa gọi):**
+- `LiveLoopState` +2 field: `cumulative_fees_paid` (str(Decimal), cộng dồn
+  suốt phiên, đọc THẬT từ `OrderResult.raw_response["fee"]`/`["fees"]` —
+  KHÔNG ước lượng bằng `costs.taker_fee_pct`, xem `_extract_fee_paid()`),
+  `current_trend_structure` (để phát hiện đổi trend-gate-state). Cả hai có
+  default — snapshot cũ (trước Phase 11) vẫn load được, xác nhận bằng test
+  riêng. Bug THẬT bắt được qua test: `log_state()` ban đầu gọi TRƯỚC khi
+  phí bar hiện tại được cộng vào — log trễ một bar so với hành động thật;
+  sửa bằng dời lệnh gọi xuống sau khi `cumulative_fees` đã cập nhật xong.
+- `process_one_bar()`: +3 tham số optional (`alert_manager`,
+  `regime_state_logger`, `large_pnl_alert_pct`, mặc định `None`/`None`/`2.0`)
+  — KHÔNG đổi hành vi 23 test Phase 10 đã có (không truyền, giữ nguyên).
+  Khi được truyền (chỉ `run_live_loop()` truyền): ghi `regime.log` mỗi bar
+  KHÔNG breach, phát `_fire_bar_alerts()` (REGIME_CHANGE, TREND_GATE_CHANGE,
+  FLICKER_THRESHOLD_EXCEEDED, CIRCUIT_BREAKER, LARGE_PNL — chiều LỖ, xem
+  dưới) và `_check_spread_and_alert()` (ABNORMAL_SPREAD, DATA_FEED_LOST).
+- `run_live_loop()`: build `regime_state_logger`/`alert_manager`, truyền
+  vào mỗi `process_one_bar()`; thêm `AlertType.HMM_RETRAINED` sau retrain
+  thành công, `AlertType.API_LOST` ở catch-all vòng ngoài (rộng, không
+  phân loại — lưới hứng cho mọi lỗi chưa có nhánh riêng).
+
+**CHƯA wire — khoảng trống đã biết, không âm thầm giả định:**
+- `AlertType.STABLECOIN_DEPEG`: `RiskManager.check_stablecoin_peg()` đã có
+  sẵn từ trước (Phase 5/§5.4) nhưng cần một nguồn giá USDT/USD đáng tin —
+  chưa chọn/xác nhận nguồn nào trên Binance spot, không bịa bằng cặp proxy
+  (vd. USDC/USDT) chưa kiểm chứng.
+- `AlertType.CLOCK_DRIFT` liên tục mỗi bar: `ops/health_check.py::check_exchange_reachable`
+  đã đo lệch giờ nhưng chỉ chạy MỘT LẦN lúc khởi động (bước 1-2). Đo liên
+  tục cần `ExchangeClient.get_server_time()` — chưa thêm vào ABC
+  (`broker/base.py`), chưa đánh giá ảnh hưởng lên `broker/bybit_client.py`
+  (deprecated, vẫn phải thoả ABC).
+- `LARGE_PNL` chỉ phát hiện chiều LỖ (đọc `CircuitBreaker.check().daily_dd`,
+  vốn chỉ đo drawdown) — chưa có theo dõi equity TĂNG bar-over-bar để phát
+  hiện P&L DƯƠNG lớn bất thường.
+- `main.py --dashboard` vẫn `raise NotImplementedError` — KHÔNG đổi.
+  `Dashboard` class đã xong/test đầy đủ, nhưng dựng `DashboardState` sống
+  cần dữ liệu `LiveLoopState`/`state_snapshot.json` hiện KHÔNG lưu
+  (`regime_probability` chính xác tại thời điểm gần nhất, chi tiết cửa sổ
+  flicker, và `ws_connected`/`ws_last_message_seconds_ago`/`api_latency_ms`
+  vốn dành cho kiến trúc WebSocket — hệ thống này REST polling, xem mục
+  "Đổi sàn Bybit -> Binance" — hai field đó không có nghĩa thật để điền).
+  Quyết định CÓ CHỦ Ý: không fabricate giá trị placeholder cho những field
+  này chỉ để `--dashboard` "chạy được" — cần một thiết kế riêng (lưu thêm
+  gì vào snapshot, hay tính lại từ đầu) trước khi wire.
+
+**KHÔNG xác nhận được (cần testnet thật, đang bị chặn — xem mục dưới):**
+- Nghiệm thu "Dashboard chạy được với dữ liệu thật từ testnet, chụp lại
+  màn hình dạng text" — CHƯA làm được (phụ thuộc mục `--dashboard` ở trên,
+  và phụ thuộc testnet).
+- Nghiệm thu "Kích hoạt thủ công từng loại alert, xác nhận nhận được trên
+  Telegram" — `AlertManager._send_telegram()` có test mock đầy đủ (payload
+  đúng, không raise khi lỗi mạng, không log token) nhưng CHƯA gửi được một
+  tin nhắn Telegram THẬT (chưa có `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
+  thật để thử — không phải bị chặn bởi testnet, độc lập với Binance, có
+  thể làm bất cứ lúc nào có token thật).
+- `grep -rn "print(" monitoring/ core/ broker/`: có kết quả, nhưng KHÔNG
+  phải vi phạm — đọc kỹ từng dòng: (1) nhắc tới chuỗi `print(` trong
+  DOCSTRING của `monitoring/alerts.py`/`logger.py`/`watchdog.py` (mô tả
+  quy tắc, không phải lời gọi); (2) `monitoring/dashboard.py`:
+  `self.console.print(...)`/`capture.print(...)` — method `rich.console.Console.print()`,
+  không phải hàm `print()` built-in, đúng cách rich vẽ ra terminal; (3)
+  `broker/base.py:51`/`broker/bybit_client.py:182` — `print("⚠️ LIVE
+  TRADING...")` trong `require_live_confirmation()`, CÓ TỪ TRƯỚC Phase 11
+  (không phải tôi thêm), lời nhắc tương tác cho người gõ xác nhận mainnet,
+  cùng tinh thần `ops/health_check.py::main()` in kết quả CLI. Không tự ý
+  sửa hai chỗ pre-existing này trong phiên này — ngoài phạm vi Phase 11.
+
 ## Git remote — đã đổi tài khoản, ĐÃ GIẢI QUYẾT (2026-08-07)
 
 `origin` đổi từ `tuananh12022/roi-trading-bot` (SSH) sang
@@ -213,19 +316,26 @@ main.py" cho việc này — không phải chỗ hỏng.
 
 ## Việc còn treo, theo thứ tự ưu tiên
 
-1. Copy `phase-12b-harness-engineering.md` và `phase-12c-shadow-deploy.md`
-   vào `prompts/` (đã soạn, chưa có trong repo).
-2. Điền `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` + nghiệm thu qua mạng
+1. Điền `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` + nghiệm thu qua mạng
    thật (CCXTClient submit_order/cancel_order/idempotency; main.py
-   kill+restart thật; `--dry-run` 24h) — **TẠM DỪNG**, chờ testnet hết bị
-   chặn ở tầng tài khoản GitHub.
-3. Phase 11 (monitoring/dashboard, `--dashboard` hiện raise
-   `NotImplementedError` trong `main.py`).
+   kill+restart thật; `--dry-run` 24h; dashboard/Telegram thật, xem mục
+   Phase 11 ở trên) — **TẠM DỪNG**, chờ testnet hết bị chặn ở tầng tài
+   khoản GitHub.
+2. `main.py --dashboard` — thiết kế dữ liệu cần lưu thêm vào
+   `LiveLoopState`/`state_snapshot.json` (hoặc tính lại từ đầu mỗi lần
+   render) trước khi wire `Dashboard` thật vào CLI, xem mục Phase 11 "CHƯA
+   wire" ở trên cho chi tiết field còn thiếu.
+3. `AlertType.STABLECOIN_DEPEG`/`CLOCK_DRIFT` liên tục mỗi bar — cần chọn
+   nguồn giá USDT/USD và thêm `ExchangeClient.get_server_time()` (xem mục
+   Phase 11 ở trên).
+4. Phase 12b (`prompts/phase-12b-harness-engineering.md`) /
+   Phase 12c (`prompts/phase-12c-shadow-deploy.md`) — đã có trong `prompts/`,
+   chưa bắt đầu xây.
 
 ## Việc tiếp theo
 
-[testnet hết bị chặn] -> nghiệm thu CCXTClient + main.py qua mạng thật ->
-Phase 11 (monitoring/dashboard).
+[testnet hết bị chặn] -> nghiệm thu CCXTClient + main.py + dashboard/Telegram
+qua mạng thật -> Phase 12b (harness engineering) -> Phase 12c (shadow deploy).
 
 ## Quy tắc đã học, không lặp lại
 

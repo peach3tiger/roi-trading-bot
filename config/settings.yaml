@@ -124,3 +124,18 @@ backtest:
   oos_bars: 182                # out-of-sample 6 tháng
   step_bars: 182
   fill_delay_bars: 1
+
+# Phase 11 (monitoring/logger.py, monitoring/dashboard.py, monitoring/alerts.py)
+# — thêm 2026-08-07, chưa có field nào ở đây trước đó (CLAUDE.md bất biến
+# #14). Credential Telegram/email KHÔNG nằm ở đây — đọc từ .env
+# (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID), xem monitoring/alerts.py::AlertManager.
+monitoring:
+  log_dir: "logs"                    # main.log/trades.log/alerts.log/regime.log
+  dashboard_refresh_seconds: 5       # §8.2
+  alert_rate_limit_seconds: 900      # 1 cảnh báo / loại sự kiện / 15 phút, §8.3
+  # Cảnh báo SỚM HƠN circuit_breaker.daily_dd_reduce_pct (3.85, xem risk.circuit_breaker
+  # ở trên) — một tín hiệu "chú ý" trước khi breaker thật sự can thiệp vào
+  # allocation. CHỈ phát hiện chiều LỖ (đọc từ CircuitBreaker.check().daily_dd,
+  # vốn chỉ đo drawdown) — chưa có theo dõi equity tăng bar-over-bar để phát
+  # hiện P&L DƯƠNG lớn, xem docs/STATE.md mục Phase 11 cho khoảng trống này.
+  large_pnl_alert_pct: 2.0

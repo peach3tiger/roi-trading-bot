@@ -423,6 +423,39 @@ def build_signal_generator(
     )
 
 
+def build_alert_manager(settings: dict[str, Any]) -> Any:
+    """Credential đọc từ env, KHÔNG từ settings.yaml (CLAUDE.md bất biến
+    #6, cùng quy ước `build_exchange_client`). Kênh email chỉ bật khi
+    `MONITORING_SMTP_HOST` có giá trị — thiếu MỘT trong các biến
+    `MONITORING_SMTP_*`/`MONITORING_EMAIL_*` còn lại sẽ để trống ("")
+    trong `EmailConfig`, KHÔNG raise ở đây (SMTP thật sự thất bại lúc gửi
+    sẽ tự lộ ra qua log warning của `_send_email`, không cần validate hai
+    lần); webhook tương tự, chỉ cần `MONITORING_WEBHOOK_URL`."""
+    import os
+
+    from monitoring.alerts import AlertManager, EmailConfig
+
+    mon = settings["monitoring"]
+    email_config = None
+    smtp_host = os.environ.get("MONITORING_SMTP_HOST")
+    if smtp_host:
+        email_config = EmailConfig(
+            smtp_host=smtp_host,
+            smtp_port=int(os.environ.get("MONITORING_SMTP_PORT", "587")),
+            username=os.environ.get("MONITORING_SMTP_USERNAME", ""),
+            password=os.environ.get("MONITORING_SMTP_PASSWORD", ""),
+            from_addr=os.environ.get("MONITORING_EMAIL_FROM", ""),
+            to_addr=os.environ.get("MONITORING_EMAIL_TO", ""),
+        )
+
+    return AlertManager(
+        rate_limit_seconds=int(mon["alert_rate_limit_seconds"]),
+        email_config=email_config,
+        webhook_url=os.environ.get("MONITORING_WEBHOOK_URL") or None,
+        log_dir=mon["log_dir"],
+    )
+
+
 # ----------------------------------------------------------------------
 # Backtest
 # ----------------------------------------------------------------------
@@ -750,6 +783,21 @@ class LiveLoopState:
     current_regime_label: str | None
     session_started_at_utc: str  # đặt lại mỗi lần run_live_loop() khởi động, KHÔNG khôi phục từ snapshot cũ
     written_at_utc: str
+    # str(Decimal), cộng dồn TOÀN BỘ phiên (không reset theo ngày/tháng —
+    # dashboard tự trừ để ra "phí tháng này", xem build_dashboard_state()).
+    # default="0" (không phải field bắt buộc) để snapshot cũ (trước khi
+    # field này tồn tại) vẫn load được qua load_state_snapshot() — thiếu
+    # field mới trong JSON cũ dùng default, KHÔNG bị coi là "hỏng" (xem
+    # docstring load_state_snapshot bên dưới).
+    cumulative_fees_paid: str = "0"
+    # StructureState.value ("BULL_STRUCTURE"/"TRANSITION"/"BEAR_STRUCTURE")
+    # của lần tính gần nhất — None = chưa tính lần nào (phiên mới/snapshot
+    # cũ trước field này tồn tại). Dùng để phát AlertType.TREND_GATE_CHANGE
+    # (so với giá trị MỚI tính trong cùng bar, xem _fire_bar_alerts) mà
+    # không cần một biến rời sống ngoài LiveLoopState — cùng kỹ thuật đã
+    # dùng cho current_regime_id (so state.current_regime_id CŨ với
+    # regime_id MỚI ngay trong process_one_bar()).
+    current_trend_structure: str | None = None
 
 
 def write_state_snapshot(path: Path, state: LiveLoopState) -> None:
@@ -778,6 +826,160 @@ def load_state_snapshot(path: Path) -> LiveLoopState | None:
         return None
 
 
+def _extract_fee_paid(order_result: Any) -> Decimal:
+    """Phí THẬT trả cho lệnh vừa khớp, đọc từ `OrderResult.raw_response`
+    (dict thô ccxt trả về nguyên văn từ `create_order`) — KHÔNG ước lượng
+    bằng `costs.taker_fee_pct` (đó là con số cho BACKTEST, nơi không có phí
+    thật để đọc; ở live, luôn ưu tiên số sàn thật sự tính, xem CLAUDE.md
+    bất biến #7 "mọi báo cáo phải in phí đã trả THEO USDT").
+
+    ccxt chuẩn hoá cấu trúc order trả về, phí nằm ở MỘT trong hai chỗ tuỳ
+    sàn/loại lệnh:
+      - `fee`: {"cost": ..., "currency": ...} — một khoản phí duy nhất.
+      - `fees`: [{"cost": ..., "currency": ...}, ...] — nhiều khoản (lệnh
+        khớp từng phần qua nhiều lần khớp, mỗi lần một dòng phí).
+    Trả `Decimal("0")` nếu không có field nào (lệnh NEW chưa khớp — market
+    order Binance spot trả `fee` ngay khi khớp đồng bộ, nhưng LIMIT có thể
+    chưa khớp lúc response trả về) — KHÔNG raise, "chưa biết phí" khác
+    "phí bằng 0 thật", nhưng caller không có cách phân biệt hai điều đó từ
+    mỗi lần gọi riêng lẻ; ghi nhận giới hạn này, không bịa số.
+    """
+    raw = getattr(order_result, "raw_response", None) or {}
+    fee = raw.get("fee")
+    if isinstance(fee, dict) and fee.get("cost") is not None:
+        return Decimal(str(fee["cost"]))
+
+    fees = raw.get("fees")
+    if isinstance(fees, list) and fees:
+        total = Decimal("0")
+        for entry in fees:
+            if isinstance(entry, dict) and entry.get("cost") is not None:
+                total += Decimal(str(entry["cost"]))
+        return total
+
+    return Decimal("0")
+
+
+def _fire_bar_alerts(
+    *,
+    alert_manager: Any,
+    signal_generator: Any,
+    state: LiveLoopState,
+    result: Any,
+    regime_id: int,
+    regime_label: str,
+    new_trend_structure: str,
+    large_pnl_alert_pct: Decimal,
+) -> None:
+    """Phát các cảnh báo suy được TRỰC TIẾP từ một lần gọi
+    `signal_generator.generate()` — REGIME_CHANGE, TREND_GATE_CHANGE,
+    FLICKER_THRESHOLD_EXCEEDED, CIRCUIT_BREAKER, LARGE_PNL (Phase 11,
+    prompts/phase-11-monitoring.md). `AlertManager.send()` tự đảm bảo
+    không bao giờ raise (xem monitoring/alerts.py), nên hàm này không cần
+    try/except riêng.
+
+    So sánh "đổi" dựa trên `state` (giá trị CŨ, đầu vào của bar này) với
+    giá trị MỚI vừa tính trong CHÍNH bar này — không cần biến rời sống
+    ngoài `process_one_bar()`, cùng kỹ thuật `current_regime_id` đã dùng
+    từ Phase 10.
+
+    KHÔNG bao gồm ABNORMAL_SPREAD/DATA_FEED_LOST/API_LOST/HMM_RETRAINED —
+    những cái cần đọc mạng ngoài phạm vi một lần generate(), xem
+    run_live_loop()/process_one_bar() gọi riêng. STABLECOIN_DEPEG/
+    CLOCK_DRIFT: `AlertType` đã có sẵn giá trị (kích hoạt thủ công được),
+    nhưng CHƯA wire liên tục ở đây — thiếu nguồn giá tham chiếu USDT/USD
+    đáng tin (depeg) và cần `ExchangeClient.get_server_time()` chưa tồn
+    tại (clock drift); ghi nhận là khoảng trống đã biết ở docs/STATE.md,
+    không âm thầm giả định.
+    """
+    from monitoring.alerts import Alert, AlertType
+
+    if state.current_regime_id is not None and state.current_regime_id != regime_id:
+        alert_manager.send(
+            Alert(
+                AlertType.REGIME_CHANGE,
+                f"{state.current_regime_label} -> {regime_label} "
+                f"(id {state.current_regime_id} -> {regime_id})",
+                severity="INFO",
+            )
+        )
+
+    if state.current_trend_structure is not None and state.current_trend_structure != new_trend_structure:
+        alert_manager.send(
+            Alert(
+                AlertType.TREND_GATE_CHANGE,
+                f"{state.current_trend_structure} -> {new_trend_structure}",
+                severity="INFO",
+            )
+        )
+
+    if result.is_flickering:
+        alert_manager.send(
+            Alert(
+                AlertType.FLICKER_THRESHOLD_EXCEEDED,
+                f"Regime flicker rate vượt ngưỡng (regime hiện tại: {regime_label}).",
+                severity="WARNING",
+            )
+        )
+
+    breaker_history = signal_generator.risk_manager.circuit_breaker.get_history()
+    if breaker_history:
+        breaker = breaker_history[-1]
+        if breaker.level.value != "NONE":
+            alert_manager.send(
+                Alert(
+                    AlertType.CIRCUIT_BREAKER,
+                    f"{breaker.level.value} — daily_dd={breaker.daily_dd:.2f}% "
+                    f"weekly_dd={breaker.weekly_dd:.2f}% peak_dd={breaker.peak_dd:.2f}%",
+                    severity="ERROR" if "HALT" in breaker.level.value else "WARNING",
+                )
+            )
+        if breaker.daily_dd >= large_pnl_alert_pct:
+            # Chiều LỖ — xem chú thích monitoring.large_pnl_alert_pct ở
+            # config/settings.yaml cho lý do chưa phát hiện chiều LÃI lớn.
+            alert_manager.send(
+                Alert(
+                    AlertType.LARGE_PNL,
+                    f"Daily drawdown {breaker.daily_dd:.2f}% >= ngưỡng cảnh báo {large_pnl_alert_pct}%.",
+                    severity="WARNING",
+                )
+            )
+
+
+def _check_spread_and_alert(
+    *, alert_manager: Any, risk_manager: Any, exchange_client: Any, symbol: str
+) -> None:
+    """ABNORMAL_SPREAD (spread rộng bất thường, đọc `RiskManager.check_spread()`
+    đã có sẵn từ §5.4 nhưng CHƯA từng được `validate_signal()` gọi tới —
+    xem ghi chú docs/STATE.md) và DATA_FEED_LOST (không lấy được orderbook)
+    — hai cảnh báo duy nhất cần một lượt gọi mạng NGOÀI những gì
+    `signal_generator.generate()` đã tự làm, nên tách khỏi `_fire_bar_alerts()`.
+
+    Không raise ra ngoài: một lần fetch orderbook lỗi (mất feed) tự nó LÀ
+    điều cần cảnh báo (DATA_FEED_LOST), không phải lý do làm crash bar
+    đang xử lý — bar vẫn tiếp tục dùng OHLCV/feature đã tải được.
+    """
+    from monitoring.alerts import Alert, AlertType
+
+    try:
+        orderbook = exchange_client.get_orderbook(symbol)
+    except Exception as exc:
+        alert_manager.send(
+            Alert(AlertType.DATA_FEED_LOST, f"Không lấy được orderbook {symbol}: {exc}", severity="ERROR")
+        )
+        return
+
+    if not risk_manager.check_spread(orderbook.best_bid, orderbook.best_ask):
+        alert_manager.send(
+            Alert(
+                AlertType.ABNORMAL_SPREAD,
+                f"Spread {symbol} bất thường: bid={orderbook.best_bid} ask={orderbook.best_ask} "
+                f"(trần {risk_manager.spread_max_pct}%)",
+                severity="WARNING",
+            )
+        )
+
+
 def process_one_bar(
     *,
     symbol: str,
@@ -789,6 +991,9 @@ def process_one_bar(
     bar_ts: Any,
     state: LiveLoopState,
     dry_run: bool,
+    alert_manager: Any | None = None,
+    regime_state_logger: Any | None = None,
+    large_pnl_alert_pct: Decimal = Decimal("2.0"),
 ) -> LiveLoopState:
     """Xử lý ĐÚNG MỘT bar đã đóng. Tách khỏi vòng lặp poll để test được
     bằng fake, không cần `time.sleep`/vòng lặp vô hạn thật — xem
@@ -820,6 +1025,17 @@ def process_one_bar(
     `state` đã trả về ở lần gọi trước (không ghi đè) — hiệu quả giống hệt
     "giữ nguyên regime" mà không cần hai lớp try/except lồng nhau cho
     cùng một kết quả.
+
+    `alert_manager`/`regime_state_logger` (Phase 11, monitoring/) mặc định
+    `None` — KHÔNG đổi hành vi hàm này với 23 test đã có ở
+    tests/test_main_loop.py trước Phase 11 (không truyền hai tham số này).
+    Khi được truyền (chỉ `run_live_loop()` truyền trong vận hành thật):
+      - `regime_state_logger`: ghi MỘT dòng JSON (`monitoring.logger.log_state`)
+        mỗi bar KHÔNG breach — bỏ qua nhánh breach (regime/probability lúc
+        đó không được tính lại, xem code, thà thiếu một dòng log còn hơn
+        log lại giá trị regime CŨ dán nhãn nhầm là "vừa tính").
+      - `alert_manager`: xem `_fire_bar_alerts()` cho danh sách đầy đủ
+        loại cảnh báo được phát từ bar này.
     """
     risk_manager = signal_generator.risk_manager
     risk_manager.reset_daily()
@@ -828,6 +1044,7 @@ def process_one_bar(
 
     close_price = Decimal(str(ohlcv.loc[bar_ts, "close"]))
     now_iso = datetime.now(timezone.utc).isoformat()
+    cumulative_fees = Decimal(state.cumulative_fees_paid) if state.cumulative_fees_paid else Decimal("0")
 
     current_stop = Decimal(state.current_stop_loss) if state.current_stop_loss else None
     if current_stop is not None and close_price <= current_stop:
@@ -841,12 +1058,14 @@ def process_one_bar(
             logger.info(
                 "close_position(%s) -> order_id=%s status=%s", symbol, result.order_id, result.status
             )
+            cumulative_fees += _extract_fee_paid(result)
             position_tracker.poll()
         return replace(
             state,
             last_processed_bar=bar_ts.date().isoformat(),
             current_stop_loss=None,
             current_allocation_pct="0",
+            cumulative_fees_paid=str(cumulative_fees),
             written_at_utc=now_iso,
         )
 
@@ -855,6 +1074,14 @@ def process_one_bar(
     )
     bars_window = ohlcv.loc[:bar_ts].tail(_STRATEGY_BARS_LOOKBACK)
     features_so_far = features.loc[:bar_ts]
+
+    if alert_manager is not None:
+        _check_spread_and_alert(
+            alert_manager=alert_manager,
+            risk_manager=risk_manager,
+            exchange_client=order_executor.exchange_client,
+            symbol=symbol,
+        )
 
     balance = order_executor.exchange_client.get_balance()
     positions = {p.symbol: p for p in order_executor.exchange_client.get_positions()}
@@ -887,6 +1114,19 @@ def process_one_bar(
     decision = result.decision
     regime_id = result.regime_state.state_id
     regime_label = result.regime_state.label
+    new_trend_structure = signal_generator.trend_gate.get_structure_state(bars_window).value
+
+    if alert_manager is not None:
+        _fire_bar_alerts(
+            alert_manager=alert_manager,
+            signal_generator=signal_generator,
+            state=state,
+            result=result,
+            regime_id=regime_id,
+            regime_label=regime_label,
+            new_trend_structure=new_trend_structure,
+            large_pnl_alert_pct=large_pnl_alert_pct,
+        )
 
     if decision.approved:
         signal = decision.modified_signal
@@ -912,6 +1152,7 @@ def process_one_bar(
                 order_result.status,
                 order_result.filled_qty,
             )
+            cumulative_fees += _extract_fee_paid(order_result)
             applied = order_executor.modify_stop(signal.symbol, signal.stop_loss)
             if not applied:
                 logger.info("modify_stop(%s): không siết chặt hơn stop hiện tại — giữ nguyên.", signal.symbol)
@@ -923,6 +1164,23 @@ def process_one_bar(
         new_stop = current_stop
         new_allocation = current_allocation
 
+    if regime_state_logger is not None:
+        # Ghi SAU khi cumulative_fees đã cộng phí lệnh của CHÍNH bar này
+        # (nếu có submit_order/close_position ở trên) — log ĐÚNG lúc mọi
+        # phép cộng phí của bar đã xong, không phải giá trị "trước khi vào
+        # bar", tránh entry log trễ một bar so với hành động thật.
+        from monitoring.logger import log_state
+
+        log_state(
+            regime_state_logger,
+            regime=regime_label,
+            probability=result.regime_state.probability,
+            equity=equity,
+            positions=positions,
+            daily_pnl=portfolio_state.daily_pnl,
+            cumulative_fees_paid=cumulative_fees,
+        )
+
     return LiveLoopState(
         last_processed_bar=bar_ts.date().isoformat(),
         current_stop_loss=str(new_stop) if new_stop is not None else None,
@@ -931,6 +1189,8 @@ def process_one_bar(
         current_regime_label=regime_label,
         session_started_at_utc=state.session_started_at_utc,
         written_at_utc=now_iso,
+        cumulative_fees_paid=str(cumulative_fees),
+        current_trend_structure=new_trend_structure,
     )
 
 
@@ -1046,6 +1306,16 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
 
     signal_generator = build_signal_generator(settings, hmm_engine, halt_lock_path=halt_lock_path)
 
+    # Phase 11 (monitoring/) — log JSON có cấu trúc + cảnh báo. Đặt SAU
+    # khi mọi builder khác đã xong (không cần cho tới đây), TRƯỚC vòng
+    # lặp poll để cả state phục hồi lẫn bar đầu tiên đều được log/cảnh báo.
+    from monitoring.logger import get_logger
+
+    log_dir = settings["monitoring"]["log_dir"]
+    regime_state_logger = get_logger("regime", log_dir)
+    alert_manager = build_alert_manager(settings)
+    large_pnl_alert_pct = Decimal(str(settings["monitoring"]["large_pnl_alert_pct"]))
+
     # Bước 7 — khôi phục state_snapshot.json.
     restored = load_state_snapshot(snapshot_path)
     if restored is not None:
@@ -1123,6 +1393,15 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
                     hmm_engine.select_and_train(features)
                     hmm_engine.save(str(model_path))
                     logger.info("Retrain xong, đã lưu %s.", model_path)
+                    from monitoring.alerts import Alert, AlertType
+
+                    alert_manager.send(
+                        Alert(
+                            AlertType.HMM_RETRAINED,
+                            f"Retrain xong tại bar {latest_bar.date()}, đã lưu {model_path}.",
+                            severity="INFO",
+                        )
+                    )
             except Exception:
                 logger.error(
                     "Lỗi retrain HMM — GIỮ NGUYÊN model cũ, không dừng vòng lặp.", exc_info=True
@@ -1138,10 +1417,13 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
                 bar_ts=latest_bar,
                 state=state,
                 dry_run=dry_run,
+                alert_manager=alert_manager,
+                regime_state_logger=regime_state_logger,
+                large_pnl_alert_pct=large_pnl_alert_pct,
             )
             write_state_snapshot(snapshot_path, state)
 
-        except Exception:
+        except Exception as exc:
             # "Lỗi không bắt được: log traceback, ghi trạng thái, cảnh
             # báo" (spec §Xử lý lỗi) — `state` ở đây vẫn là kết quả của
             # lần process_one_bar() THÀNH CÔNG gần nhất (chưa bị ghi đè
@@ -1150,6 +1432,18 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
             # mà không cần bắt riêng exception HMM ở process_one_bar.
             logger.error("Lỗi không bắt được trong vòng lặp chính — ghi trạng thái, tiếp tục.", exc_info=True)
             write_state_snapshot(snapshot_path, state)
+            # API_LOST — cố tình RỘNG (không phân loại theo loại exception):
+            # đây là điểm bắt "mọi thứ khác" của toàn vòng lặp (REST tải
+            # OHLCV, tính feature, generate signal, submit order, ...),
+            # không có cách phân biệt rẻ "lỗi mạng" khỏi "lỗi logic" ở tầng
+            # này. DATA_FEED_LOST (hẹp hơn, riêng cho orderbook) đã tách
+            # riêng ở _check_spread_and_alert() — cái này là lưới hứng còn
+            # lại, ưu tiên báo CÓ sự cố hơn là chính xác tuyệt đối loại sự cố.
+            from monitoring.alerts import Alert, AlertType
+
+            alert_manager.send(
+                Alert(AlertType.API_LOST, f"Lỗi không bắt được trong vòng lặp chính: {exc}", severity="ERROR")
+            )
 
         time.sleep(poll_interval)
 
