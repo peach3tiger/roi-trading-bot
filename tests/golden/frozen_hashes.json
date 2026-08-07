@@ -1,0 +1,11 @@
+{
+  "meta": {
+    "note": "SHA256 ghim cho tests/test_frozen_files.py — KHÔNG tự regenerate để test xanh lại. Đổi hash chỉ khi CỐ Ý kết thúc thí nghiệm forward hiện tại, ghi lý do vào docs/DECISIONS.md TRƯỚC. Xem docstring tests/test_frozen_files.py.",
+    "experiment_started": "2026-08-06",
+    "pinned_at": "2026-08-07"
+  },
+  "files": {
+    "forward/logger.py": "20a9474d3357cdd9ca2463910c07b9d50c66cfc4ef78e7b9e7d60106742e0ff9",
+    "forward/config_frozen.yaml": "be741c659bc5a11d607955e64ec27cb0b194c1b6c368ca09704b8d056a1ec15c"
+  }
+}

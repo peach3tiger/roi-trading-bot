@@ -1022,3 +1022,42 @@ gọi thứ hai (`reasoning` lệch `[MUTATION call=1]` vs `[MUTATION call=2]`),
 rỗng).
 
 230 passed / 0 skipped. ruff + mypy sạch 54 file.
+
+---
+
+## `tests/test_frozen_files.py` — ghim SHA256 hai file thí nghiệm đóng băng (2026-08-07)
+
+`forward/logger.py` được TUYÊN BỐ đóng băng ("KHÔNG BAO GIỜ được sửa",
+docstring module) nhưng trước bản này KHÔNG có gì tự động kiểm tra điều
+đó — chỉ có kỷ luật đọc kỹ trước khi commit. `forward/config_frozen.yaml`
+đã có hash-kiểm RIÊNG nhưng chỉ ở TẦNG RUNTIME (`forward/config_frozen.sha256`,
+kiểm tra bên trong `load_frozen_settings()`, chỉ chạy khi `run_forward_test()`
+thật sự được gọi qua launchd) — một thay đổi tới file đó vẫn có thể lọt
+qua `pytest`/CI thường nếu không ai chạy forward test trong lúc đó.
+
+**Thêm `tests/test_frozen_files.py`**: ghim SHA256 của cả hai file vào
+`tests/golden/frozen_hashes.json`, kiểm tra ở TẦNG TEST SUITE — chạy mỗi
+lần `pytest`, không phụ thuộc forward test có chạy hay không. Thông báo
+lỗi khi FAIL nêu rõ: đây là thí nghiệm 12 tháng bắt đầu 2026-08-06, sửa
+file (dù vô tình hay cố ý) nghĩa là thí nghiệm hiện tại kết thúc tại đúng
+thời điểm đó, phải ghi `docs/DECISIONS.md` TRƯỚC khi cập nhật hash cho
+thí nghiệm mới — không được sửa hash để test xanh lại.
+
+**Hash ghim phản ánh trạng thái `forward/logger.py` SAU khi thêm đoạn
+docstring "ĐO `bars_window`"** (mục ngay trên đây) — lần sửa DUY NHẤT
+từng được yêu cầu tường minh, xảy ra TRƯỚC khi `tests/test_frozen_files.py`
+tồn tại. Từ lúc ghim hash này, không còn ngoại lệ nào nữa cho
+`forward/logger.py`, kể cả một dòng comment.
+
+**Xác nhận bằng mutation (CLAUDE.md #16), làm cẩn thận vì đây là file
+nhạy cảm nhất repo:** backup cả hai file ra `/tmp` trước, xác nhận backup
+byte-for-byte giống bản gốc (so hash). Append một dòng comment vào
+`forward/logger.py` — test đỏ đúng thông điệp thiết kế. Khôi phục từ
+backup, xác nhận hash khớp lại + `git diff --stat` rỗng. Lặp lại y hệt
+cho `forward/config_frozen.yaml` (mutate riêng, đỏ riêng, khôi phục riêng,
+xác nhận riêng) — không mutate cả hai cùng lúc, để biết chắc test bắt
+được TỪNG file một, không chỉ tổng thể.
+
+Thêm vào CLAUDE.md #15 (7 file bắt buộc, tăng từ 6).
+
+231 passed / 0 skipped. ruff + mypy sạch.

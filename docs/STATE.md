@@ -5,8 +5,23 @@
 
 ## Đang ở đâu
 
-- Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 230 passed
+- Phase 1–10 xong (Phase 10 = main loop, 2026-08-07, xem dưới). 231 passed
   / 0 skipped.
+- **`tests/test_frozen_files.py` mới (2026-08-07):** ghim SHA256 của
+  `forward/logger.py`/`forward/config_frozen.yaml` vào
+  `tests/golden/frozen_hashes.json` — FAIL nếu MỘT TRONG HAI file đổi, dù
+  vô tình hay cố ý, dù chỉ một dòng comment. Bổ sung lớp bảo vệ Ở TẦNG
+  TEST SUITE cho `forward/config_frozen.yaml` (đã có hash-kiểm riêng ở
+  tầng RUNTIME qua `forward/config_frozen.sha256`, không đổi) và lần đầu
+  tiên bảo vệ CHÍNH `forward/logger.py` (trước đây chỉ "đóng băng" bằng
+  quy ước docstring, không có gì kiểm tra tự động). Hash ghim PHẢN ÁNH
+  `forward/logger.py` SAU khi thêm đoạn docstring "ĐO bars_window" (lần
+  sửa duy nhất, được yêu cầu tường minh, xảy ra TRƯỚC khi file test này
+  tồn tại) — từ giờ, không còn ngoại lệ nào nữa. Xác nhận bằng mutation
+  (CLAUDE.md #16) trên CẢ HAI file riêng biệt (append một dòng comment
+  vào từng file, xác nhận đỏ, khôi phục nguyên văn từ backup — xác nhận
+  bằng hash lẫn `git diff --stat` rỗng cho cả hai). Thêm vào CLAUDE.md #15
+  (7 file bắt buộc, tăng từ 6).
 - **`StrategyOrchestrator.generate_signal()` thuần — khoá bằng assertion,
   không chỉ đọc code (2026-08-07):**
   `tests/test_strategies.py::test_generate_signal_is_idempotent_no_hidden_state`

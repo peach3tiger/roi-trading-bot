@@ -152,8 +152,15 @@ Không magic number trong code. Nếu một con số có thể cần chỉnh, n�
   chúng không trôi lệch. FAIL nghĩa là `SignalGenerator` (đường duy nhất
   trong ba đường còn sống, có thể bị sửa) đã trôi khỏi hai đường kia —
   xem docstring đầu file để biết cách chẩn đoán.
+- `test_frozen_files.py` — ghim SHA256 của `forward/logger.py` và
+  `forward/config_frozen.yaml` (`tests/golden/frozen_hashes.json`). FAIL
+  nghĩa là một trong hai file đã đổi — DÙ VÔ TÌNH HAY CỐ Ý, dù chỉ một
+  dòng comment. **Không được sửa hash để cho qua.** Đổi hash CHỈ khi CỐ Ý
+  kết thúc thí nghiệm forward hiện tại (bắt đầu 2026-08-06) và bắt đầu
+  thí nghiệm mới — ghi lý do + ngày vào `docs/DECISIONS.md` TRƯỚC. Xem
+  docstring đầu file.
 
-Sáu file này không được skip, không được xfail, không được comment out.
+Bảy file này không được skip, không được xfail, không được comment out.
 
 ### 16. Mọi phép kiểm tra mới phải được chứng minh bằng đột biến trước khi tin
 
