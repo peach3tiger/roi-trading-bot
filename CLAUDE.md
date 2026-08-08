@@ -168,6 +168,36 @@ Cố tình phá thứ nó đáng lẽ bắt được, xác nhận nó đỏ, r�
 
 Chế độ hỏng chủ đạo của dự án này là lỗi xác minh, không phải lỗi logic — ba lần đã xảy ra: health_check chỉ gọi public endpoint, health_check hardcode sàn cũ, và pipe qua tail nuốt mất exit code.
 
+#### Trước khi chạy bất kỳ kịch bản đột biến nào: commit hoặc `git stash`
+
+Đột biến **sửa file thật trong cây làm việc**. Nếu tiến trình bị giết
+trước khi `finally` chạy — timeout của harness, `Ctrl-C`, OOM — file ở
+lại trạng thái đã phá. `git checkout <file>` phải là đường khôi phục
+**luôn dùng được**, và nó chỉ dùng được khi mọi thay đổi thật đã nằm
+trong commit hoặc stash.
+
+Đã xảy ra 2026-08-08: kịch bản đột biến `run_live_loop` đặt timeout 600s,
+hai đột biến làm vòng lặp vô hạn, harness giết tiến trình trước `finally`,
+và `main.py` ở lại với một dòng `# MUTANT`. Lúc đó `git checkout` KHÔNG
+dùng được vì toàn bộ công việc chưa commit — phải khôi phục thủ công
+bằng cách đọc lại diff và sửa tay. Phát hiện được chỉ vì có bước
+`grep MUTANT` sau khi chạy; không có bước đó thì một dòng đột biến đã đi
+thẳng vào commit.
+
+Kịch bản đột biến bắt buộc có đủ ba thứ:
+
+1. **Timeout ≤ 60s mỗi bước.** Một test suite bình thường chạy vài giây;
+   60s đã quá rộng rãi. Timeout dài không giúp gì cho đột biến làm treo
+   vòng lặp — nó chỉ kéo dài thời gian file nằm ở trạng thái đã phá.
+2. **Khôi phục trong `finally` của TỪNG bước**, không phải `finally`
+   ngoài cùng. Ngoài cùng chỉ chạy nếu tiến trình sống tới đó.
+3. **Assert không còn dấu vết đột biến ở cuối** (`assert "MUTANT" not in
+   src`). Đây là thứ duy nhất phát hiện được trường hợp khôi phục đã
+   thất bại một cách im lặng.
+
+Đánh dấu mọi chỗ chèn bằng một chuỗi cố định (`# MUTANT`) để `grep` sau
+khi chạy là phép kiểm rẻ và chắc chắn.
+
 ### 17. Không bao giờ đọc exit code sau pipe
 
 `cmd | tail; echo $?` trả về exit code của tail. Dùng `PIPESTATUS`, hoặc bỏ pipe khi cần exit code.

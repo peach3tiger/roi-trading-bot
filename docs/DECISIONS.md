@@ -1317,3 +1317,524 @@ ngay) và Linux/container (`timedatectl status`, container dùng đồng hồ
 host qua kernel — sửa ở container không có tác dụng nếu host sai).
 
 317 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## 2026-08-08 — Forward test dừng im lặng 08-06 → 08-08; cuộn schema log sang v2
+
+### Nguyên nhân ban đầu bị chẩn đoán sai
+
+Giả định lúc phát hiện là "launchd chưa từng được nạp thành công". **Sai.**
+`launchctl print` cho thấy job ĐÃ nạp, ĐÃ chạy (`runs = 1`), và
+`last exit code = 1`. Nó chạy đủ đều — chỉ là lần nào cũng chết.
+
+`forward/launchd.err.log` chỉ thẳng:
+
+```
+pandas.errors.ParserError: Error tokenizing data.
+C error: Expected 31 fields in line 3, saw 32
+```
+
+### Nguyên nhân thật — `warning_count` thêm vào file đóng băng, KHÔNG có quyết định tường minh
+
+1. `8dde130` dựng forward test. `log.csv` bắt đầu với **31 cột**. Bar
+   2026-08-05 ghi lúc 08-06T05:49 theo schema đó.
+2. `506bfde` (08-06T13:10, **7 giờ sau** dòng đầu tiên) thêm
+   `warning_count` vào `_CSV_FIELDNAMES` của `forward/logger.py` — file đã
+   tuyên bố đóng băng. Schema thành **32 cột**.
+3. `append_row()` chỉ ghi header khi file **chưa tồn tại**
+   (`is_new = not target.exists()`). Đúng cho append-only, nhưng hệ quả là
+   một file đã bắt đầu **không bao giờ học được cột mới**.
+4. Backfill 08-08T04:20 append hai dòng **32 cột** vào file header 31 cột.
+5. `read_existing_log()` chết ở `pd.read_csv` **mỗi lần chạy** từ đó.
+
+Mục "Bổ sung hạ tầng (2026-08-07)" phía trên có nhắc việc thêm cột, kết
+luận "không đụng cấu hình đóng băng". Kết luận đó đúng về mặt **khoa học**
+(`config_frozen.yaml`/`FEATURE_SUBSET` không đổi, thí nghiệm không mở
+lại), nhưng **không có entry nào ghi rằng `forward/logger.py` — file đóng
+băng — đang bị sửa, cũng không có ai quyết định điều đó tường minh.** Thay
+đổi đi kèm hai việc khác trong cùng một commit và trôi qua.
+
+**Bài học, áp dụng từ nay:** mọi thay đổi vào `forward/` — **kể cả chỉ
+thêm một cột log** — phải có entry `docs/DECISIONS.md` **TẠI THỜI ĐIỂM
+thay đổi**, không phải gộp vào bản tổng kết sau. Quy trình cuộn schema
+viết thành 5 bước trong `forward/SCHEMA.md`.
+
+### Xử lý: CUỘN FILE, không sửa file cũ
+
+Phương án đầu tiên tôi làm là migrate `log.csv` tại chỗ (viết lại header
+32 cột, chèn `warning_count` rỗng cho dòng 08-05). **Đã hoàn tác.** Sửa
+header của một file bằng chứng sau khi đã thấy kết quả thì kể cả khi đúng
+về kỹ thuật, nó phá đúng tính chất khiến log này đáng tin: mỗi dòng được
+ghi một lần, tại thời điểm đó, và không bao giờ đổi.
+
+| Phiên bản | File | Bar | Cột |
+|---|---|---|---|
+| v1 | `forward/log.csv` | 2026-08-05 (1 bar) | 31 |
+| v2 | `forward/log_v2.csv` | từ 2026-08-06 | 32 (+`warning_count`) |
+
+`log.csv` giữ **nguyên trạng byte-for-byte** (`git checkout`), giờ đã
+đóng. Hai dòng 32 cột tách sang `log_v2.csv` với header đúng, lấy từ bản
+sao lưu trạng thái hỏng — đi thẳng từ nguyên bản do logger ghi ra, không
+qua phép biến đổi nào.
+
+**Không mất dữ liệu.** Cả 3 bar còn đủ, `load_all_bars()` nối lại liền
+mạch, alignment kiểm từng cột (`regime_id=6`/`STRONG_BEAR`,
+`hmm_allocation=0.95`, `trend_gate_cap=0.3`, `final_allocation=0.3` nhất
+quán cả ba).
+
+### `forward/runner.py` — cuộn file mà KHÔNG sửa file đóng băng
+
+Chỉ dẫn ban đầu là "logger ghi vào log_v2.csv + cập nhật
+`frozen_hashes.json`", tức chấp nhận sửa `forward/logger.py` và đổi hash
+ghim. **Không làm vậy**, vì theo chính bất biến đang có, đổi hash CHỈ hợp
+lệ khi CỐ Ý kết thúc thí nghiệm — mà cuộn file log không phải kết thúc
+thí nghiệm: cấu hình đóng băng không đổi, chuỗi bar không đứt,
+`hmm_retrained` đọc tiếp được qua cả hai file. Vô hiệu hoá một bất biến để
+thoả một thay đổi không cần tới nó chính là lỗ hổng đã gây ra sự cố này
+ngay từ đầu.
+
+`append_row()`/`read_existing_log()` tra `_LOG_PATH` ở **thời điểm gọi**,
+không phải lúc định nghĩa hàm — thiết kế có chủ đích, docstring
+`append_row` nói rõ là để monkeypatch được. `forward/runner.py` gán lại
+biến module rồi gọi `run_forward_test()`: **`forward/logger.py` không đổi
+một byte**, SHA256 vẫn `20a9474d…`, `tests/test_frozen_files.py` giữ
+nguyên hiệu lực.
+
+LaunchAgent đổi sang `python -m forward.runner`.
+
+`frozen_hashes.json` VẪN được cập nhật, nhưng theo nghĩa khác: **ghim
+thêm `forward/log.csv`** (v1 đã đóng). Lý do ghim khác hai file kia —
+chúng là code/cấu hình không được sửa TRONG thí nghiệm, còn đây là bằng
+chứng đã ghi, nên hash này không đổi kể cả khi bắt đầu thí nghiệm MỚI.
+
+### `forward/SCHEMA.md` + `load_all_bars()`
+
+Code phân tích mốc 3/6/12 tháng phải đọc **cả hai** file. Để yêu cầu đó
+thực thi được chứ không chỉ là ghi chú, `forward/runner.py::load_all_bars()`
+nối tất cả, sắp theo `date`, thêm cột `source_log`, trả về đúng
+`_CSV_FIELDNAMES` mới nhất.
+
+`warning_count` của v1 là **`NaN`, không phải `0`** — bản chạy v1 không có
+cơ chế đếm warning, nên `0` là khẳng định sai ("đã đo, không có") thay vì
+ô trống trung thực ("không biết"). Có test riêng đỏ nếu ai đó thêm
+`fillna(0)`.
+
+### Test append-only áp cho CẢ HAI file
+
+`tests/test_forward_log_append_only.py` (13 test) kiểm **file thật trên
+đĩa**, không phải hàm trên `tmp_path` như `tests/test_forward_logger.py`.
+Khoảng trống nó lấp: sự cố này không phải lỗi của `append_row()` — hàm đó
+chạy đúng đặc tả suốt. Lỗi là file rơi vào trạng thái header một schema /
+dòng một schema khác, và **không test nào nhìn vào file thật để thấy**.
+
+Kiểm: mọi dòng cùng số cột với header; header khớp đúng schema của file;
+ngày tăng dần không trùng; không bar nào xuất hiện ở cả hai file; file đã
+đóng đều phải được ghim hash.
+
+Đột biến (kỷ luật #16) — 4/4 bị bắt: append dòng 32 cột vào v1
+(`test_moi_dong_cung_so_cot_voi_header` + `test_frozen_files` cùng đỏ);
+nhân đôi bar cuối v2; `fillna(0)` trong `load_all_bars`; runner trỏ ngược
+về v1.
+
+### Canh gác độ tươi — `monitoring/forward_watchdog.py`
+
+LaunchAgent **riêng** (09:00, một giờ sau job forward test). Không gộp:
+watchdog chạy chung tiến trình với thứ nó canh sẽ chết cùng thứ đó.
+
+Canh file `ACTIVE_LOG_PATH` hỏi từ `forward.runner`, không hardcode — cuộn
+schema mà watchdog vẫn canh file cũ thì file đó không bao giờ tăng dòng
+nữa, nên nó kêu mỗi ngày, bị coi là báo động giả, rồi bị tắt đúng lúc mất
+khả năng canh thật.
+
+Tín hiệu quyết định là `max(date)`, **không phải** mtime (`git checkout`
+làm mới mtime mà không thêm bar nào) và không phải số dòng (cần state
+file — thêm một thứ nữa hỏng im lặng được, đúng chế độ hỏng đang bắt). Cả
+hai vẫn được đo và đưa vào thông điệp làm dữ liệu chẩn đoán.
+
+Ngưỡng `> 2` ngày: bar D ghi vào D+1 nên staleness=1 là bình thường, =2 là
+lỡ đúng một lần (máy ngủ qua 08:00), >2 là lỡ từ hai lần trở lên. Kêu sớm
+hơn sẽ báo động giả mỗi lần máy ngủ, và watchdog kêu oan đều đặn sẽ bị ngó
+lơ đúng hôm nó kêu thật.
+
+#### Đột biến tìm ra bug thật trong chính watchdog
+
+Bản đầu chỉ hỏi "`read_existing_log()` có ném lỗi không". Đột biến tái
+hiện lệch schema cho **`stale=False`** — watchdog báo KHOẺ trên đúng kiểu
+hỏng nó sinh ra để bắt.
+
+Lý do: khi **mọi** dòng dư đúng một trường so với header, pandas không ném
+gì — nó lặng lẽ lấy cột đầu làm index. `df` trông lành lặn (31 cột, không
+NaN bất thường), `date` chứa giá trị `run_at_utc`, `staleness_days` vẫn ra
+1. Sự cố thật ném `ParserError` chỉ vì độ rộng **không đồng nhất** (dòng
+đầu 31, dòng sau 32). Nếu nó đồng nhất, thí nghiệm đã âm thầm ghi số lệch
+cột suốt 12 tháng mà không ai biết — tệ hơn hẳn việc dừng hẳn.
+
+Sửa: `inspect_log()` ghim `list(df.columns)` vào `_CSV_FIELDNAMES` và kiểm
+`isinstance(df.index, pd.RangeIndex)`. Mọi tín hiệu khác đều trông lành
+lặn trong ca này.
+
+### Kiểm chứng launchd (không chờ tới sáng mai)
+
+Plist dùng đường dẫn **tuyệt đối** tới `.venv/bin/python` — thiết yếu, vì
+`PATH` mặc định của launchd là `/usr/bin:/bin:/usr/sbin:/sbin`, không chứa
+venv. `WorkingDirectory` tuyệt đối. `StandardOutPath`/`StandardErrorPath`
+đều có — thiếu thì lần lỗi sau không để lại dấu vết nào, đúng cách sự cố
+này ẩn được 3 ngày.
+
+`bootout` + `bootstrap` (launchd không tự đọc lại plist đã đổi) rồi
+`kickstart -p`, **đọc stderr**: `runs = 2`, `last exit code = 0`,
+`{"appended": 0, "last_logged_date": "2026-08-07"}`. Watchdog cũng
+`runs = 2`, `exit 0`, canh đúng `log_v2.csv`.
+
+### Điểm mù còn lại — CHƯA đóng
+
+`.env` có `TELEGRAM_BOT_TOKEN=` và `TELEGRAM_CHAT_ID=` **giá trị rỗng**
+(độ dài 0). `AlertManager` quy đổi chuỗi rỗng thành `None` → kênh Telegram
+không gửi gì. Watchdog phát hiện đúng nhưng chỉ ghi ra
+`forward/watchdog.err.log` — file không ai đọc, tức là vẫn chưa thoát khỏi
+"phụ thuộc vào việc con người nhớ kiểm tra".
+
+Giảm thiểu tạm: `telegram_configured` được tính và ghi vào
+`watchdog.out.log` **mỗi lần chạy**, kể cả khi log khoẻ, kèm
+`logger.warning` rõ ràng. Kiểm kênh chỉ lúc cần gửi thì phát hiện "chưa
+cấu hình" đúng hôm cần nó nhất.
+
+`load_dotenv()` nạp `.env` trong tiến trình (launchd không có env của
+shell). **Không** đặt credential vào plist: plist được commit, `.env` thì
+không (bất biến #6).
+
+**Chưa đóng hẳn cho tới khi điền credential thật vào `.env`.**
+
+348 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## 2026-08-08 (sau) — Sửa 9 bug tầng thực thi
+
+Không thêm tính năng, không refactor kiến trúc, không đổi logic giao dịch.
+Mỗi bug có một test tái hiện trong `tests/test_nine_bug_fixes.py`, tất cả
+đã kiểm chứng bằng đột biến (kỷ luật #16) — 10/10 đột biến bị bắt.
+
+**1. `run_live_loop()` bỏ qua bar bị lỡ.** Lặp qua mọi bar chưa xử lý
+bằng `main._pending_bar_dates()`.
+
+**Lệch khỏi chỉ dẫn:** yêu cầu ghi "dùng `pending_bar_dates()` (đã có
+trong `forward/logger.py`)". Bản đầu tôi import thẳng từ đó, rồi **hoàn
+tác** — `docs/STATE.md` (mục Phase 10) đã ghi một quyết định thiết kế
+ngược lại: `main.py` CỐ TÌNH không import từ `forward/` dù chỉ một hàm
+thuần, vì forward test là thí nghiệm tiền đăng ký tự cô lập. Từ
+2026-08-08 còn một lý do mạnh hơn: `forward/logger.py` ĐÓNG BĂNG với
+SHA256 ghim, nên nối live loop vào nó sẽ ép mọi nhu cầu đổi hành vi sau
+này lên đúng file không được sửa. Nhân bản 5 dòng theo đúng tiền lệ
+`_latest_closed_bar_date()`, kèm
+`test_bug1_khop_voi_ban_forward` khẳng định hai bản không trôi lệch —
+đó là thứ khiến nhân bản chấp nhận được thay vì chỉ là sao chép. Kèm tham số **`process_one_bar(execute: bool)`**
+— bar cũ chỉ tua TRẠNG THÁI (regime, bộ đếm ổn định, alpha forward
+algorithm, lịch sử trend gate), tuyệt đối không đặt lệnh. Không có tham số
+này thì bản sửa tạo ra bug tệ hơn bug nó sửa: signal của bar D-3 tính trên
+giá D-3, đặt lệnh hôm nay theo nó là khớp quyết định của ba ngày trước ở
+giá hiện tại. `execute=False` cũng không đổi `current_allocation_pct`/
+`current_stop_loss` (không lệnh nào chạy → vị thế thật không đổi), không
+phát alert, không đo lệch đồng hồ, và breach stop-loss chỉ được GHI NHẬN
+— bar cuối cùng mới là chỗ hành động.
+
+**2. `close_position()` `order_link_id` không deterministic.** Chữ ký đổi
+thành `close_position(symbol, bar_timestamp)`, **bắt buộc**, không mặc
+định `None` với fallback `datetime.now()` — một mặc định "tiện" ở đây tái
+tạo đúng bug đang sửa và không caller nào lộ ra. `close_all_positions()`
+cũng nhận `bar_timestamp` cùng lý do.
+
+**3. `generate_order_link_id()` không normalize `Decimal`.**
+`Decimal("0.30") == Decimal("0.3")` là TRUE nhưng `str()` ra hai chuỗi
+khác nhau → hai hash → hai orderLinkId cho cùng một quyết định. Dùng
+`f"{target_allocation.normalize():f}"`; `:f` (không phải `str()`) chặn ký
+hiệu mũ mà `normalize()` sinh ra cho số 0 (`Decimal("0E-5")`).
+**Cảnh báo triển khai đã ghi vào `ops/RUNBOOK.md`** — đổi công thức hash
+làm MỌI id thay đổi, chỉ deploy khi không có lệnh nào đang chờ.
+
+**4. Breach stop-loss đi vòng qua risk manager.** Bản cũ gọi thẳng
+`close_position()`. Sửa: dựng signal `target_allocation_pct=0` và đưa qua
+`validate_signal()`. Phương án "chỉ kiểm halt rồi đóng" bị BỎ vì không
+thoả bất biến #4 (lệnh không đi qua điểm phủ quyết).
+
+`RiskManager._approve_exit()` — `validate_signal()` **LUÔN duyệt** lệnh
+giảm về 0, kiểm TRƯỚC mọi cổng từ chối. Lý do: stop-loss bị chặn vì
+`max_daily_trades`/circuit breaker/halt lock nghĩa là giữ nguyên một vị
+thế đang lỗ — tệ hơn hẳn thứ các cổng đó bảo vệ. Không phá bất biến #2:
+lệnh này chỉ GIẢM exposure. Vẫn `circuit_breaker.update()` và vẫn tăng
+`_daily_trade_count` — "không chặn" không có nghĩa "không ghi nhận".
+Thêm kiểm `halt_lock_path` mỗi bar trong `process_one_bar()`, không chỉ
+lúc khởi động.
+
+**5. `_requested_qty` mất khi restart.** `handle_partial_fill()` fallback
+đọc từ SÀN (`get_open_orders()`: `qty - filled_qty`) thay vì persist ra
+file — sàn là nguồn sự thật, không mất khi restart, nhất quán với nguyên
+tắc "đối soát, tin sàn" của `position_tracker`. Thêm `Order.filled_qty`
+(mặc định 0, nối vào CUỐI dataclass — không đảo thứ tự field) và map
+`item["filled"]` trong `ccxt_client.get_open_orders()`. `broker/bybit_client.py`
+(deprecated) không đụng tới; nó dựng `Order` bằng keyword nên vẫn chạy.
+
+**6. Equity tính từ `balance.total`.** Thêm pre-flight sau khi tính
+`limit_price`: chiều MUA mà `qty * limit_price > balance.available` →
+warning + `OrderResult(REJECTED)`, không gửi ra sàn. Chỉ áp cho chiều
+mua — bán làm giảm exposure và không tiêu số dư.
+
+**7. `round_price()` luôn `ROUND_DOWN`.** Thêm tham số hướng: BUY →
+`ROUND_DOWN` (không vượt số dư), SELL rebalance → `ROUND_UP` (bán là NHẬN
+tiền; làm tròn xuống là tự nguyện nhận ít hơn). Mặc định giữ `ROUND_DOWN`
+nên `tests/test_precision.py` không đổi.
+
+**Ghi rõ trong docstring vì đây là chỗ dễ bị "sửa lại cho đúng":**
+CLAUDE.md bất biến #3 quy định `ROUND_DOWN` cho **SỐ LƯỢNG**, không phải
+GIÁ. Tham số hướng ở đây không vi phạm bất biến — nó nằm ở một đại lượng
+khác. Thoát bảo vệ khi thủng stop ưu tiên KHỚP ĐƯỢC: `close_position()`
+dùng `OrderType.MARKET` nên không đi qua `round_price`; nếu sau này
+chuyển sang LIMIT thì phải `ROUND_DOWN`, không phải `ROUND_UP`.
+
+**8. `_build_regime_infos()` nổ khi thiếu `log_return_1`.**
+`_validate_feature_names()` chạy ở dòng ĐẦU của `select_and_train()` (và
+của `load()`), trước `scan_bic()`. Thông điệp nêu rõ feature thiếu, liệt
+kê feature đang có, và trỏ tới `settings.yaml`.
+
+**Lệch khỏi chỉ dẫn:** yêu cầu ghi "validate trong `__init__`", nhưng
+`HMMRegimeEngine.__init__` **chưa có feature nào để kiểm** —
+`feature_names` chỉ tồn tại sau `select_and_train()`/`load()`. Hai chỗ đó
+là điểm sớm nhất phép kiểm này thực hiện được; đã ghi lý do vào docstring
+`_validate_feature_names`.
+
+**9. `compute_all_features()` tính lại mỗi 60s.** `main.FeatureCache` —
+**CHỈ cache**, khoá theo `len(ohlcv)` + SHA256 của
+`hash_pandas_object(ohlcv, index=True)`. Hash giá trị (không chỉ độ dài)
+vì sàn có thể sửa lại nến lịch sử. **KHÔNG tính tăng dần** — z-score 365
+bar/SMA200/ATR đều phụ thuộc cửa sổ, bản tăng dần gần như chắc chắn lệch
+nhẹ, và lệch nhẹ làm `test_wiring_equivalence`/`test_forward_golden` đỏ
+hoặc tệ hơn là lệch âm thầm. `test_bug9_ket_qua_giong_het_ban_khong_cache`
+ghim điều này bằng `assert_frame_equal`.
+
+Đặt cache ở `main.py` (tầng gọi) chứ KHÔNG ở `data/feature_engineering.py`
+— CLAUDE.md bất biến #11 nói module đó chứa hàm THUẦN, không state, không
+I/O. Thêm cache module-level vào đó sẽ phá đúng tính chất khiến việc kiểm
+tra look-ahead bias khả thi.
+
+### Khoảng trống đã lấp: `run_live_loop(max_iterations=...)`
+
+Bản đầu ghi nhận một giới hạn: vòng lặp vô hạn không chạy được trong test
+suite, nên phần nối dây `_pending_bar_dates` + `execute=is_latest` chỉ
+được phủ gián tiếp bằng cách gọi tay `process_one_bar()` theo đúng chuỗi
+mà vòng lặp gọi — tức là kiểm một BẢN SAO của logic, không phải logic
+thật. **Đã lấp.**
+
+`run_live_loop(args, settings, max_iterations=None)` — `None` (mặc định,
+và là thứ duy nhất vận hành thật dùng) giữ nguyên vòng lặp vô hạn, không
+đổi một hành vi nào. `N` thoát sau đúng N vòng. Đếm MỌI vòng, kể cả vòng
+thoát sớm bằng `continue` — chỉ đếm vòng có xử lý bar thì `max_iterations`
+không chặn được một vòng lặp đang quay tít ở nhánh lỗi, đúng thứ nguy hiểm
+nhất cần chặn được trong test.
+
+`tests/test_live_loop_iterations.py` (9 test) chạy `run_live_loop()` THẬT
+3 vòng, chỉ giả lập BIÊN chạm ra ngoài (sàn, tải lịch sử, health check,
+đồng hồ, alert):
+
+| vòng | bar chưa xử lý | kết quả |
+|---|---|---|
+| 1 | LAST-3, LAST-2, LAST-1 | 2 bar đầu `execute=False`, bar cuối `True` |
+| 2 | không có bar mới | sleep, không xử lý bar nào |
+| 3 | LAST | `execute=True` |
+
+Khẳng định: đúng 4 bar được xử lý với đúng cờ `execute`; đúng 2 lệnh
+`submit_order` ở đúng 2 bar `execute=True`, không lệnh nào mang timestamp
+của bar bị lỡ; alert = 0 ở mọi bar bị lỡ.
+
+**Hai lỗi trong chính test, tìm ra bằng đột biến — cả hai đều làm test
+xanh RỖNG NGHĨA:**
+
+1. **Fake `OrderBook` dựng sai.** `best_bid`/`best_ask` là `@property`
+   tính từ `bids`/`asks`, không phải field constructor. Truyền nhầm →
+   `OrderBook(...)` ném `TypeError` → `_check_spread_and_alert` nuốt lỗi
+   thành `DATA_FEED_LOST` → phép kiểm spread không bao giờ chạy.
+2. **State khôi phục để `current_regime_id=None`.** `_fire_bar_alerts()`
+   chỉ phát khi giá trị mới KHÁC giá trị đang mang, và bỏ qua hoàn toàn
+   khi state là `None`. Bar bị lỡ vì thế không bao giờ tạo alert — dù
+   guard `and execute` còn hay mất. Đột biến bỏ guard: test **vẫn xanh**.
+   Sửa bằng SENTINEL (`999`/`"SENTINEL_REGIME"`/`"SENTINEL_TREND"`) để bar
+   bị lỡ đầu tiên luôn là một "thay đổi".
+
+Ngoài ra dữ liệu tổng hợp ban đầu (`sigma=0.012`) làm bar cuối thủng stop
+→ `process_one_bar()` đi nhánh THOÁT thay vì nhánh thực thi, `submit_order`
+chỉ 1 lần thay vì 2. Hạ xuống `sigma=0.004`;
+`test_khong_co_breach_stop_loss_trong_kich_ban` khoá tiền đề này lại.
+
+Đột biến: **6/6 bị bắt** — luôn `execute=True`; chỉ xử lý bar mới nhất
+(bug gốc); alert phát ở bar bị lỡ; `pending` bỏ qua `last_processed`; hai
+đột biến làm vòng lặp vô hạn (bị bắt bằng treo/timeout, ghi rõ là "treo"
+chứ không phải "đỏ bằng assertion").
+
+391 passed / 0 skipped (348 + 43 mới). Bảy test bắt buộc xanh, không
+skip/xfail. ruff + mypy sạch.
+
+---
+
+## 2026-08-08 (sau nữa) — Thu hẹp exception handling: lỗi lập trình ≠ sự cố vận hành
+
+`TypeError`/`AttributeError`/`KeyError` nghĩa là giả định của chính chúng
+ta về hợp đồng dữ liệu đã sai — không phải mạng chập, không phải sàn 5xx.
+Gộp chúng vào `DATA_FEED_LOST`/`API_LOST` tạo ra chế độ hỏng tệ nhất:
+người vận hành đọc alert "mất feed", quyết định **CHỜ**, và bug nằm im vô
+thời hạn.
+
+Không phải giả thuyết. Nó vừa xảy ra trong chính test của dự án này:
+fake `OrderBook` dựng bằng `best_bid=`/`best_ask=` (vốn là `@property`,
+không phải field constructor) ném `TypeError`,
+`_check_spread_and_alert` nuốt thành `DATA_FEED_LOST`, và phép kiểm
+spread im lặng không chạy lần nào — phát hiện bằng đột biến, không phải
+bằng test đỏ. Cùng triệu chứng sẽ xảy ra khi chạy thật nếu một field ở
+tầng broker đổi tên.
+
+### Rà soát toàn bộ `except Exception` trong đường live loop
+
+| # | Vị trí | Trước | Sau |
+|---|---|---|---|
+| 1 | `main.py::_check_spread_and_alert` (fetch orderbook) | mọi lỗi → `DATA_FEED_LOST` | **tách**: lỗi lập trình → `INTERNAL_ERROR`; còn lại → `DATA_FEED_LOST` (+ `exc_info`) |
+| 2 | `main.py::_check_clock_drift` (đo giờ) | mọi lỗi → `warning`, `(False, None)` | **tách**: lỗi lập trình → `INTERNAL_ERROR`; còn lại giữ `warning` |
+| 3 | `main.py::run_live_loop` (retrain HMM) | mọi lỗi → "giữ nguyên model cũ" | **tách**: lỗi lập trình → `INTERNAL_ERROR` (vẫn giữ model cũ) |
+| 4 | `main.py::run_live_loop` (catch-all vòng lặp) | mọi lỗi → `API_LOST` | **tách**: lỗi lập trình → `INTERNAL_ERROR`; còn lại → `API_LOST` |
+| 5 | `main.py::run_live_loop` (nạp model lúc khởi động) | `warning` + train mới | **tách**: lỗi lập trình → `ERROR` nêu rõ "cần sửa code" (vẫn train mới; `alert_manager` chưa tồn tại ở bước này) |
+
+**Đã rà, CỐ Ý không đổi:**
+
+| Vị trí | Lý do giữ nguyên |
+|---|---|
+| `monitoring/alerts.py` ×3 (`_send_telegram`/`_send_email`/`_send_webhook`) | Hợp đồng của chúng là "không bao giờ raise ra ngoài" — một kênh alert hỏng không được làm sập vòng lặp giao dịch. Thu hẹp ở đây sẽ để lỗi lập trình trong kênh gửi làm chết bar đang xử lý, đắt hơn hẳn cái được. |
+| `ops/health_check.py` ×3 | Chạy TRƯỚC khi vào vòng lặp; mục đích là trả `FAIL` có thông điệp thay vì traceback. Không có `alert_manager` ở đó. |
+| `broker/bybit_client.py:274` | File deprecated, có cam kết "giữ nguyên, không sửa logic, không xoá". |
+| `monitoring/forward_watchdog.py:198` | Cố ý rộng: MỌI lỗi đọc `log.csv` đều là "thí nghiệm đang chết", đúng thứ watchdog phải báo. |
+
+### `_PROGRAMMING_ERRORS` — vì sao đúng ba loại
+
+`ValueError` **cố tình không có mặt**: vừa là lỗi lập trình vừa là cách
+hợp lệ để báo dữ liệu đầu vào xấu (`Decimal("abc")`, parse timestamp
+hỏng), không phân loại được nếu chỉ nhìn kiểu. `IndexError` cũng không:
+`response["list"][0]` trên một phản hồi rỗng của sàn LÀ sự cố dữ liệu
+thật, không phải bug của ta.
+
+`AlertType.INTERNAL_ERROR` mới, `severity="ERROR"`, thông điệp luôn kèm
+"lỗi lập trình, không phải mất feed" — hai loại này cần hành động khác
+hẳn nhau và alert phải nói ra điều đó ngay dòng đầu.
+
+Thứ tự `except` quyết định nhãn: nhánh `_PROGRAMMING_ERRORS` PHẢI đứng
+trước nhánh rộng. `test_danh_sach_loi_lap_trinh_dung_ba_loai` ghim danh
+sách để việc nới nó thành một quyết định có ý thức.
+
+### Test + đột biến
+
+`tests/test_exception_classification.py` (12 test): tiêm từng loại lỗi
+vào đường spread và đường đo giờ, khẳng định lỗi lập trình **không**
+sinh `DATA_FEED_LOST`, và — chiều ngược lại — lỗi hạ tầng
+(`ConnectionError`/`TimeoutError`/`OSError`/`RuntimeError` đứng thay
+`ccxt.*`) **vẫn** sinh `DATA_FEED_LOST`. Việc thu hẹp không được làm mất
+cảnh báo thật.
+
+Đột biến: **6/6 bị bắt** — bỏ nhánh lỗi lập trình ở cả hai hàm; làm
+`_PROGRAMMING_ERRORS` rỗng; nới sang `ValueError`; alert mất câu "không
+phải mất feed"; hạ `severity` xuống `WARNING`.
+
+403 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## 2026-08-08 (cuối) — `AlertManager`: sức khoẻ từng kênh, `monitoring/state/status.json`
+
+Cam kết "không bao giờ raise" của `send()` bảo vệ vòng lặp giao dịch —
+một kênh alert hỏng không được làm crash bot đang cố báo một sự cố khác.
+Nhưng bản trước **trả giá bằng sự im lặng hoàn toàn**: Telegram trả 401
+mọi lần (token bị revoke) trông y hệt gửi thành công ở mọi chỗ khác trong
+hệ thống. Giữ cam kết, bỏ cái giá.
+
+### 1. Kênh file là đường cuối cùng, try RIÊNG
+
+`_send_file()` mới. Bản trước gọi thẳng `self._alert_logger.info(...)`
+trong `send()` **không có `try` nào** — đĩa đầy hoặc rotating handler lỗi
+sẽ ném ra khỏi `send()` và phá cam kết ở đúng kênh quan trọng nhất.
+
+Thứ tự: kênh cục bộ (file, console) TRƯỚC, kênh từ xa SAU. Mỗi kênh một
+`try` riêng, không kênh nào chung `try` với kênh khác.
+
+**Ghi chính xác để không tự lừa mình:** vì mỗi kênh đã có `try` riêng,
+thứ tự KHÔNG còn ảnh hưởng hành vi — một đột biến đảo thứ tự thuần tuý
+sẽ không (và không nên) bị test bắt. Tính chất được ép buộc thật sự là
+"mỗi kênh một try riêng, kênh file luôn được gọi"; thứ tự là lớp phòng
+thủ mang tính tài liệu, đọc từ trên xuống thấy ngay ý định.
+
+### 2. Đếm thất bại theo từng kênh
+
+`ChannelHealth` (dataclass KHÔNG frozen — bộ đếm sống, khác `Alert`):
+`attempts`, `failures`, `consecutive_failures`, `last_error`,
+`last_failure_at`, `last_success_at`.
+
+`consecutive_failures` reset về 0 khi có một lần THÀNH CÔNG — "degraded"
+mô tả tình trạng HIỆN TẠI, không phải lịch sử; tổng `failures` vẫn giữ để
+đọc lại được.
+
+Chỉ theo dõi kênh **đã cấu hình**: một kênh không bật thì `_send_*` trả
+về ngay, đó không phải thất bại. Đếm chúng sẽ làm mọi cài đặt tối thiểu
+trông như degraded vĩnh viễn.
+
+**HTTP != 200 giờ tính là thất bại** (Telegram), `>= 400` (webhook). Bản
+trước chỉ `logger.warning` rồi đi tiếp — đó chính là chỗ một token bị
+revoke ẩn được.
+
+### 3. Ngưỡng degraded
+
+`status()` trả `"degraded"` nếu **bất kỳ** kênh nào có
+`consecutive_failures >= degraded_after` (mặc định **3**).
+
+3 chứ không phải 1: một lần Telegram 502 hay SMTP timeout là chuyện
+thường ngày và không có nghĩa kênh đã chết. Hạ trạng thái ngay lần đầu
+biến "degraded" thành trạng thái mặc định, và một chỉ báo lúc nào cũng đỏ
+thì không ai đọc nữa.
+
+`any` chứ không `all`: kênh file vẫn khoẻ nhưng Telegram chết nghĩa là
+cảnh báo KHÔNG tới điện thoại — trạng thái tổng thể phải phản ánh điều đó.
+
+**KHÔNG có kênh nào cũng là `"degraded"`.** Phát hiện khi in thử
+`status.json` đầu tiên: một `AlertManager` không kênh nào báo
+`status: "ok"` với `channels: {}` — dạng cực đoan nhất của chính thứ
+cơ chế này sinh ra để chặn: 100% cảnh báo đi vào hư không mà chỉ báo
+vẫn xanh. Không xảy ra ở vận hành thật (`build_alert_manager` luôn
+truyền `log_dir`, console mặc định bật), nhưng một AlertManager không
+kênh nào không phải "khoẻ", nó là "câm".
+
+Log ĐÚNG một lần ở mỗi lần đổi trạng thái (vào/ra degraded), không phải
+mỗi lần thất bại: một kênh chết sẽ thất bại mỗi alert, và log mỗi lần
+biến chính dòng log đó thành nhiễu.
+
+### `monitoring/state/status.json`
+
+Ghi NGUYÊN TỬ (tmp + rename, cùng lý do `main.py::write_state_snapshot`),
+sau mỗi `send()`. `write_status()` **không bao giờ raise** — nó chạy bên
+trong `send()`, nên một đĩa đầy không được làm crash vòng lặp giao dịch.
+
+Đường dẫn mặc định theo đúng yêu cầu. **Ghi nhận một điều gợn:**
+`monitoring/` là thư mục mã nguồn, còn đây là state runtime — đã thêm
+`monitoring/state/` vào `.gitignore`. Nếu muốn gom về một chỗ với
+`state_snapshot.json`/`trading_halted.lock` thì `${STATE_DIR}` là chỗ
+đúng hơn; `status_path` truyền được qua `__init__` nên đổi chỉ là một
+dòng ở `build_alert_manager()`.
+
+**Hợp đồng của `send()` KHÔNG đổi:** giá trị trả về vẫn chỉ nói alert có
+bị rate-limit hay không, không phản ánh kênh nào thất bại
+(`_SpyAlertManager` trong test suite dựa vào điều này). Thất bại nằm ở
+`status()`/`health_snapshot()`/`status.json` — đó mới là chỗ đúng, vì
+caller không làm gì được với thông tin "webhook lỗi" giữa lúc đang xử lý
+một bar.
+
+### Test + đột biến
+
+`tests/test_alert_channel_health.py` (16 test). Đột biến **10/10 bị bắt**:
+bỏ gọi kênh file; bỏ `try` quanh kênh file; HTTP != 200 không tính thất
+bại; không ghi `status.json`; thành công không reset chuỗi; ngưỡng hạ
+xuống 1; `any` -> `all`; đếm cả kênh chưa cấu hình; không kênh nào vẫn
+báo ok; `write_status` raise được.
+
+419 passed / 0 skipped. ruff + mypy sạch.

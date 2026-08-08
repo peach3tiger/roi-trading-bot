@@ -5,10 +5,35 @@
 
 ## Đang ở đâu
 
-- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới). 317 passed
+- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới). 419 passed
   / 0 skipped.
-- **`tests/test_frozen_files.py` mới (2026-08-07):** ghim SHA256 của
-  `forward/logger.py`/`forward/config_frozen.yaml` vào
+- **9 bug tầng thực thi đã sửa (2026-08-08)** — bar bị lỡ + `execute`,
+  `close_position(bar_timestamp)`, normalize orderLinkId, stop-loss qua
+  `validate_signal`, `_requested_qty` đọc từ sàn, pre-flight số dư khả
+  dụng, `round_price` có hướng, validate `log_return_1`, `FeatureCache`.
+  Chi tiết + lý do từng lựa chọn: `docs/DECISIONS.md` mục 2026-08-08
+  (sau). Test tái hiện: `tests/test_nine_bug_fixes.py`, 10/10 đột biến
+  bị bắt. **`ops/RUNBOOK.md` có quy trình bắt buộc trước khi deploy**
+  (đổi công thức orderLinkId → chỉ deploy khi không có lệnh chờ).
+- **Sức khoẻ kênh cảnh báo (2026-08-08):** `AlertManager` đếm thất bại
+  theo từng kênh, ghi `monitoring/state/status.json` (đã .gitignore);
+  3 lần thất bại liên tiếp của MỘT kênh -> `status: "degraded"`. Kênh
+  file có `try` riêng, luôn được thử kể cả khi kênh từ xa nổ. Hợp đồng
+  "không bao giờ raise" giữ nguyên.
+- **Phân loại exception (2026-08-08):** lỗi lập trình
+  (`TypeError`/`AttributeError`/`KeyError`) KHÔNG còn bị dán nhãn
+  `DATA_FEED_LOST`/`API_LOST` — có `AlertType.INTERNAL_ERROR` riêng.
+  Bảng rà soát đầy đủ 5 chỗ đã đổi + 4 chỗ cố ý giữ nguyên:
+  `docs/DECISIONS.md` mục 2026-08-08 (sau nữa).
+- **SỰ CỐ 2026-08-08: forward test đã dừng im lặng 3 ngày (08-06 → 08-08),
+  ĐÃ SỬA + đã dựng canh gác.** Đọc mục riêng phía dưới TRƯỚC khi đụng
+  `forward/`. Điểm quan trọng nhất: **`log.csv` đã cuộn sang `log_v2.csv`**,
+  entry point là `python -m forward.runner` (KHÔNG phải `forward.logger`),
+  và đọc dữ liệu phân tích phải dùng `forward.runner.load_all_bars()`.
+  Xem `forward/SCHEMA.md`.
+- **`tests/test_frozen_files.py` (2026-08-07, mở rộng 2026-08-08):** ghim
+  SHA256 của `forward/logger.py`/`forward/config_frozen.yaml` (+
+  `forward/log.csv` từ 08-08, xem mục sự cố) vào
   `tests/golden/frozen_hashes.json` — FAIL nếu MỘT TRONG HAI file đổi, dù
   vô tình hay cố ý, dù chỉ một dòng comment. Bổ sung lớp bảo vệ Ở TẦNG
   TEST SUITE cho `forward/config_frozen.yaml` (đã có hash-kiểm riêng ở
@@ -61,6 +86,7 @@
   `_STRATEGY_BARS_LOOKBACK` đổi.
 - Forward test chạy từ 2026-08-06, cấu hình đóng băng, launchd hằng ngày.
   Mốc đánh giá: 2026-11-06 / 2027-02-06 / 2027-08-06. Không đụng tới.
+  (Gián đoạn 08-06 → 08-08, đã bù đủ, không mất bar — xem mục sự cố.)
 - Cổng: `CLAUDE.md` #12 — xây tầng thực thi ở **testnet** được, **mainnet**
   bị chặn tới 2027-08-06. `main.py` KHÔNG có `--live` tự động xác nhận —
   vẫn yêu cầu gõ tay chuỗi xác nhận qua `require_live_confirmation()`
@@ -343,8 +369,51 @@ thường, 155-178ms qua nhiều lần chạy), vấn đề nằm ngoài cả ha
 code). Không debug thêm ở hướng "sửa CCXTClient"/"sửa health_check"/"sửa
 main.py" cho việc này — không phải chỗ hỏng.
 
+## SỰ CỐ 2026-08-08 — forward test dừng im lặng 3 ngày, đã sửa
+
+Chi tiết đầy đủ: `docs/DECISIONS.md` mục 2026-08-08. `forward/SCHEMA.md`
+là tài liệu vận hành. Tóm tắt để không lặp lại:
+
+**Chuyện gì.** `warning_count` được thêm vào `_CSV_FIELDNAMES` của
+`forward/logger.py` (file ĐÓNG BĂNG) lúc 08-06T13:10, 7 giờ sau khi bar
+đầu tiên đã ghi. `append_row()` chỉ ghi header khi file chưa tồn tại, nên
+`log.csv` giữ header 31 cột trong khi dòng mới ghi 32 cột →
+`read_existing_log()` chết mọi lần chạy. launchd vẫn chạy đều, exit 1 mỗi
+lần, **không có gì báo** trong 3 ngày. Phát hiện tình cờ.
+
+Chẩn đoán ban đầu ("launchd chưa nạp được") **sai** — `launchctl print`
+cho thấy `runs = 1, last exit code = 1`. Đọc `launchd.err.log` là bước
+tìm ra nguyên nhân thật.
+
+**Đã xử lý bằng cuộn file, không sửa file cũ:**
+
+- `forward/log.csv` = schema v1 (31 cột, 1 bar 2026-08-05), **ĐÃ ĐÓNG**,
+  giữ nguyên byte-for-byte, SHA256 ghim trong `frozen_hashes.json`.
+- `forward/log_v2.csv` = schema v2 (32 cột, từ 2026-08-06), **đang chạy**.
+- `forward/runner.py` = entry point mới, trỏ `logger._LOG_PATH` sang file
+  đang hoạt động. **`forward/logger.py` KHÔNG đổi một byte** — hash vẫn
+  `20a9474d…`. LaunchAgent chạy `python -m forward.runner`.
+- Đọc dữ liệu phân tích: **`load_all_bars()`**, không đọc file trực tiếp
+  (mất bar v1). `warning_count` của v1 là `NaN`, không phải `0`.
+- `tests/test_forward_log_append_only.py` (13 test) kiểm FILE THẬT trên
+  đĩa cho cả hai file — khoảng trống cũ là mọi test chỉ kiểm HÀM trên
+  `tmp_path`, nên trạng thái header-lệch-dòng không ai thấy.
+- `monitoring/forward_watchdog.py` + LaunchAgent riêng 09:00 — canh độ
+  tươi, ngưỡng > 2 ngày, tín hiệu là `max(date)` (không phải mtime/số
+  dòng). Hỏi `runner.ACTIVE_LOG_PATH`, không hardcode tên file.
+
+**Bài học đã đưa vào quy trình:** mọi thay đổi vào `forward/` — kể cả chỉ
+thêm một cột log — phải có entry `DECISIONS.md` **tại thời điểm thay
+đổi**. Quy trình cuộn schema: 5 bước trong `forward/SCHEMA.md`.
+
 ## Việc còn treo, theo thứ tự ưu tiên
 
+0. **`.env` có `TELEGRAM_BOT_TOKEN=`/`TELEGRAM_CHAT_ID=` GIÁ TRỊ RỖNG** →
+   watchdog phát hiện đúng nhưng **không gửi được cảnh báo nào**, chỉ ghi
+   vào `forward/watchdog.err.log` (file không ai đọc). Đây là điểm mù còn
+   lại của chính cơ chế vừa dựng để chống điểm mù. `telegram_configured`
+   xuất hiện trong `watchdog.out.log` mỗi ngày để nhìn thấy được, nhưng
+   **chưa đóng cho tới khi điền credential thật**.
 1. Điền `EXCHANGE_API_KEY`/`EXCHANGE_API_SECRET` + nghiệm thu qua mạng
    thật (CCXTClient submit_order/cancel_order/idempotency; main.py
    kill+restart thật; `--dry-run` 24h; dashboard/Telegram thật, xem mục
@@ -382,6 +451,19 @@ qua mạng thật -> Phase 12b (harness engineering) -> Phase 12c (shadow deploy
   đúng-ngữ-pháp-sai-ngữ-nghĩa (hmmlearn's `covars_` luôn trả full matrix
   bất kể `covariance_type`) — viết test đọc lại GIÁ TRỊ THẬT từ một lần
   fit/gọi thật, không chỉ test "không crash", là cách duy nhất bắt được.
+- Với file **append-only**, đổi schema không phải thay đổi tương thích
+  ngược — nó là thay đổi **phá vỡ**, và nó phá ở lần **ĐỌC** tiếp theo,
+  không phải lần ghi. Thêm cột vào một log đã bắt đầu thì file cũ không
+  bao giờ học được header mới. Cuộn sang file mới, đừng sửa file cũ.
+- Một job đã lên lịch **chạy đều** không có nghĩa là nó **chạy được**.
+  `launchctl print` có `runs`/`last exit code`; đọc chúng và đọc file
+  stderr trước khi kết luận job "chưa được nạp". Job không có
+  `StandardErrorPath` thì lỗi không để lại dấu vết nào — đó là cách sự cố
+  này ẩn được 3 ngày.
+- "Parse không ném lỗi" ≠ "parse đúng". pandas im lặng lấy cột đầu làm
+  index khi mọi dòng dư đúng một trường so với header — mọi tín hiệu
+  (số dòng, kiểu dữ liệu, không NaN bất thường) đều trông lành lặn trong
+  khi dữ liệu đã lệch ô. Ghim danh sách CỘT, không chỉ bọc try/except.
 - Restart tiến trình là nơi bất biến dễ vỡ nhất trong im lặng nhất
   (`modify_stop()` sau restart không biết stop cũ nếu không nạp lại tường
   minh — CLAUDE.md #5 có thể bị vi phạm mà không có exception nào báo).
