@@ -339,6 +339,50 @@ hiếm (Brain-Crypto-Bybit.md §6.5).
 
 ---
 
+## Triển khai thay đổi công thức `orderLinkId` — CHỈ khi không có lệnh chờ
+
+**Áp dụng cho lần sửa 2026-08-08** (`normalize()` trong
+`OrderExecutor.generate_order_link_id`) **và mọi lần đổi công thức hash
+về sau.**
+
+`orderLinkId` là khoá chống trùng duy nhất của hệ thống (CLAUDE.md bất
+biến #8). Đổi công thức hash làm **MỌI id thay đổi** — cùng một
+`(symbol, bar_timestamp, target_allocation)` sinh ra id khác trước và sau
+khi triển khai.
+
+**Hệ quả:** trong đúng cửa sổ chuyển đổi, một lệnh đã gửi bằng bản CŨ
+đang chờ khớp trên sàn sẽ **không được bản MỚI nhận ra**. Bot tính lại
+cùng quyết định đó, sinh id mới, sàn thấy một lệnh hoàn toàn khác và
+**khớp cả hai** — đúng kịch bản nhân đôi vị thế mà `orderLinkId` sinh ra
+để chặn. Lớp chống trùng mất tác dụng đúng tại thời điểm chuyển đổi, và
+chỉ tại thời điểm đó.
+
+Quy trình bắt buộc trước khi deploy:
+
+```bash
+# 1. Không còn lệnh nào đang chờ trên sàn
+python -c "
+from main import load_settings, build_exchange_client
+s = load_settings()
+c = build_exchange_client(s, testnet=s['exchange']['testnet'])
+print(c.get_open_orders())
+"
+```
+
+2. Kết quả phải là danh sách **rỗng**. Còn lệnh → huỷ hết, hoặc chờ khớp
+   xong, rồi mới deploy.
+3. Dừng container **trước** khi build image mới — không rolling update:
+   hai tiến trình chạy hai công thức hash khác nhau trên cùng một tài
+   khoản là đúng thứ mục "Khôi phục sau crash" §3 nói phải báo ngay.
+4. Deploy, khởi động lại, xác nhận `get_open_orders()` vẫn rỗng ở bar đầu
+   tiên trước khi để bot chạy không giám sát.
+
+Thời điểm an toàn nhất: ngay sau khi một bar đã xử lý xong và trước bar
+kế tiếp (bar 1D, ranh giới 00:00 UTC — CLAUDE.md bất biến #10), lúc đó
+gần như chắc chắn không có lệnh chờ.
+
+---
+
 ## Kiểm tra nhanh (không có sự cố cụ thể)
 
 ```bash

@@ -11,8 +11,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import datetime
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Protocol
 
 from broker.base import ExchangeClient, OrderRequest, OrderResult, OrderSide, OrderStatus, OrderType
@@ -68,9 +68,7 @@ class OrderExecutor:
     # Idempotency
     # ------------------------------------------------------------------
 
-    def generate_order_link_id(
-        self, symbol: str, bar_timestamp: datetime, target_allocation: Decimal
-    ) -> str:
+    def generate_order_link_id(self, symbol: str, bar_timestamp: datetime, target_allocation: Decimal) -> str:
         """Deterministic — cùng bộ ba input luôn cho cùng id, để sàn từ
         chối lệnh trùng thay vì đặt hai lần khi bot restart giữa chừng.
 
@@ -78,8 +76,22 @@ class OrderExecutor:
         bất kể độ dài symbol/timestamp/allocation, và tránh ký tự
         timestamp ISO (dấu `:`, `+`) mà Bybit có thể không chấp nhận trong
         orderLinkId.
+
+        `normalize()` trước khi format: `Decimal("0.30")`,
+        `Decimal("0.3")` và `Decimal("0.300")` BẰNG NHAU về giá trị nhưng
+        `str()` ra ba chuỗi khác nhau → ba hash khác nhau → ba
+        orderLinkId khác nhau cho CÙNG một quyết định phân bổ. Khi đó lớp
+        chống trùng im lặng mất tác dụng đúng lúc cần nhất: bot restart,
+        tính lại target bằng một đường số học khác (vd. `Decimal("0.3")`
+        vs `equity * pct / equity`), sinh id mới, và sàn không còn nhận ra
+        đây là lệnh đã đặt.
+
+        `:f` (không phải `str()`) để chặn ký hiệu mũ — `normalize()` biến
+        `Decimal("0.00000")` thành `Decimal("0E-5")`, và `str()` giữ
+        nguyên dạng đó, lại sinh ra một chuỗi khác cho cùng giá trị 0.
         """
-        raw = f"{symbol}|{bar_timestamp.isoformat()}|{target_allocation}"
+        target_str = f"{target_allocation.normalize():f}"
+        raw = f"{symbol}|{bar_timestamp.isoformat()}|{target_str}"
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         return digest[:_ORDER_LINK_ID_MAX_LEN]
 
@@ -129,9 +141,43 @@ class OrderExecutor:
             limit_price = signal.entry_price * (Decimal("1") - offset_fraction)
         else:
             limit_price = signal.entry_price * (Decimal("1") + offset_fraction)
-        limit_price = rules.round_price(limit_price)
+        # Hướng làm tròn theo CHIỀU lệnh, không phải luôn xuống: mua làm
+        # tròn xuống (không vượt số dư), bán rebalance làm tròn lên (bán là
+        # NHẬN tiền — làm tròn xuống là tự nguyện nhận ít hơn). CLAUDE.md
+        # bất biến #3 quy định ROUND_DOWN cho SỐ LƯỢNG, không phải giá —
+        # xem docstring `InstrumentRules.round_price`.
+        limit_price = rules.round_price(limit_price, ROUND_DOWN if side is OrderSide.BUY else ROUND_UP)
 
         qty = rules.round_qty(abs(delta))
+
+        # Pre-flight số dư KHẢ DỤNG — `equity` ở trên dùng `balance.total`,
+        # vốn gồm cả phần đang bị khoá trong lệnh chờ/ký quỹ. Một lệnh mua
+        # tính từ `total` có thể vượt `available` và bị sàn từ chối sau một
+        # round-trip mạng; tệ hơn, nó khớp MỘT PHẦN rồi để lại trạng thái
+        # nửa vời mà `handle_partial_fill` phải dọn. Chặn tại đây rẻ hơn.
+        # Chỉ áp cho chiều MUA: bán làm GIẢM exposure và không tiêu số dư.
+        if side is OrderSide.BUY:
+            required = qty * limit_price
+            if required > balance.available:
+                logger.warning(
+                    "submit_order(%s): cần %s USDT nhưng chỉ có %s khả dụng "
+                    "(total=%s — phần chênh đang bị khoá) — TỪ CHỐI, không gửi lệnh.",
+                    symbol,
+                    required,
+                    balance.available,
+                    balance.total,
+                )
+                return OrderResult(
+                    order_id="",
+                    order_link_id=order_link_id,
+                    status=OrderStatus.REJECTED,
+                    filled_qty=Decimal("0"),
+                    avg_fill_price=None,
+                    raw_response={
+                        "rejection_reason": (f"notional {required} > available {balance.available}")
+                    },
+                )
+
         ok, reason = rules.is_valid_order(qty, limit_price)
         if not ok:
             logger.warning("submit_order(%s): lệnh không hợp lệ (%s) — không gửi.", symbol, reason)
@@ -205,14 +251,44 @@ class OrderExecutor:
         """
         requested = self._requested_qty.get(order_result.order_link_id)
         if requested is None:
+            # `_requested_qty` sống trong bộ nhớ và MẤT khi tiến trình
+            # restart — đúng tình huống nó cần nhất (crash giữa lúc có lệnh
+            # khớp một phần). Hỏi SÀN thay vì persist ra file: sàn là nguồn
+            # sự thật, không mất khi restart, và nhất quán với nguyên tắc
+            # "đối soát, tin sàn" đã có ở broker/position_tracker.py. Thêm
+            # một file trạng thái nữa chỉ là thêm một thứ có thể lệch.
+            remaining_on_exchange = self._remaining_qty_from_exchange(order_result.order_link_id)
+            if remaining_on_exchange is not None:
+                logger.info(
+                    "handle_partial_fill: không có qty trong bộ nhớ cho order_link_id=%s "
+                    "(restart?) — đọc từ sàn: còn lại %s.",
+                    order_result.order_link_id,
+                    remaining_on_exchange,
+                )
+                return remaining_on_exchange
             logger.warning(
                 "handle_partial_fill: không có qty đã yêu cầu cho order_link_id=%s "
-                "(không phải lệnh do OrderExecutor này đặt?) — trả 0.",
+                "trong bộ nhớ LẪN trên sàn (lệnh đã đóng hoàn toàn, hoặc không phải "
+                "lệnh do OrderExecutor này đặt) — trả 0.",
                 order_result.order_link_id,
             )
             return Decimal("0")
         remaining = requested - order_result.filled_qty
         return remaining if remaining > 0 else Decimal("0")
+
+    def _remaining_qty_from_exchange(self, order_link_id: str) -> Decimal | None:
+        """Phần chưa khớp của lệnh còn mở, đọc từ sàn: `qty - filled_qty`.
+
+        `None` = không tìm thấy lệnh nào còn mở mang id này — khác hẳn
+        `Decimal("0")` ("tìm thấy, đã khớp hết"). Caller cần phân biệt hai
+        trường hợp để không log nhầm.
+        """
+        for order in self.exchange_client.get_open_orders():
+            if order.order_link_id != order_link_id:
+                continue
+            remaining = order.qty - order.filled_qty
+            return remaining if remaining > 0 else Decimal("0")
+        return None
 
     # ------------------------------------------------------------------
     # Stop loss — chỉ siết, không bao giờ nới (CLAUDE.md bất biến #5)
@@ -256,9 +332,22 @@ class OrderExecutor:
     def cancel_order(self, order_id: str) -> bool:
         return self.exchange_client.cancel_order(order_id)
 
-    def close_position(self, symbol: str) -> OrderResult:
+    def close_position(self, symbol: str, bar_timestamp: datetime) -> OrderResult:
+        """`bar_timestamp` BẮT BUỘC — cố tình KHÔNG có mặc định `None` với
+        fallback `datetime.now()`.
+
+        `datetime.now()` làm `order_link_id` khác nhau ở mỗi lần gọi, tức
+        là chính cái nó phải chống: bot crash sau khi gửi lệnh đóng nhưng
+        trước khi ghi nhận, restart, đóng lại — sàn thấy hai id khác nhau
+        và khớp cả hai. Một tham số mặc định "tiện" ở đây sẽ tái tạo lại
+        đúng bug đang sửa, im lặng, và không caller nào lộ ra. Bắt buộc để
+        type checker chỉ ra mọi chỗ gọi thiếu.
+
+        Truyền timestamp của BAR đang xử lý (không phải giờ hiện tại): hai
+        lần chạy cùng một bar phải cho cùng một id.
+        """
         qty = self._current_qty(symbol)
-        order_link_id = self.generate_order_link_id(symbol, datetime.now(timezone.utc), Decimal("0"))
+        order_link_id = self.generate_order_link_id(symbol, bar_timestamp, Decimal("0"))
         if qty <= 0:
             return OrderResult(
                 order_id="",
@@ -278,5 +367,6 @@ class OrderExecutor:
         )
         return self.exchange_client.submit_order(request)
 
-    def close_all_positions(self) -> list[OrderResult]:
-        return [self.close_position(p.symbol) for p in self.exchange_client.get_positions()]
+    def close_all_positions(self, bar_timestamp: datetime) -> list[OrderResult]:
+        """`bar_timestamp` bắt buộc, cùng lý do `close_position` — xem đó."""
+        return [self.close_position(p.symbol, bar_timestamp) for p in self.exchange_client.get_positions()]

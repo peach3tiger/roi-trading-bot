@@ -412,6 +412,11 @@ class CCXTClient(ExchangeClient):
                         if created_ms is not None
                         else datetime.now(timezone.utc)
                     ),
+                    # ccxt chuẩn hoá `filled` cho mọi sàn. Bản trước bỏ
+                    # trường này, nên `qty - filled` không tính được và
+                    # `handle_partial_fill` không còn đường nào để biết
+                    # phần chưa khớp sau khi tiến trình restart.
+                    filled_qty=Decimal(str(item.get("filled") or "0")),
                 )
             )
         return orders

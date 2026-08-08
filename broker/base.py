@@ -122,6 +122,14 @@ class Order:
     price: Optional[Decimal]
     status: OrderStatus
     created_at: datetime
+    # Phần ĐÃ khớp của lệnh còn mở. `qty - filled_qty` là phần còn lại —
+    # nguồn sự thật duy nhất sau khi tiến trình restart và mất
+    # `OrderExecutor._requested_qty` trong bộ nhớ (xem
+    # `_remaining_qty_from_exchange`). Mặc định 0 để mọi chỗ dựng `Order`
+    # trong test cũ vẫn chạy: lệnh chưa khớp gì là trạng thái đúng khi
+    # không có thông tin, và nó cho `remaining = qty` — ước lượng an toàn
+    # (rebalance thêm phần dư, không bỏ sót).
+    filled_qty: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)

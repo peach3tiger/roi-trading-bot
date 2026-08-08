@@ -92,7 +92,9 @@ class _FakeOrderExecutor:
         self.exchange_client = exchange_client if exchange_client is not None else _FakeExchangeClient()
         self.submit_order_calls: list[Any] = []
         self.modify_stop_calls: list[tuple[str, Decimal]] = []
-        self.close_position_calls: list[str] = []
+        # (symbol, bar_timestamp) — bar_timestamp ghi lại để test khẳng
+        # định order_link_id deterministic theo BAR, không theo giờ chạy.
+        self.close_position_calls: list[tuple[str, Any]] = []
         self._fee_cost = fee_cost
 
     def submit_order(self, signal: Any) -> _FakeOrderResult:
@@ -103,8 +105,8 @@ class _FakeOrderExecutor:
         self.modify_stop_calls.append((symbol, new_stop))
         return True
 
-    def close_position(self, symbol: str) -> _FakeOrderResult:
-        self.close_position_calls.append(symbol)
+    def close_position(self, symbol: str, bar_timestamp: Any) -> _FakeOrderResult:
+        self.close_position_calls.append((symbol, bar_timestamp))
         return _FakeOrderResult(self._fee_cost)
 
 
@@ -331,7 +333,10 @@ def test_stop_loss_breach_closes_position_instead_of_new_signal(tmp_path: Path) 
         dry_run=False,
     )
 
-    assert order_executor.close_position_calls == [_SYMBOL]
+    # bar_timestamp truyền vào phải là TIMESTAMP CỦA BAR, không phải giờ
+    # chạy — đó là điều kiện để order_link_id deterministic (bất biến #8).
+    assert [call[0] for call in order_executor.close_position_calls] == [_SYMBOL]
+    assert order_executor.close_position_calls[0][1] == bar_ts.to_pydatetime()
     assert order_executor.submit_order_calls == []  # KHÔNG sinh signal mới bar này
     assert new_state.current_stop_loss is None
     assert new_state.current_allocation_pct == "0"

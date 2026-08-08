@@ -13,6 +13,7 @@ duy nhất dựng component từ YAML, để `--sweep` ở Phase 7 chỉ phải 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -767,6 +768,34 @@ def _latest_closed_bar_date(now: datetime) -> Any:
     return today - pd.Timedelta(days=1)
 
 
+def _pending_bar_dates(last_processed: Any, available_dates: list[Any]) -> list[Any]:
+    """Bar CHƯA xử lý, tăng dần theo thời gian. Hàm THUẦN.
+
+    Trùng logic `forward/logger.py::pending_bar_dates` — CỐ TÌNH không
+    import từ đó, **cùng lý do đã ghi cho `_latest_closed_bar_date()` ngay
+    phía trên**: `forward/` là thí nghiệm tiền đăng ký 12 tháng, tự cô lập
+    hoàn toàn, và live loop không được phụ thuộc NGƯỢC vào nó dù chỉ một
+    hàm thuần vô hại.
+
+    Lý do thứ hai, mạnh hơn, có từ 2026-08-08: `forward/logger.py` nay
+    ĐÓNG BĂNG với SHA256 ghim trong `tests/golden/frozen_hashes.json`.
+    Nối live loop vào một file không bao giờ được sửa nghĩa là mọi nhu cầu
+    đổi hành vi của live loop sau này sẽ ép lên đúng file đó — hoặc phải
+    kết thúc thí nghiệm để sửa nó. Trùng lặp 5 dòng rẻ hơn nhiều.
+
+    `tests/test_nine_bug_fixes.py::test_bug1_khop_voi_ban_forward` khẳng
+    định hai bản không trôi lệch nhau — đó là thứ làm việc nhân bản này
+    chấp nhận được thay vì chỉ là sao chép.
+    """
+    if not available_dates:
+        return []
+    if last_processed is None:
+        return [available_dates[-1]]
+
+    last_date = last_processed.date() if hasattr(last_processed, "date") else last_processed
+    return sorted(d for d in available_dates if d.date() > last_date)
+
+
 def compute_bars_behind(last_processed_bar: str | None, now: datetime) -> int:
     """Số bar giữa bar ĐÃ ĐÓNG mới nhất (tính tới `now`) và
     `last_processed_bar` đã lưu — 0 nghĩa là đồng bộ.
@@ -993,6 +1022,56 @@ def _fire_bar_alerts(
             )
 
 
+# Lỗi LẬP TRÌNH — không bao giờ được dán nhãn thành sự cố vận hành.
+#
+# Ba loại này không phát sinh từ mạng chập hay sàn trả 5xx: chúng nghĩa là
+# code gọi sai kiểu, sai thuộc tính, hoặc sai khoá — tức là giả định của
+# chính chúng ta về hợp đồng dữ liệu đã sai. Gộp chúng vào DATA_FEED_LOST/
+# API_LOST tạo ra chế độ hỏng tệ nhất: người vận hành đọc alert "mất feed",
+# quyết định CHỜ, và bug nằm im ở đó vô thời hạn.
+#
+# Đã xảy ra trong chính test của dự án này (2026-08-08): fake `OrderBook`
+# dựng bằng `best_bid=`/`best_ask=` (vốn là @property, không phải field)
+# ném TypeError, `_check_spread_and_alert` nuốt thành DATA_FEED_LOST, và
+# phép kiểm spread im lặng không chạy lần nào. Nếu chuyện đó xảy ra với
+# một field đổi tên ở tầng broker khi chạy thật, triệu chứng sẽ y hệt.
+#
+# CỐ TÌNH KHÔNG gồm `ValueError`: nó vừa là lỗi lập trình vừa là cách hợp
+# lệ để báo dữ liệu đầu vào xấu (`Decimal("abc")`, parse timestamp hỏng),
+# nên không phân loại được nếu chỉ nhìn kiểu. Cũng không gồm `IndexError`:
+# `response["list"][0]` trên một phản hồi rỗng của sàn LÀ sự cố dữ liệu
+# thật, không phải bug của ta.
+_PROGRAMMING_ERRORS: tuple[type[BaseException], ...] = (TypeError, AttributeError, KeyError)
+
+
+def _alert_programming_error(
+    *, alert_manager: Any, exc: BaseException, where: str, symbol: str | None = None
+) -> None:
+    """Log ERROR kèm traceback + `AlertType.INTERNAL_ERROR`.
+
+    Tách thành hàm riêng để mọi chỗ bắt lỗi lập trình trong đường live loop
+    phát ra CÙNG một dạng — nếu mỗi chỗ tự chế biến thông điệp, việc lọc
+    "có bug nào đang chạy không" ở tầng log sẽ phải biết trước tất cả các
+    biến thể.
+    """
+    from monitoring.alerts import Alert, AlertType
+
+    target = f" ({symbol})" if symbol else ""
+    logger.error(
+        "LỖI LẬP TRÌNH trong %s%s — KHÔNG phải sự cố hạ tầng, cần sửa code.",
+        where,
+        target,
+        exc_info=exc,
+    )
+    alert_manager.send(
+        Alert(
+            AlertType.INTERNAL_ERROR,
+            f"{type(exc).__name__} trong {where}{target}: {exc} — lỗi lập trình, không phải mất feed.",
+            severity="ERROR",
+        )
+    )
+
+
 def _check_spread_and_alert(
     *, alert_manager: Any, risk_manager: Any, exchange_client: Any, symbol: str
 ) -> None:
@@ -1010,7 +1089,24 @@ def _check_spread_and_alert(
 
     try:
         orderbook = exchange_client.get_orderbook(symbol)
+    except _PROGRAMMING_ERRORS as exc:
+        # PHẢI đứng trước nhánh rộng bên dưới — thứ tự `except` quyết định
+        # nhãn, và một bug bị dán "mất feed" sẽ được xử lý bằng cách chờ.
+        _alert_programming_error(
+            alert_manager=alert_manager,
+            exc=exc,
+            where="_check_spread_and_alert/get_orderbook",
+            symbol=symbol,
+        )
+        return
     except Exception as exc:
+        # Sự cố hạ tầng thật: `ccxt.NetworkError` (timeout, DDoS protection,
+        # rate limit), `ccxt.ExchangeError` (sàn từ chối), `OSError`/
+        # `TimeoutError` (socket). Không liệt kê tường minh vì `main.py`
+        # không import `ccxt` — liệt kê sẽ kéo cả thư viện vào đường import
+        # của mọi lệnh con (kể cả `--backtest`, vốn không cần sàn).
+        # `exc_info` để một loại lỗi NGOÀI dự kiến vẫn còn traceback mà lần.
+        logger.error("Không lấy được orderbook %s: %s", symbol, exc, exc_info=exc)
         alert_manager.send(
             Alert(AlertType.DATA_FEED_LOST, f"Không lấy được orderbook {symbol}: {exc}", severity="ERROR")
         )
@@ -1058,6 +1154,17 @@ def _check_clock_drift(
 
     try:
         check = measure_clock_drift(exchange_client.get_server_time)
+    except _PROGRAMMING_ERRORS as exc:
+        # Bản cũ hạ MỌI lỗi xuống `warning` — kể cả `AttributeError` khi
+        # một `ExchangeClient` chưa override `get_server_time()`, tức là
+        # phép kiểm lệch đồng hồ tắt HOÀN TOÀN và chỉ để lại một dòng
+        # WARNING mỗi bar. Đó đúng là cách một cổng an toàn chết im lặng.
+        _alert_programming_error(
+            alert_manager=alert_manager,
+            exc=exc,
+            where="_check_clock_drift/get_server_time",
+        )
+        return False, None
     except Exception as exc:
         logger.warning("Không đo được lệch đồng hồ bar này: %s", exc)
         return False, None
@@ -1088,6 +1195,144 @@ def _check_clock_drift(
     return halted, check
 
 
+class FeatureCache:
+    """Nhớ kết quả `compute_all_features()` cho tới khi `ohlcv` đổi.
+
+    Vòng lặp poll chạy mỗi `poll_interval_seconds` (mặc định 60s) và tính
+    lại TOÀN BỘ feature matrix mỗi vòng ở hai đường: khi bar mới nhất chưa
+    đủ warmup, và mỗi lần `process_one_bar()` ném exception (state không
+    tiến, vòng sau lặp lại y hệt). Với ~2600 bar, đó là hàng chục phép
+    rolling/z-score lặp lại vô ích mỗi phút, vô thời hạn.
+
+    **CHỈ cache — KHÔNG tính tăng dần.** z-score 365 bar, SMA200, ATR đều
+    phụ thuộc cửa sổ; một bản cập nhật tăng dần gần như chắc chắn lệch
+    nhẹ so với bản tính đủ. Lệch nhẹ nghĩa là `test_wiring_equivalence`
+    với `test_forward_golden` sẽ đỏ — hoặc tệ hơn, KHÔNG đỏ mà lệch âm
+    thầm giữa đường live và đường golden. Có bar mới thì tính lại từ đầu,
+    đúng như bản không cache.
+
+    Khoá gồm cả HASH giá trị chứ không chỉ độ dài/mốc thời gian: sàn có
+    thể sửa lại nến lịch sử (điều chỉnh muộn), và một cache chỉ nhìn độ
+    dài sẽ trả feature cũ cho dữ liệu đã đổi. Hash toàn bảng là O(n) —
+    vẫn rẻ hơn nhiều lần so với dựng lại mọi rolling window.
+    """
+
+    def __init__(self, config: Any) -> None:
+        self._config = config
+        self._key: str | None = None
+        self._value: Any = None
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def _key_of(ohlcv: Any) -> str:
+        import pandas as pd
+
+        # `.to_numpy()` chứ không `.values`: hash_pandas_object trả uint64
+        # Series, và `.values` được annotate là `ExtensionArray | ndarray`
+        # nên không có `.tobytes()` ở tầng type. `.to_numpy()` luôn ndarray.
+        digest = hashlib.sha256(
+            pd.util.hash_pandas_object(ohlcv, index=True).to_numpy().tobytes()
+        ).hexdigest()
+        return f"{len(ohlcv)}|{digest}"
+
+    def get(self, ohlcv: Any) -> Any:
+        key = self._key_of(ohlcv)
+        if key == self._key:
+            self.hits += 1
+            return self._value
+
+        from data.feature_engineering import compute_all_features
+
+        self.misses += 1
+        self._value = compute_all_features(ohlcv, self._config)
+        self._key = key
+        return self._value
+
+
+def _build_exit_signal(
+    *,
+    symbol: str,
+    close_price: Decimal,
+    stop_loss: Decimal,
+    bar_ts: Any,
+    regime_id: int | None,
+    regime_label: str | None,
+) -> Any:
+    """Signal THOÁT (`target_allocation_pct=0`) cho breach stop-loss.
+
+    Tồn tại để lệnh đóng vị thế đi QUA `risk_manager.validate_signal()`
+    thay vì gọi thẳng `close_position()` — CLAUDE.md bất biến #4 nói mọi
+    lệnh phải qua điểm phủ quyết, không có đường vòng nào.
+
+    `stop_loss` giữ đúng giá stop VỪA BỊ THỦNG chứ không phải `None`:
+    `Signal.stop_loss` là `Decimal` bắt buộc, và ghi lại giá thật khiến
+    dòng log/audit sau này đọc được vì sao lệnh này tồn tại.
+
+    `direction=FLAT` — đây là lệnh đi RA, không phải một vị thế LONG mới.
+    `regime_*` lấy từ state đã biết, KHÔNG tính lại: nhánh breach dừng
+    trước bước sinh signal nên regime của bar này chưa được tính, và bịa
+    ra một giá trị mới ở đây sẽ dán nhãn sai cho dữ liệu log.
+    """
+    from core.regime_strategies import Direction, Signal
+
+    return Signal(
+        symbol=symbol,
+        direction=Direction.FLAT,
+        confidence=1.0,
+        entry_price=close_price,
+        stop_loss=stop_loss,
+        take_profit=None,
+        target_allocation_pct=Decimal("0"),
+        leverage=Decimal("1"),
+        regime_id=regime_id if regime_id is not None else -1,
+        regime_name=regime_label if regime_label is not None else "UNKNOWN",
+        regime_probability=0.0,
+        timestamp=bar_ts.to_pydatetime() if hasattr(bar_ts, "to_pydatetime") else bar_ts,
+        reasoning=f"stop loss breach: close {close_price} <= stop {stop_loss}",
+        strategy_name="stop_loss_exit",
+    )
+
+
+def _build_portfolio_state(
+    *,
+    order_executor: Any,
+    signal_generator: Any,
+    symbol: str,
+    close_price: Decimal,
+) -> tuple[Any, Any, dict, Decimal]:
+    """`(portfolio_state, balance, positions, equity)` đọc từ sàn.
+
+    Tách ra để nhánh THOÁT (breach stop-loss) và nhánh thường dựng cùng
+    một PortfolioState theo đúng một cách — hai bản sao chép tay sẽ trôi
+    lệch nhau, và `validate_signal` nhận state khác nhau ở hai nhánh là
+    đúng loại khác biệt không ai để ý cho tới khi nó gây hại.
+    """
+    from core.risk_manager import PortfolioState
+
+    balance = order_executor.exchange_client.get_balance()
+    positions = {p.symbol: p for p in order_executor.exchange_client.get_positions()}
+    qty = positions[symbol].qty if symbol in positions else Decimal("0")
+    equity = balance.total + qty * close_price
+    # daily_pnl/weekly_pnl/peak_equity/drawdown: KHÔNG được risk_manager.
+    # validate_signal() đọc (nó tự theo dõi drawdown NỘI BỘ qua
+    # circuit_breaker.update(portfolio_state.equity, ...) — chỉ trường
+    # .equity thật sự ảnh hưởng quyết định). Điền cho mục đích log/dashboard.
+    portfolio_state = PortfolioState(
+        equity=equity,
+        cash=balance.available,
+        available_balance=balance.available,
+        positions=positions,
+        daily_pnl=Decimal("0"),
+        weekly_pnl=Decimal("0"),
+        peak_equity=equity,
+        drawdown=Decimal("0"),
+        circuit_breaker_status={},
+        flicker_rate=signal_generator.hmm_engine.get_regime_flicker_rate(),
+    )
+    return portfolio_state, balance, positions, equity
+
+
 def process_one_bar(
     *,
     symbol: str,
@@ -1099,6 +1344,7 @@ def process_one_bar(
     bar_ts: Any,
     state: LiveLoopState,
     dry_run: bool,
+    execute: bool = True,
     alert_manager: Any | None = None,
     regime_state_logger: Any | None = None,
     large_pnl_alert_pct: Decimal = Decimal("2.0"),
@@ -1124,6 +1370,27 @@ def process_one_bar(
        rejected -> chỉ log lý do, KHÔNG đổi allocation/stop đang có.
     6. position_tracker.poll() đối soát lại (trừ dry_run — không có lệnh
        thật nào vừa gửi để đối soát).
+
+    `execute=False` — BAR BỊ LỠ, chỉ tua lại TRẠNG THÁI, tuyệt đối không
+    đặt lệnh. Dùng khi bot đứng máy vài ngày rồi bật lại: các bar ở giữa
+    phải được chạy qua để regime/bộ đếm ổn định/alpha forward algorithm/
+    lịch sử trend gate tiến đúng như thể bot chưa từng dừng — nhưng KHÔNG
+    được đặt lệnh theo chúng. Signal của bar D-3 tính trên giá D-3; đặt
+    lệnh hôm nay theo signal đó là thực thi quyết định của ba ngày trước ở
+    giá hiện tại. Không có tham số này, việc lặp qua bar bị lỡ tạo ra một
+    bug tệ hơn hẳn bug nó sửa.
+
+    Cụ thể khi `execute=False`, ngoài việc không gửi lệnh:
+      - KHÔNG đổi `current_allocation_pct`/`current_stop_loss` — không có
+        lệnh nào chạy nên vị thế thật không đổi; ghi state theo signal sẽ
+        làm state lệch khỏi sàn, và bar cuối cùng (`execute=True`) cần
+        `current_allocation` THẬT để tính delta cho đúng.
+      - KHÔNG phát alert — chúng mô tả "đang xảy ra", dán lên bar quá khứ
+        là sai và sẽ spam đúng bằng số bar bị lỡ.
+      - KHÔNG đo lệch đồng hồ / `position_tracker.poll()` — cả hai là lệnh
+        gọi mạng chỉ có nghĩa cho bar đang thực thi.
+      - Breach stop-loss chỉ được GHI NHẬN, không đóng vị thế; bar cuối
+        cùng kiểm lại bằng chính stop đó và mới là chỗ hành động.
 
     KHÔNG tự ghi `state_snapshot.json` — caller (`run_live_loop`) làm việc
     đó, để hàm này test được thuần bằng cách so state trả về, không phải
@@ -1170,7 +1437,7 @@ def process_one_bar(
     clock_drift_ms = state.last_clock_drift_ms
     clock_round_trip_ms = state.last_clock_round_trip_ms
     clock_checked_at = state.last_clock_check_at
-    if alert_manager is not None:
+    if alert_manager is not None and execute:
         halted, clock_check = _check_clock_drift(
             alert_manager=alert_manager,
             exchange_client=order_executor.exchange_client,
@@ -1198,18 +1465,86 @@ def process_one_bar(
                 last_clock_check_at=clock_checked_at,
             )
 
+    # Halt lock kiểm MỖI BAR, không chỉ lúc khởi động: file này có thể được
+    # tạo giữa phiên (bởi chính risk_manager khi peak DD vượt ngưỡng, hoặc
+    # bằng tay khi người vận hành muốn dừng khẩn). Một tiến trình chạy nhiều
+    # ngày mà chỉ kiểm lúc boot sẽ tiếp tục vào lệnh sau khi lock đã xuất
+    # hiện. Không chặn nhánh thoát bên dưới — xem `_approve_exit`.
+    halt_active = risk_manager._is_halted()
+    if halt_active and execute:
+        logger.error(
+            "%s tồn tại — DỪNG mọi lệnh VÀO. Lệnh THOÁT (stop breach) vẫn được phép.",
+            risk_manager._halt_lock_path,
+        )
+
     current_stop = Decimal(state.current_stop_loss) if state.current_stop_loss else None
-    if current_stop is not None and close_price <= current_stop:
+    breached = current_stop is not None and close_price <= current_stop
+    if breached and not execute:
+        # Bar quá khứ: GHI NHẬN, không hành động. Đóng vị thế hôm nay theo
+        # một breach của ba ngày trước là khớp ở giá hôm nay cho quyết định
+        # của hôm đó. Giữ nguyên stop/allocation để bar cuối cùng
+        # (execute=True) kiểm lại bằng chính stop này và mới là chỗ hành động.
+        logger.warning(
+            "STOP LOSS BREACH %s tại bar CŨ %s (giá đóng %s <= stop %s) — chỉ ghi nhận, "
+            "không đặt lệnh; bar mới nhất sẽ quyết định.",
+            symbol,
+            bar_ts.date(),
+            close_price,
+            current_stop,
+        )
+    elif breached:
+        assert current_stop is not None
         logger.warning(
             "STOP LOSS BREACH %s: giá đóng %s <= stop %s — đóng vị thế.", symbol, close_price, current_stop
         )
+        # Lệnh thoát đi QUA risk_manager.validate_signal() như mọi lệnh
+        # khác — CLAUDE.md bất biến #4 không có ngoại lệ, không có cờ
+        # bypass. Phương án "chỉ kiểm halt rồi đóng thẳng" KHÔNG thoả bất
+        # biến đó vì lệnh không đi qua điểm phủ quyết. `validate_signal`
+        # luôn duyệt lệnh giảm về 0 (xem `RiskManager._approve_exit`), nên
+        # ở đây không có nguy cơ stop-loss bị chặn bởi max_daily_trades
+        # hay circuit breaker.
+        exit_signal = _build_exit_signal(
+            symbol=symbol,
+            close_price=close_price,
+            stop_loss=current_stop,
+            bar_ts=bar_ts,
+            regime_id=state.current_regime_id,
+            regime_label=state.current_regime_label,
+        )
+        exit_portfolio_state, _, _, _ = _build_portfolio_state(
+            order_executor=order_executor,
+            signal_generator=signal_generator,
+            symbol=symbol,
+            close_price=close_price,
+        )
+        exit_decision = risk_manager.validate_signal(exit_signal, exit_portfolio_state)
+        if not exit_decision.approved:
+            # Không thể xảy ra với `_approve_exit` hiện tại. Nếu có ai đó
+            # sửa risk_manager làm nhánh này sống lại, phải LỘ RA ngay chứ
+            # không được im lặng giữ vị thế đang lỗ.
+            logger.error(
+                "BẤT THƯỜNG: lệnh THOÁT bị risk_manager từ chối (%s) — vị thế đang lỗ "
+                "KHÔNG được đóng. Kiểm tra RiskManager._approve_exit.",
+                exit_decision.rejection_reason,
+            )
+            return replace(
+                state,
+                last_processed_bar=bar_ts.date().isoformat(),
+                cumulative_fees_paid=str(cumulative_fees),
+                written_at_utc=now_iso,
+                last_clock_drift_ms=clock_drift_ms,
+                last_clock_round_trip_ms=clock_round_trip_ms,
+                last_clock_check_at=clock_checked_at,
+            )
+
         if dry_run:
             logger.info("[DRY-RUN] sẽ đóng vị thế %s (stop breach) — không đặt lệnh thật.", symbol)
         else:
-            result = order_executor.close_position(symbol)
-            logger.info(
-                "close_position(%s) -> order_id=%s status=%s", symbol, result.order_id, result.status
-            )
+            # `bar_ts` chứ không phải `datetime.now()` — order_link_id phải
+            # deterministic theo bar để restart giữa chừng không đóng hai lần.
+            result = order_executor.close_position(symbol, bar_ts.to_pydatetime())
+            logger.info("close_position(%s) -> order_id=%s status=%s", symbol, result.order_id, result.status)
             cumulative_fees += _extract_fee_paid(result)
             position_tracker.poll()
         return replace(
@@ -1230,7 +1565,7 @@ def process_one_bar(
     bars_window = ohlcv.loc[:bar_ts].tail(_STRATEGY_BARS_LOOKBACK)
     features_so_far = features.loc[:bar_ts]
 
-    if alert_manager is not None:
+    if alert_manager is not None and execute:
         _check_spread_and_alert(
             alert_manager=alert_manager,
             risk_manager=risk_manager,
@@ -1238,29 +1573,11 @@ def process_one_bar(
             symbol=symbol,
         )
 
-    balance = order_executor.exchange_client.get_balance()
-    positions = {p.symbol: p for p in order_executor.exchange_client.get_positions()}
-    qty = positions[symbol].qty if symbol in positions else Decimal("0")
-    equity = balance.total + qty * close_price
-    # daily_pnl/weekly_pnl/peak_equity/drawdown: KHÔNG được risk_manager.
-    # validate_signal() đọc (nó tự theo dõi drawdown NỘI BỘ qua
-    # circuit_breaker.update(portfolio_state.equity, ...) — chỉ trường
-    # .equity thật sự ảnh hưởng quyết định, xác nhận bằng đọc lại
-    # core/risk_manager.py). Điền cho mục đích log/dashboard tương lai
-    # (Phase 8), không phải vì validate_signal cần chúng.
-    from core.risk_manager import PortfolioState
-
-    portfolio_state = PortfolioState(
-        equity=equity,
-        cash=balance.available,
-        available_balance=balance.available,
-        positions=positions,
-        daily_pnl=Decimal("0"),
-        weekly_pnl=Decimal("0"),
-        peak_equity=equity,
-        drawdown=Decimal("0"),
-        circuit_breaker_status={},
-        flicker_rate=signal_generator.hmm_engine.get_regime_flicker_rate(),
+    portfolio_state, balance, positions, equity = _build_portfolio_state(
+        order_executor=order_executor,
+        signal_generator=signal_generator,
+        symbol=symbol,
+        close_price=close_price,
     )
 
     result = signal_generator.generate(
@@ -1271,7 +1588,7 @@ def process_one_bar(
     regime_label = result.regime_state.label
     new_trend_structure = signal_generator.trend_gate.get_structure_state(bars_window).value
 
-    if alert_manager is not None:
+    if alert_manager is not None and execute:
         _fire_bar_alerts(
             alert_manager=alert_manager,
             signal_generator=signal_generator,
@@ -1283,7 +1600,44 @@ def process_one_bar(
             large_pnl_alert_pct=large_pnl_alert_pct,
         )
 
-    if decision.approved:
+    if not execute:
+        # Bar bị lỡ: TRẠNG THÁI đã tiến (signal_generator.generate() ở trên
+        # đã cập nhật alpha forward algorithm, bộ đếm ổn định, lịch sử trend
+        # gate — đó là toàn bộ mục đích của lần gọi này). Dừng tại đây.
+        # `current_stop_loss`/`current_allocation_pct` GIỮ NGUYÊN: không lệnh
+        # nào chạy nên vị thế thật không đổi, và bar cuối cùng cần đúng giá
+        # trị thật này để tính delta.
+        logger.info(
+            "Bar %s (bị lỡ): chỉ tua trạng thái — regime=%s(%s) trend=%s, KHÔNG đặt lệnh.",
+            bar_ts.date(),
+            regime_id,
+            regime_label,
+            new_trend_structure,
+        )
+        return replace(
+            state,
+            last_processed_bar=bar_ts.date().isoformat(),
+            current_regime_id=regime_id,
+            current_regime_label=regime_label,
+            current_trend_structure=new_trend_structure,
+            written_at_utc=now_iso,
+            cumulative_fees_paid=str(cumulative_fees),
+            last_clock_drift_ms=clock_drift_ms,
+            last_clock_round_trip_ms=clock_round_trip_ms,
+            last_clock_check_at=clock_checked_at,
+        )
+
+    if decision.approved and halt_active:
+        # `_is_halted()` bên trong validate_signal đã chặn lệnh VÀO, nên tới
+        # đây mà vẫn approved là bất thường — trừ khi ai đó sửa risk_manager.
+        # Chặn thêm một lớp ở đây thay vì tin tuyệt đối vào tầng dưới.
+        logger.error(
+            "BẤT THƯỜNG: signal được duyệt trong khi %s tồn tại — KHÔNG gửi lệnh.",
+            risk_manager._halt_lock_path,
+        )
+        new_stop = current_stop
+        new_allocation = current_allocation
+    elif decision.approved:
         signal = decision.modified_signal
         assert signal is not None
         if decision.modifications:
@@ -1352,9 +1706,27 @@ def process_one_bar(
     )
 
 
-def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
+def run_live_loop(
+    args: argparse.Namespace, settings: dict[str, Any], max_iterations: int | None = None
+) -> None:
     """Khởi động (spec Phase 7 §Khởi động, 10 bước) rồi vòng lặp poll REST
     vĩnh viễn (không có "chờ thị trường mở" — CLAUDE.md bất biến #10).
+
+    `max_iterations=None` (mặc định, và là thứ DUY NHẤT vận hành thật dùng)
+    — chạy vô hạn tới khi nhận SIGINT/SIGTERM, không đổi một hành vi nào so
+    với trước.
+
+    `max_iterations=N` — thoát sau đúng N vòng poll. Chỉ để TEST: vòng lặp
+    vô hạn không thể chạy trong test suite, nên phần nối dây bên trong nó
+    (`_pending_bar_dates` + `execute=is_latest`) trước đây chỉ được phủ
+    gián tiếp bằng cách gọi tay `process_one_bar()` theo đúng chuỗi mà vòng
+    lặp gọi — tức là test chính bản sao của logic, không phải logic thật.
+    Xem `tests/test_live_loop_iterations.py`.
+
+    Đếm MỌI vòng, kể cả vòng thoát sớm bằng `continue` (chưa đủ warmup,
+    không có bar mới, hoặc gặp exception) — nếu chỉ đếm vòng có xử lý bar
+    thì `max_iterations` không chặn được một vòng lặp đang quay tít ở nhánh
+    lỗi, đúng thứ nguy hiểm nhất cần chặn được trong test.
     """
     import os
     import signal as os_signal
@@ -1443,7 +1815,6 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
 
     # Bước 4 — load hoặc train (retrain nếu model cũ hơn retrain_interval_days
     # hoặc không tồn tại/không nạp được).
-    from data.feature_engineering import compute_all_features
     from data.history_loader import HistoryLoader
 
     hmm_engine = build_hmm_engine(settings)
@@ -1459,6 +1830,19 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
                 hmm_engine.training_date,
                 age_days,
             )
+        except _PROGRAMMING_ERRORS:
+            # Train mới VẪN là phục hồi đúng (khởi động phải đi tiếp), nhưng
+            # ở mức ERROR chứ không phải WARNING: một `KeyError` ở đây nghĩa
+            # là `load()` và `save()` bất đồng về schema payload, và mỗi lần
+            # khởi động sẽ train lại từ đầu — tốn hàng phút, im lặng, mãi mãi.
+            # `alert_manager` chưa tồn tại ở bước này (dựng sau), nên chỉ log.
+            logger.error(
+                "LỖI LẬP TRÌNH khi nạp model %s (schema payload bất đồng?) — train mới, "
+                "nhưng đây KHÔNG phải file hỏng, cần sửa code.",
+                model_path,
+                exc_info=True,
+            )
+            need_retrain = True
         except Exception:
             logger.warning("Không nạp được model %s — sẽ train mới.", model_path, exc_info=True)
             need_retrain = True
@@ -1469,7 +1853,10 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
     latest_bar = _latest_closed_bar_date(now)
     ohlcv = history_loader.load(ccxt_symbol, "1D", data_start, latest_bar.to_pydatetime())
     feature_config = build_feature_config(settings)
-    features = compute_all_features(ohlcv, feature_config)
+    # Cùng một cache dùng cho cả lúc khởi động lẫn vòng lặp poll — lần tính
+    # ở đây làm nóng cache, nên vòng poll đầu tiên (cùng `ohlcv`) không tính lại.
+    feature_cache = FeatureCache(feature_config)
+    features = feature_cache.get(ohlcv)
 
     if need_retrain:
         logger.info("Training HMM (%d bar)...", len(features))
@@ -1548,7 +1935,14 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
     os_signal.signal(os_signal.SIGINT, _handle_shutdown_signal)
     os_signal.signal(os_signal.SIGTERM, _handle_shutdown_signal)
 
+    iterations = 0
+
     while not stop_requested:
+        if max_iterations is not None and iterations >= max_iterations:
+            logger.info("Đã chạy đủ %d vòng poll (max_iterations) — dừng.", max_iterations)
+            break
+        iterations += 1
+
         try:
             now = datetime.now(timezone.utc)
             latest_bar = _latest_closed_bar_date(now)
@@ -1571,13 +1965,35 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
             # PHẢI được gắn lại SAU khi nó trả về — xem bên dưới.
             state = replace(state, last_poll_at=last_poll_at, poll_latency_ms=poll_latency_ms)
 
-            features = compute_all_features(ohlcv, feature_config)
+            features = feature_cache.get(ohlcv)
 
             if latest_bar not in features.index:
                 logger.warning("Bar %s chưa đủ warmup feature — chờ vòng poll sau.", latest_bar.date())
                 write_state_snapshot(snapshot_path, state)
                 time.sleep(poll_interval)
                 continue
+
+            # Mọi bar CHƯA xử lý, không chỉ bar mới nhất. Bot đứng máy vài
+            # ngày (crash, mất điện, laptop ngủ) rồi bật lại phải tua lại
+            # từng bar ở giữa để regime/bộ đếm ổn định/alpha forward
+            # algorithm/lịch sử trend gate tiến đúng như thể chưa từng dừng.
+            # Bỏ qua chúng nghĩa là bar hôm nay được đánh giá bằng một HMM
+            # còn đang ở trạng thái của nhiều ngày trước.
+            available = [ts for ts in features.index if ts <= latest_bar]
+            pending = _pending_bar_dates(last_processed, available)
+            if not pending:
+                time.sleep(poll_interval)
+                continue
+            if len(pending) > 1:
+                logger.warning(
+                    "Có %d bar chưa xử lý (%s → %s) — tua trạng thái qua %d bar cũ, "
+                    "CHỈ bar cuối (%s) được phép đặt lệnh.",
+                    len(pending),
+                    pending[0].date(),
+                    pending[-1].date(),
+                    len(pending) - 1,
+                    pending[-1].date(),
+                )
 
             # Retrain theo lịch — lỗi ở đây KHÔNG được dừng vòng lặp, GIỮ
             # NGUYÊN model cũ (spec §Xử lý lỗi: "Lỗi HMM: giữ nguyên regime
@@ -1597,33 +2013,59 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
                             severity="INFO",
                         )
                     )
+            except _PROGRAMMING_ERRORS as exc:
+                # "Giữ nguyên model cũ" là phản ứng đúng cho lỗi DỮ LIỆU/
+                # mạng lúc retrain. Với lỗi lập trình thì nó biến thành:
+                # model không bao giờ được retrain nữa, mỗi lần đến hạn lại
+                # thất bại y hệt, và log chỉ nói "lỗi retrain". Vẫn giữ
+                # model cũ (không dừng bot 24/7 vì một bug ở nhánh retrain)
+                # nhưng dán ĐÚNG nhãn để nó không chìm.
+                _alert_programming_error(alert_manager=alert_manager, exc=exc, where="retrain HMM")
             except Exception:
-                logger.error(
-                    "Lỗi retrain HMM — GIỮ NGUYÊN model cũ, không dừng vòng lặp.", exc_info=True
-                )
+                logger.error("Lỗi retrain HMM — GIỮ NGUYÊN model cũ, không dừng vòng lặp.", exc_info=True)
 
-            state = process_one_bar(
-                symbol=symbol,
-                signal_generator=signal_generator,
-                order_executor=order_executor,
-                position_tracker=position_tracker,
-                ohlcv=ohlcv,
-                features=features,
-                bar_ts=latest_bar,
-                state=state,
-                dry_run=dry_run,
-                alert_manager=alert_manager,
-                regime_state_logger=regime_state_logger,
-                large_pnl_alert_pct=large_pnl_alert_pct,
-                clock_drift_alert_ms=clock_drift_alert_ms,
-                clock_drift_halt_ms=clock_drift_halt_ms,
-            )
+            for bar_index, pending_bar in enumerate(pending):
+                # CHỈ bar cuối cùng được đặt lệnh. Signal của bar D-3 tính
+                # trên giá D-3; thực thi nó hôm nay là khớp quyết định của
+                # ba ngày trước ở giá hiện tại — sai hoàn toàn, và tệ hơn
+                # hẳn việc bỏ qua bar như bản cũ.
+                is_latest = bar_index == len(pending) - 1
+                state = process_one_bar(
+                    symbol=symbol,
+                    signal_generator=signal_generator,
+                    order_executor=order_executor,
+                    position_tracker=position_tracker,
+                    ohlcv=ohlcv,
+                    features=features,
+                    bar_ts=pending_bar,
+                    state=state,
+                    dry_run=dry_run,
+                    execute=is_latest,
+                    alert_manager=alert_manager,
+                    regime_state_logger=regime_state_logger,
+                    large_pnl_alert_pct=large_pnl_alert_pct,
+                    clock_drift_alert_ms=clock_drift_alert_ms,
+                    clock_drift_halt_ms=clock_drift_halt_ms,
+                )
             # process_one_bar() dựng LiveLoopState MỚI qua constructor —
             # gắn lại poll telemetry đã đo ở trên (KHÔNG sống sót qua
             # constructor mới, khác `replace()` vốn giữ nguyên field không
             # được chỉ định tường minh).
             state = replace(state, last_poll_at=last_poll_at, poll_latency_ms=poll_latency_ms)
             write_state_snapshot(snapshot_path, state)
+
+        except _PROGRAMMING_ERRORS as exc:
+            # Lưới hứng cuối cùng, nhưng vẫn phải dán ĐÚNG nhãn. Bản cũ gộp
+            # mọi thứ vào API_LOST với lý do "không có cách phân biệt rẻ
+            # lỗi mạng khỏi lỗi logic ở tầng này" — điều đó đúng với phần
+            # CÒN LẠI, nhưng ba loại này thì phân biệt được và rẻ.
+            #
+            # Quan trọng vì bug ở đây LẶP LẠI MỖI VÒNG POLL: một
+            # AttributeError trong `process_one_bar` sẽ bắn API_LOST mỗi 60
+            # giây, người vận hành thấy "mất API" liên tục và đi kiểm tra
+            # mạng, trong khi bot đã không xử lý được bar nào từ lâu.
+            write_state_snapshot(snapshot_path, state)
+            _alert_programming_error(alert_manager=alert_manager, exc=exc, where="vòng lặp chính")
 
         except Exception as exc:
             # "Lỗi không bắt được: log traceback, ghi trạng thái, cảnh
@@ -1634,13 +2076,10 @@ def run_live_loop(args: argparse.Namespace, settings: dict[str, Any]) -> None:
             # mà không cần bắt riêng exception HMM ở process_one_bar.
             logger.error("Lỗi không bắt được trong vòng lặp chính — ghi trạng thái, tiếp tục.", exc_info=True)
             write_state_snapshot(snapshot_path, state)
-            # API_LOST — cố tình RỘNG (không phân loại theo loại exception):
-            # đây là điểm bắt "mọi thứ khác" của toàn vòng lặp (REST tải
-            # OHLCV, tính feature, generate signal, submit order, ...),
-            # không có cách phân biệt rẻ "lỗi mạng" khỏi "lỗi logic" ở tầng
-            # này. DATA_FEED_LOST (hẹp hơn, riêng cho orderbook) đã tách
-            # riêng ở _check_spread_and_alert() — cái này là lưới hứng còn
-            # lại, ưu tiên báo CÓ sự cố hơn là chính xác tuyệt đối loại sự cố.
+            # API_LOST — lưới hứng cho phần CÒN LẠI sau khi lỗi lập trình
+            # đã được tách ra ở nhánh trên: REST tải OHLCV, sàn từ chối,
+            # tính feature trên dữ liệu xấu, ... Ưu tiên báo CÓ sự cố hơn
+            # là phân loại chính xác tuyệt đối loại sự cố hạ tầng.
             from monitoring.alerts import Alert, AlertType
 
             alert_manager.send(

@@ -316,7 +316,18 @@ class RiskManager:
         6. Vượt `max_trades_per_day` → từ chối.
         7. Lệnh trùng (symbol+hướng trong `duplicate_order_window_seconds`)
            → từ chối; nếu qua được, ghi nhận đã gửi.
+
+        **NGOẠI LỆ DUY NHẤT — `target_allocation_pct <= 0` LUÔN được duyệt**
+        (kiểm tra TRƯỚC mọi bước trên). Xem `_approve_exit()` để biết lý do.
         """
+        # Lệnh THOÁT đi trước mọi cổng từ chối. Một lệnh giảm về 0 bị chặn
+        # vì max_daily_trades/circuit breaker/halt lock nghĩa là GIỮ NGUYÊN
+        # một vị thế đang lỗ — hậu quả tệ hơn hẳn thứ mà các cổng đó đang
+        # bảo vệ. Không phá bất biến "mỗi tầng chỉ được GIẢM" (#2): lệnh này
+        # chỉ giảm exposure, không tầng nào nâng tỷ trọng ở đây.
+        if signal.target_allocation_pct <= 0:
+            return self._approve_exit(signal, portfolio_state)
+
         if self._is_halted():
             return RiskDecision(
                 approved=False,
@@ -408,6 +419,55 @@ class RiskManager:
         self._daily_trade_count += 1
         return RiskDecision(
             approved=True, modified_signal=working_signal, rejection_reason=None, modifications=modifications
+        )
+
+    def _approve_exit(self, signal: SignalLike, portfolio_state: PortfolioState) -> RiskDecision:
+        """Lệnh giảm exposure về 0 — LUÔN duyệt. Ghi nhận và đếm, không chặn.
+
+        Vì sao không có cổng nào áp cho nhánh này:
+
+        - **halt lock / circuit breaker**: cả hai tồn tại để NGĂN MỞ THÊM
+          rủi ro sau khi đã lỗ. Dùng chúng để chặn một lệnh thoát là quay
+          ngược mục đích của chính chúng — bot thủng stop giữa lúc circuit
+          breaker đang HALT sẽ ngồi im với vị thế đang lỗ cho tới lần reset
+          ngày kế tiếp.
+        - **`max_trades_per_day`**: hạn mức chống giao dịch quá tay. Một
+          lệnh thoát bắt buộc không phải giao dịch quá tay.
+        - **lệnh trùng**: gửi lệnh đóng hai lần vô hại — lần thứ hai thấy
+          qty = 0 và không làm gì (`OrderExecutor.close_position`), và
+          `order_link_id` deterministic khiến sàn tự từ chối bản sao.
+        - **`stop_loss is None`**: bất biến #5 đòi mọi VỊ THẾ phải có stop.
+          Sau lệnh này không còn vị thế nào, nên không có gì để bảo vệ.
+
+        Vẫn `circuit_breaker.update()` và vẫn tăng `_daily_trade_count`:
+        "không chặn" không có nghĩa "không ghi nhận". Drawdown và số lệnh
+        trong ngày phải phản ánh đúng cả những lệnh thoát, nếu không thì
+        hạn mức của ngày hôm sau tính trên số liệu thiếu.
+
+        Lệnh vẫn đi qua `validate_signal()` chứ không đi vòng — thoả
+        CLAUDE.md bất biến #4 (mọi lệnh qua risk manager, không có cờ
+        bypass, không có "chế độ khẩn cấp").
+        """
+        self.circuit_breaker.update(portfolio_state.equity, timestamp=signal.timestamp)
+        breaker = self.circuit_breaker.check()
+        if breaker.level is BreakerLevel.PEAK_HALT:
+            # Vẫn ghi lock để chặn MỌI lệnh vào sau đó — chỉ riêng lệnh
+            # thoát này được đi tiếp.
+            self._write_halt_lock(breaker)
+
+        # Tiêu một suất trong cửa sổ chống trùng như mọi lệnh khác, để lần
+        # gọi sau nhìn thấy đúng mốc thời gian. KHÔNG dùng kết quả để chặn.
+        self.check_duplicate_order(signal.symbol, signal.direction, now=signal.timestamp)
+        self._daily_trade_count += 1
+
+        return RiskDecision(
+            approved=True,
+            modified_signal=signal,
+            rejection_reason=None,
+            modifications=[
+                f"lệnh THOÁT (target={signal.target_allocation_pct}) — duyệt vô điều kiện, "
+                f"circuit_breaker={breaker.level.value}"
+            ],
         )
 
     # ------------------------------------------------------------------

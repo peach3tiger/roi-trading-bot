@@ -12,18 +12,23 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 
 
-def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
-    """Làm tròn XUỐNG theo bội số của `step`.
+def _round_to_step(value: Decimal, step: Decimal, rounding: str) -> Decimal:
+    """Làm tròn theo bội số của `step`, hướng do `rounding` quyết định.
 
     Không dùng `Decimal.quantize` vì quantize chỉ làm tròn theo số chữ số thập
     phân (luỹ thừa của 10). `basePrecision` của Bybit thường là 0.000001 nên
     quantize *tình cờ* đúng, nhưng `min_order_qty`/lot size của một số symbol là
-    0.5 hoặc 0.05 — quantize sẽ âm thầm sai ở đúng những symbol đó. Chia–floor–
-    nhân đúng với mọi step.
+    0.5 hoặc 0.05 — quantize sẽ âm thầm sai ở đúng những symbol đó. Chia–làm
+    tròn–nhân đúng với mọi step.
     """
     if step <= 0:
         raise ValueError(f"step phải dương, nhận được {step}")
-    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+    return (value / step).to_integral_value(rounding=rounding) * step
+
+
+def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
+    """Luôn XUỐNG — dùng cho SỐ LƯỢNG (xem `round_qty`)."""
+    return _round_to_step(value, step, ROUND_DOWN)
 
 
 @dataclass(frozen=True)
@@ -46,15 +51,35 @@ class InstrumentRules:
             return -_floor_to_step(-qty, self.base_precision)
         return _floor_to_step(qty, self.base_precision)
 
-    def round_price(self, price: Decimal) -> Decimal:
-        """Làm tròn theo tick_size.
+    def round_price(self, price: Decimal, rounding: str = ROUND_DOWN) -> Decimal:
+        """Làm tròn theo tick_size, HƯỚNG do caller chọn.
 
-        Spec không nói hướng làm tròn giá. Chọn ROUND_DOWN cho nhất quán với
-        `round_qty`: giá thấp hơn → notional ước lượng thấp hơn → không bao giờ
-        vô tình vượt số dư (CLAUDE.md: spec không rõ thì chọn phương án giảm rủi
-        ro và ghi lại lý do).
+        CLAUDE.md bất biến #3 quy định `ROUND_DOWN` cho **SỐ LƯỢNG**
+        (`round_qty`), KHÔNG phải cho GIÁ. Tham số hướng ở đây **không vi
+        phạm bất biến đó** — nó nằm ở một đại lượng khác. Ghi rõ điều này
+        vì bản trước ép ROUND_DOWN cho cả giá "cho nhất quán với
+        round_qty", và nếu không ghi lại thì lần review sau sẽ có người
+        "sửa lại cho đúng" và tái tạo chính bug này.
+
+        Hướng đúng phụ thuộc CHIỀU lệnh, vì "an toàn" nghĩa ngược nhau ở
+        hai chiều:
+
+        - **BUY → `ROUND_DOWN`**: giá thấp hơn → notional thấp hơn → không
+          bao giờ vô tình vượt số dư khả dụng.
+        - **SELL (rebalance giảm tỷ trọng) → `ROUND_UP`**: bán là NHẬN
+          tiền, làm tròn xuống nghĩa là tự nguyện nhận ít hơn ở mỗi lệnh.
+          Làm tròn lên cho giá tốt hơn và không đụng tới số dư.
+
+        **Ngoại lệ — thoát bảo vệ khi thủng stop:** ưu tiên KHỚP ĐƯỢC hơn
+        giá tốt. `close_position()` dùng `OrderType.MARKET` nên không đi
+        qua hàm này; nếu sau này chuyển sang LIMIT, phải dùng `ROUND_DOWN`
+        (giá dễ khớp) chứ KHÔNG phải `ROUND_UP` như rebalance — một lệnh
+        thoát không khớp là giữ nguyên vị thế đang lỗ.
+
+        Mặc định `ROUND_DOWN` giữ nguyên hành vi cũ cho mọi caller chưa
+        chỉ định — hướng an toàn khi không biết chiều lệnh.
         """
-        return _floor_to_step(price, self.tick_size)
+        return _round_to_step(price, self.tick_size, rounding)
 
     def is_valid_order(self, qty: Decimal, price: Decimal) -> tuple[bool, str]:
         """Kiểm tra min/max qty và min_order_amt trước khi gửi — rẻ hơn

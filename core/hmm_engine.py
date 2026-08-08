@@ -54,6 +54,30 @@ _EM_MAX_ITER = 200
 _EM_TOL = 1e-4
 
 
+def _validate_feature_names(feature_names: list[str]) -> None:
+    """Bắt buộc có `log_return_1`. Raise ngay, thông điệp nêu rõ thiếu gì.
+
+    `_build_regime_infos()` xếp hạng regime bằng `means_[:, return_idx]`,
+    nên thiếu feature này thì KHÔNG có cách nào gán nhãn CRASH/BULL/... —
+    đây là lỗi cấu hình, không phải trạng hợp biên xử lý mềm được.
+
+    Đặt ở đây (module level) thay vì trong `HMMRegimeEngine.__init__`: lúc
+    `__init__` chạy CHƯA có feature nào để kiểm — `feature_names` chỉ tồn
+    tại sau `select_and_train()` hoặc `load()`. Gọi từ cả hai chỗ đó, mỗi
+    chỗ ở dòng ĐẦU TIÊN, là điểm sớm nhất mà phép kiểm này thực hiện được.
+    """
+    if _RETURN_FEATURE_NAME in feature_names:
+        return
+    raise ValueError(
+        f"Thiếu feature bắt buộc {_RETURN_FEATURE_NAME!r} — HMM không gán nhãn regime "
+        f"được nếu không có nó (_build_regime_infos xếp hạng theo mean của chính "
+        f"feature này).\n"
+        f"Nhận được {len(feature_names)} feature: {sorted(feature_names)}\n"
+        f"Kiểm tra FeatureConfig/feature_subset ở settings.yaml — "
+        f"{_RETURN_FEATURE_NAME} không được phép loại khỏi bộ feature."
+    )
+
+
 @dataclass(frozen=True)
 class RegimeInfo:
     """Metadata mô tả một regime đã train, không đổi giữa các bar.
@@ -176,6 +200,14 @@ class HMMRegimeEngine:
         Muốn quét BIC ở dải rộng hơn để khảo sát/đối chiếu (không cần
         nhãn) — dùng `scan_bic()` trực tiếp.
         """
+        # Kiểm TRƯỚC khi train: `_build_regime_infos()` cần
+        # `log_return_1` để xếp hạng regime, nhưng nó chỉ chạy SAU
+        # `scan_bic()` — tức là sau toàn bộ chi phí train. Thiếu feature thì
+        # bản cũ nổ bằng `ValueError: 'log_return_1' is not in list` từ
+        # `.index()`, sau nhiều phút fit, với thông điệp không nói được
+        # feature nào thiếu hay có những feature nào.
+        _validate_feature_names(list(features.columns))
+
         if len(features) < self.min_train_bars:
             raise ValueError(
                 f"Cần tối thiểu {self.min_train_bars} bar để train, chỉ có {len(features)}."
@@ -618,6 +650,10 @@ class HMMRegimeEngine:
         payload = pickle.loads(Path(path).read_bytes())
 
         self.model = payload["model"]
+        # Cùng lý do như trong `select_and_train`: một file model cũ được
+        # train bằng bộ feature khác sẽ nạp trót lọt rồi mới nổ ở lần gọi
+        # `_build_regime_infos()`/`predict_regime_filtered()` sau đó.
+        _validate_feature_names(list(payload["feature_names"]))
         self.feature_names = payload["feature_names"]
         self.regime_infos = payload["regime_infos"]
         self._label_by_state = payload["label_by_state"]
