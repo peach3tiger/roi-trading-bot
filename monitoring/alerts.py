@@ -43,11 +43,27 @@ _SMTP_TIMEOUT_S = 10
 # chỉ báo lúc nào cũng đỏ thì không ai đọc nữa.
 _DEFAULT_DEGRADED_AFTER = 3
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_STATUS_PATH = _REPO_ROOT / "monitoring" / "state" / "status.json"
-
 STATUS_OK = "ok"
 STATUS_DEGRADED = "degraded"
+
+# Khớp `main.py::run_live_loop` và `ops/entrypoint.sh` — cùng một thư mục
+# với `state_snapshot.json`/`trading_halted.lock`.
+_DEFAULT_STATE_DIR = "state"
+
+
+def _default_status_path() -> Path:
+    """`${STATE_DIR}/status.json`, đọc env ở THỜI ĐIỂM GỌI.
+
+    Không phải hằng số mức module: `STATE_DIR` được đặt lúc chạy
+    (`ops/docker-compose.yml` -> `/app/state`), còn module này có thể được
+    import trước khi env đó tồn tại. Một hằng số tính lúc import sẽ đóng
+    băng giá trị sai và ghi status ra ngoài volume đã mount.
+
+    Trước 2026-08-08 đây là `monitoring/state/status.json` — nằm trong cây
+    MÃ NGUỒN. Chuyển sang `STATE_DIR` để mọi state runtime ở cùng một chỗ,
+    cùng volume, cùng đường sao lưu.
+    """
+    return Path(os.environ.get("STATE_DIR", _DEFAULT_STATE_DIR)) / "status.json"
 
 
 class AlertType(Enum):
@@ -175,7 +191,7 @@ class AlertManager:
         degraded_after: int = _DEFAULT_DEGRADED_AFTER,
     ) -> None:
         self.rate_limit_seconds = rate_limit_seconds
-        self.status_path = status_path if status_path is not None else _DEFAULT_STATUS_PATH
+        self.status_path = status_path if status_path is not None else _default_status_path()
         self.degraded_after = degraded_after
         self.telegram_bot_token = (
             telegram_bot_token
@@ -299,7 +315,7 @@ class AlertManager:
 
         Giá trị trả về CỐ TÌNH không phản ánh kênh nào thất bại: nó chỉ
         nói "alert này có bị nén hay không". Thất bại từng kênh nằm ở
-        `status()`/`health_snapshot()`/`monitoring/state/status.json` —
+        `status()`/`health_snapshot()`/`${STATE_DIR}/status.json` —
         cam kết "không bao giờ raise" bảo vệ vòng lặp giao dịch, nhưng
         KHÔNG được đổi lấy việc mất cảnh báo một cách vô hình.
 

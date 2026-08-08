@@ -35,8 +35,8 @@ _ALERT = Alert(AlertType.API_LOST, "sự cố thử nghiệm", severity="ERROR")
 
 def _manager(tmp_path: Path, **kwargs: Any) -> AlertManager:
     """AlertManager với status.json trong tmp — KHÔNG dùng đường mặc định
-    (`monitoring/state/status.json` trong cây nguồn) để test không ghi đè
-    trạng thái thật của máy đang chạy."""
+    (`${STATE_DIR}/status.json`) để test không ghi đè trạng thái thật của
+    máy đang chạy."""
     kwargs.setdefault("rate_limit_seconds", 0)
     kwargs.setdefault("console_enabled", False)
     kwargs.setdefault("log_dir", str(tmp_path / "logs"))
@@ -261,6 +261,35 @@ def test_khong_co_kenh_nao_la_degraded(tmp_path: Path) -> None:
     status = _read_status(tmp_path)
     assert status["status"] == STATUS_DEGRADED
     assert status["channels"] == {}
+
+
+def test_duong_dan_mac_dinh_theo_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`${STATE_DIR}/status.json`, cùng chỗ với `state_snapshot.json` và
+    `trading_halted.lock` — không phải `monitoring/state/` (cây mã nguồn).
+
+    Đọc env ở THỜI ĐIỂM GỌI, không phải lúc import: `STATE_DIR` được đặt
+    lúc chạy (`ops/docker-compose.yml` -> `/app/state`), còn module có thể
+    được import trước đó. Một hằng số tính lúc import sẽ ghi status ra
+    NGOÀI volume đã mount — mất sạch mỗi lần container restart, đúng lúc
+    lịch sử sức khoẻ kênh có ích nhất.
+    """
+    monkeypatch.setenv("STATE_DIR", str(tmp_path / "runtime"))
+    manager = AlertManager(rate_limit_seconds=0, console_enabled=False)
+
+    assert manager.status_path == tmp_path / "runtime" / "status.json"
+
+    manager.send(_ALERT)
+    assert (tmp_path / "runtime" / "status.json").exists()
+
+
+def test_duong_dan_mac_dinh_khi_khong_co_state_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Không có env -> `state/status.json`, khớp mặc định của
+    `main.py::run_live_loop` (`Path(os.environ.get("STATE_DIR", "state"))`).
+    Hai chỗ đọc cùng một env với cùng một mặc định; test này bắt được lúc
+    chúng trôi lệch."""
+    monkeypatch.delenv("STATE_DIR", raising=False)
+
+    assert AlertManager(console_enabled=False).status_path == Path("state") / "status.json"
 
 
 def test_status_ghi_nguyen_tu_khong_de_lai_tmp(tmp_path: Path) -> None:

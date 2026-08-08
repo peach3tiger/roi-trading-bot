@@ -1743,7 +1743,7 @@ phải mất feed"; hạ `severity` xuống `WARNING`.
 
 ---
 
-## 2026-08-08 (cuối) — `AlertManager`: sức khoẻ từng kênh, `monitoring/state/status.json`
+## 2026-08-08 (cuối) — `AlertManager`: sức khoẻ từng kênh, `${STATE_DIR}/status.json`
 
 Cam kết "không bao giờ raise" của `send()` bảo vệ vòng lặp giao dịch —
 một kênh alert hỏng không được làm crash bot đang cố báo một sự cố khác.
@@ -1809,18 +1809,26 @@ Log ĐÚNG một lần ở mỗi lần đổi trạng thái (vào/ra degraded), 
 mỗi lần thất bại: một kênh chết sẽ thất bại mỗi alert, và log mỗi lần
 biến chính dòng log đó thành nhiễu.
 
-### `monitoring/state/status.json`
+### `${STATE_DIR}/status.json`
 
 Ghi NGUYÊN TỬ (tmp + rename, cùng lý do `main.py::write_state_snapshot`),
 sau mỗi `send()`. `write_status()` **không bao giờ raise** — nó chạy bên
 trong `send()`, nên một đĩa đầy không được làm crash vòng lặp giao dịch.
 
-Đường dẫn mặc định theo đúng yêu cầu. **Ghi nhận một điều gợn:**
-`monitoring/` là thư mục mã nguồn, còn đây là state runtime — đã thêm
-`monitoring/state/` vào `.gitignore`. Nếu muốn gom về một chỗ với
-`state_snapshot.json`/`trading_halted.lock` thì `${STATE_DIR}` là chỗ
-đúng hơn; `status_path` truyền được qua `__init__` nên đổi chỉ là một
-dòng ở `build_alert_manager()`.
+**Đường dẫn: đã chuyển từ `monitoring/state/status.json` sang
+`${STATE_DIR}/status.json`.** Bản đầu đặt trong `monitoring/` theo đúng
+chỉ dẫn, kèm ghi chú rằng nó gợn: `monitoring/` là thư mục MÃ NGUỒN, còn
+đây là state runtime. Nay gom về cùng chỗ với `state_snapshot.json` và
+`trading_halted.lock` — cùng một volume đã mount
+(`ops/docker-compose.yml`: `STATE_DIR=/app/state`), cùng một đường sao
+lưu, cùng một thứ để xoá khi muốn bắt đầu sạch. `.gitignore` đổi từ
+`monitoring/state/` sang `state/`.
+
+`_default_status_path()` đọc `STATE_DIR` ở **thời điểm gọi**, không phải
+hằng số mức module: env đó được đặt lúc chạy, còn module có thể được
+import trước đó — một hằng số tính lúc import sẽ đóng băng giá trị sai và
+ghi status ra NGOÀI volume đã mount, tức là mất sạch mỗi lần container
+restart, đúng lúc lịch sử sức khoẻ kênh có ích nhất.
 
 **Hợp đồng của `send()` KHÔNG đổi:** giá trị trả về vẫn chỉ nói alert có
 bị rate-limit hay không, không phản ánh kênh nào thất bại

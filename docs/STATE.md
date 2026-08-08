@@ -16,7 +16,7 @@
   bị bắt. **`ops/RUNBOOK.md` có quy trình bắt buộc trước khi deploy**
   (đổi công thức orderLinkId → chỉ deploy khi không có lệnh chờ).
 - **Sức khoẻ kênh cảnh báo (2026-08-08):** `AlertManager` đếm thất bại
-  theo từng kênh, ghi `monitoring/state/status.json` (đã .gitignore);
+  theo từng kênh, ghi `${STATE_DIR}/status.json` (đã .gitignore);
   3 lần thất bại liên tiếp của MỘT kênh -> `status: "degraded"`. Kênh
   file có `try` riêng, luôn được thử kể cả khi kênh từ xa nổ. Hợp đồng
   "không bao giờ raise" giữ nguyên.
