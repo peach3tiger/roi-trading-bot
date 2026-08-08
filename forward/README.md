@@ -46,8 +46,16 @@ tại chỗ giữa chừng.
 ## Chạy
 
 ```bash
-python -m forward.logger
+python -m forward.runner
 ```
+
+**`forward.runner`, không phải `forward.logger`.** Runner chọn file log
+đang hoạt động theo schema (hiện là `log_v2.csv`) rồi mới gọi
+`run_forward_test()`. Chạy thẳng `forward.logger` sẽ ghi vào `log.csv` —
+file schema v1 **đã đóng** và đã ghim SHA256. Xem `forward/SCHEMA.md`.
+
+Đọc dữ liệu để phân tích thì dùng `forward.runner.load_all_bars()`, nó nối
+cả hai file; đọc thẳng `log_v2.csv` sẽ mất bar 2026-08-05.
 
 In ra JSON `{"appended": N, "last_logged_date": "YYYY-MM-DD"}`. `N=0` nghĩa
 là log đã cập nhật, không có bar mới (idempotent — chạy lại cùng ngày
@@ -101,7 +109,11 @@ OHLCV, **chung** cost model (0.10% phí + 0.03% slippage, đọc từ config
 đóng băng), **chung** ngưỡng rebalance 25% và fill delay 1 bar — không có
 bốn đường này thì không so sánh được gì.
 
-## Cột `forward/log.csv`
+## Cột file log
+
+> Schema đã cuộn: v1 `log.csv` (31 cột, 1 bar 2026-08-05, **đã đóng**),
+> v2 `log_v2.csv` (32 cột, từ 2026-08-06, **đang chạy**). Bảng dưới mô tả
+> v2. Xem `forward/SCHEMA.md`.
 
 `date, run_at_utc, open_price, close_price, hmm_retrained, hmm_train_bars,
 warning_count, regime_id, regime_label, regime_probability,
@@ -210,6 +222,59 @@ rm ~/Library/LaunchAgents/com.regime-trader-crypto.forward-test.plist
 **Sau khi sửa file plist** (vd. đổi giờ chạy): copy lại file đã sửa vào
 `~/Library/LaunchAgents/` rồi `bootout` + `bootstrap` lại (launchd không tự
 đọc lại plist khi file đổi trong lúc đã nạp).
+
+## Canh gác độ tươi (watchdog)
+
+`monitoring/forward_watchdog.py` + `com.regime-trader-crypto.forward-watchdog.plist`
+— LaunchAgent **thứ hai**, chạy 09:00 (một giờ sau job forward test), chỉ
+đọc file log đang hoạt động và kêu khi thí nghiệm đã dừng. Nó hỏi
+`forward.runner.ACTIVE_LOG_PATH` chứ không hardcode tên file: cuộn schema
+mà watchdog vẫn canh file cũ thì file đó không bao giờ tăng dòng nữa, nên
+nó kêu mỗi ngày, bị coi là báo động giả, rồi bị tắt — đúng lúc mất khả
+năng canh thật.
+
+Lý do tồn tại: 2026-08-06 → 08-08 forward test dừng im lặng — launchd chạy
+đều, exit 1 mỗi lần vì lệch schema `log.csv`, và **không có gì báo**. Xem
+`docs/DECISIONS.md`, mục "Forward test dừng im lặng".
+
+Job RIÊNG, cố tình không gộp: watchdog chạy chung tiến trình với thứ nó
+canh sẽ chết cùng thứ đó.
+
+Bắt bốn tình huống — file biến mất, file rỗng, **lệch schema** (kể cả kiểu
+pandas không ném lỗi mà lặng lẽ nuốt một cột làm index), và log ngừng tăng
+quá `--max-staleness-days` (mặc định 2).
+
+Tín hiệu quyết định là `max(date)` trong file log, **không phải** mtime
+(git checkout làm mới mtime mà không thêm bar nào) và không phải số dòng
+(cần state file — lại thêm một thứ nữa hỏng im lặng được). Cả hai vẫn được
+đo và đưa vào thông điệp làm dữ liệu chẩn đoán.
+
+Bar ngày D ghi vào ngày D+1, nên `staleness_days = 1` là **bình thường**;
+ngưỡng mặc định chịu được đúng một lần lỡ lịch (máy ngủ qua 08:00).
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.regime-trader-crypto.forward-watchdog.plist
+```
+
+Chạy tay để xem trạng thái, không gửi cảnh báo:
+
+```bash
+.venv/bin/python -m monitoring.forward_watchdog --no-send
+```
+
+Mã thoát: `0` tươi, `2` phát hiện dừng/hỏng, `1` lỗi nội bộ watchdog.
+
+**Kênh cảnh báo.** Telegram qua `monitoring/alerts.py`, credential đọc từ
+`.env` (`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`) bằng
+`forward_watchdog.load_dotenv()` — launchd không có env của shell nên
+không nạp thì kênh im. **Không** đặt credential vào plist: plist được
+commit, `.env` thì không (bất biến #6).
+
+Trường `telegram_configured` xuất hiện trong `forward/watchdog.out.log`
+**mỗi ngày**, kể cả khi log khoẻ — kiểm kênh chỉ lúc cần gửi thì phát hiện
+"chưa cấu hình" đúng hôm cần nó nhất. `false` nghĩa là watchdog đang câm:
+nó vẫn phát hiện đúng, nhưng chỉ ghi vào `watchdog.err.log` — file không
+ai đọc.
 
 ## Mốc đánh giá
 

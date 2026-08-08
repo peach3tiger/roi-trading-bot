@@ -8,10 +8,18 @@ hưởng hành vi runtime nhưng VẪN là một thay đổi tới file đã tuy
 băng — CLAUDE.md không phân biệt "vô hại" hay không ở đây, chỉ phân biệt
 "đổi" hay "không đổi").
 
-Hai file:
+Ba file:
   - `forward/logger.py` — thí nghiệm forward test 12 tháng, bắt đầu
     2026-08-06 (xem `forward/README.md`, `docs/DECISIONS.md` mục
     "Forward test — tiền đăng ký"). KHÔNG được sửa trong suốt thí nghiệm.
+  - `forward/log.csv` — FILE DỮ LIỆU schema v1, ĐÃ ĐÓNG ở 1 bar
+    (2026-08-05). Ghim từ 2026-08-08, khi schema cuộn sang
+    `forward/log_v2.csv` và không đường nào ghi vào v1 nữa
+    (`forward/runner.py` trỏ `_LOG_PATH` sang file đang hoạt động).
+    Lý do ghim KHÁC hai file kia: chúng là code/cấu hình không được sửa
+    TRONG thí nghiệm, còn đây là bằng chứng đã ghi — sửa nó là viết lại
+    quá khứ, nên hash này không đổi kể cả khi bắt đầu thí nghiệm MỚI.
+    Xem `forward/SCHEMA.md`.
   - `forward/config_frozen.yaml` — cấu hình đóng băng cho thí nghiệm đó.
     ĐÃ có cơ chế hash-kiểm RIÊNG ở tầng RUNTIME (`forward/config_frozen.sha256`,
     kiểm tra mỗi lần `forward/logger.py::load_frozen_settings()` chạy qua

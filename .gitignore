@@ -20,6 +20,15 @@ state_snapshot.json
 # (đã khớp *.log ở trên, liệt kê tường minh để dễ thấy).
 forward/launchd.out.log
 forward/launchd.err.log
+forward/watchdog.out.log
+forward/watchdog.err.log
+# Trạng thái runtime của AlertManager (sức khoẻ từng kênh gửi) — ghi lại
+# mỗi lần send(). Là state, không phải mã nguồn, dù nằm trong monitoring/.
+monitoring/state/
+# Bản sao lưu log.csv trước khi migrate schema (2026-08-08) — giữ tại máy
+# làm bằng chứng đối chiếu, không commit (log.csv trong git đã đủ lịch sử).
+forward/log.csv.bak-*
+forward/launchd.err.log.crash-*
 
 # Python
 __pycache__/

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent canh gác độ tươi của forward/log.csv — JOB RIÊNG, cố tình
+  KHÔNG gộp vào com.regime-trader-crypto.forward-test.plist: một watchdog
+  chạy chung tiến trình với thứ nó canh sẽ chết cùng thứ đó, và khi đó
+  không còn canh được gì.
+
+  Lý do tồn tại: 2026-08-06 → 08-08 forward test dừng im lặng (exit 1 mỗi
+  lần chạy do lệch schema log.csv) mà không có gì báo. Xem docstring
+  monitoring/forward_watchdog.py và docs/DECISIONS.md.
+
+  File này là bản NGUỒN đã commit trong repo. Đường dẫn tuyệt đối bên dưới
+  khớp máy đã dựng (/Users/lbeyewear/regime-trader-crypto) — nếu chạy trên
+  máy khác, sửa cả ba đường dẫn trước khi copy vào ~/Library/LaunchAgents/.
+
+  KHÔNG có key EnvironmentVariables ở đây: TELEGRAM_BOT_TOKEN/
+  TELEGRAM_CHAT_ID nằm trong .env (đã .gitignore) và được
+  monitoring/forward_watchdog.py::load_dotenv() nạp lúc chạy. Plist là file
+  được commit — nhét credential vào đây là vi phạm CLAUDE.md bất biến #6.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.regime-trader-crypto.forward-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/lbeyewear/regime-trader-crypto/.venv/bin/python</string>
+        <string>-m</string>
+        <string>monitoring.forward_watchdog</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/lbeyewear/regime-trader-crypto</string>
+
+    <!--
+      09:00 giờ địa phương — MỘT GIỜ SAU job forward test (08:00), đủ để
+      lần chạy trong ngày kết thúc và ghi xong bar mới trước khi watchdog
+      đo. Chạy trước hoặc cùng lúc sẽ đo trạng thái của ngày hôm trước và
+      báo động giả mỗi sáng.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!--
+      Chạy một lần ngay khi nạp/đăng nhập. An toàn: watchdog chỉ ĐỌC
+      log.csv, không ghi gì vào bằng chứng thí nghiệm. Chạy thừa cùng lắm
+      gửi lại một cảnh báo mà AlertManager đã rate-limit sẵn.
+    -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/lbeyewear/regime-trader-crypto/forward/watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/lbeyewear/regime-trader-crypto/forward/watchdog.err.log</string>
+</dict>
+</plist>

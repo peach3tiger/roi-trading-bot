@@ -11,6 +11,11 @@
   khớp máy đã dựng (/Users/lbeyewear/regime-trader-crypto) — nếu chạy trên
   máy khác, sửa cả ba đường dẫn (ProgramArguments, WorkingDirectory,
   StandardOutPath/StandardErrorPath) trước khi copy vào ~/Library/LaunchAgents/.
+
+  Chạy `forward.runner`, KHÔNG phải `forward.logger` (đổi 2026-08-08):
+  runner chọn file log đang hoạt động theo schema (`log_v2.csv`) trước khi
+  gọi `run_forward_test()`. Chạy thẳng `forward.logger` sẽ ghi vào
+  `log.csv` — file schema v1 ĐÃ ĐÓNG và đã ghim SHA256. Xem forward/SCHEMA.md.
 -->
 <plist version="1.0">
 <dict>
@@ -21,7 +26,7 @@
     <array>
         <string>/Users/lbeyewear/regime-trader-crypto/.venv/bin/python</string>
         <string>-m</string>
-        <string>forward.logger</string>
+        <string>forward.runner</string>
     </array>
 
     <key>WorkingDirectory</key>
