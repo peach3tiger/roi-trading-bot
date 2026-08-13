@@ -29,7 +29,9 @@ Không `max()`. Không trung bình cộng. Không "hoà giải" giữa các tầ
 
 Bất biến này là lý do hệ thống an toàn khi một tầng hỏng. Phá nó là phá toàn bộ mô hình phòng thủ nhiều lớp.
 
-`tests/test_layer_composition.py` phải kiểm chứng điều này bằng property test trên giá trị ngẫu nhiên.
+`tests/test_properties.py` phải kiểm chứng điều này bằng property test trên giá trị ngẫu nhiên (Hypothesis, ≥1000 ví dụ mỗi property).
+
+*Trước 2026-08-13 property này nằm ở `tests/test_layer_composition.py` với bộ sinh tự viết bằng `random.Random(42)`. Gộp vào `test_properties.py` ở Phase 12b §A.2 — hai bộ sinh dữ liệu khác nhau cho cùng một bất biến nghĩa là bộ yếu hơn âm thầm quyết định mức bảo vệ thật. Bất biến #2 KHÔNG bị hạ cấp: nó vẫn có test riêng, và Hypothesis biết thu nhỏ phản ví dụ trong khi `random.Random` thì không.*
 
 ### 3. `Decimal` cho mọi số lượng và giá trong đường thực thi
 
@@ -133,7 +135,12 @@ Không magic number trong code. Nếu một con số có thể cần chỉnh, n�
 
 - `test_look_ahead.py` — không có look-ahead bias
 - `test_precision.py` — làm tròn qty/price đúng ở mọi biên
-- `test_layer_composition.py` — các tầng chỉ giảm
+- `test_properties.py` — property test Hypothesis, ≥1000 ví dụ mỗi
+  property. Gồm bất biến #2 (các tầng chỉ giảm — gộp từ
+  `test_layer_composition.py` cũ ở Phase 12b §A.2), cùng năm property
+  khác: trần trend gate trong [0,1], risk manager không bao giờ TĂNG
+  allocation, phí không âm và đơn điệu, `round_qty` luôn xuống và là bội
+  của `base_precision`, `state_probabilities` là phân phối hợp lệ.
 - `test_cost_model.py` — phí tính đúng
 - `test_forward_golden.py` — output pipeline forward (feature → HMM →
   strategy → trend gate → `compose_layer_allocations`) khớp

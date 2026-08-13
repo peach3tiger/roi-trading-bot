@@ -45,3 +45,7 @@ htmlcov/
 
 # OS
 .DS_Store
+# Cache của Hypothesis (cơ sở dữ liệu ví dụ + hằng số quét được). Runtime,
+# không phải mã nguồn. Với derandomize=True (tests/conftest.py) nó không
+# ảnh hưởng khả năng tái lập, nên commit nó chỉ thêm nhiễu vào diff.
+.hypothesis/
