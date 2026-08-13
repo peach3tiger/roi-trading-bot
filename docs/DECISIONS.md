@@ -1846,3 +1846,87 @@ xuống 1; `any` -> `all`; đếm cả kênh chưa cấu hình; không kênh nà
 báo ok; `write_status` raise được.
 
 419 passed / 0 skipped. ruff + mypy sạch.
+
+---
+
+## Điểm dữ liệu `warning_count` #2 — 2026-08-08
+
+Ghi ở đây vì thông tin này trước đó chỉ nằm trong commit message
+(`6cf5fee`), mà commit message thì phải `git log --grep` mới tìm ra. Mục
+đích: lần sau có mốc để so, thay vì phải đoán "23478 là nhiều hay ít".
+
+### Số đo
+
+| | |
+|---|---|
+| Bar | 2026-08-08 |
+| `hmm_train_bars` | 2660 |
+| `warning_count` | **23478** |
+
+**Xác minh hai đường độc lập:** `wc -l forward/warnings.log` = 23478, và
+cột `warning_count` của dòng 08-08 trong `log_v2.csv` = 23478. Hai con số
+khớp — nghĩa là cơ chế chuyển hướng warning không mất dòng nào và không
+đếm trùng.
+
+**Nguồn:** `RuntimeWarning` — "divide by zero / overflow / invalid value
+encountered in matmul" từ `sklearn/utils/extmath.py:203` và
+`sklearn/cluster/_kmeans.py:237`, tức đường `.fit()` EM/k-means của
+hmmlearn/sklearn. Đã điều tra 2026-08-07 (mục "Bổ sung hạ tầng"):
+**không phải bug** — `predict_regime_filtered` chạy sạch, cô lập bằng
+`warnings.simplefilter("error")` quanh từng lệnh gọi riêng, `log_alpha`
+trên 2657 bar nằm trong [-22815, -9.2], cách rất xa giới hạn float64.
+
+### Điểm #1 KHÔNG đo được — chuỗi thực tế mới có MỘT điểm
+
+| # | Bar | `hmm_train_bars` | `warning_count` |
+|---|---|---|---|
+| 1 | 2026-08-05 | 2657 | **NaN** — schema v1 chưa có cột này |
+| 2 | 2026-08-08 | 2660 | 23478 |
+
+Lần retrain đầu tiên xảy ra dưới schema v1, vốn không có cột
+`warning_count` (đó chính là cột được thêm vào gây ra sự cố lệch schema —
+xem mục 2026-08-08 phía trên). Nên xét theo **thứ tự lần retrain** thì
+08-08 là điểm #2, nhưng xét theo **chuỗi đo được** thì nó là điểm ĐẦU
+TIÊN. Quy tắc §C.1 ("xu hướng tăng đơn điệu 3 lần liên tiếp") không thể
+tính 08-05 vào chuỗi: không so sánh được với `NaN`.
+
+### Sớm nhất kích hoạt được: 2026-08-22, không phải 08-29
+
+`retrain_interval_days = 7` (`forward/config_frozen.yaml`). Từ điểm đo
+được đầu tiên:
+
+| Điểm đo được | Bar dự kiến |
+|---|---|
+| 1 | 2026-08-08 (đã có) |
+| 2 | ~2026-08-15 |
+| 3 | ~2026-08-22 |
+
+Cần 3 điểm liên tiếp tăng đơn điệu → **sớm nhất 2026-08-22**. Ước lượng
+08-29 ban đầu tính dư một chu kỳ (nó coi 08-05 là một điểm dùng được).
+
+### Phát hiện kèm theo: việc cuộn schema đã RESET lịch retrain
+
+08-05 → 08-08 cách nhau **3 ngày**, không phải 7. Không phải lỗi cấu
+hình. `forward/logger.py` xác định hạn retrain bằng cách đọc lịch sử
+`hmm_retrained` từ file log ĐANG HOẠT ĐỘNG:
+
+```python
+retrained_rows = existing[existing["hmm_retrained"]]
+last_retrain_date = retrained_rows["date"].max().date()  # None nếu rỗng
+```
+
+Sau khi cuộn sang `log_v2.csv`, file đó chỉ chứa 08-06 và 08-07 — cả hai
+`hmm_retrained=False`. Lần retrain 08-05 nằm ở `log.csv` (đã đóng) và
+**không còn nhìn thấy được** từ đường này. `last_retrain_date = None` →
+runner coi như chưa từng retrain → retrain ngay.
+
+Hệ quả **một lần duy nhất**: từ 08-08 trở đi `log_v2.csv` tự mang lịch sử
+retrain của chính nó, nhịp 7 ngày chạy lại bình thường (kế tiếp ~08-15).
+Không mất dữ liệu, không sai bar nào — chỉ là một lần retrain sớm hơn
+lịch 4 ngày.
+
+**Nhưng đây là thứ phải nhớ khi cuộn sang v3:** `load_all_bars()` nối mọi
+file, còn `run_forward_test()` thì KHÔNG — nó chỉ đọc file đang hoạt
+động. Mọi trạng thái suy ra từ lịch sử log (lịch retrain, và bất cứ thứ
+gì thêm sau này) sẽ reset ở mỗi lần cuộn. Đã thêm vào
+`forward/SCHEMA.md`, mục "Cuộn sang v3".

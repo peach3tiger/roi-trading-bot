@@ -60,6 +60,25 @@ Bất cứ thay đổi nào lên `_CSV_FIELDNAMES` — **kể cả chỉ thêm m
 `append_row()`/`read_existing_log()` đã chừa sẵn cửa: chúng tra `_LOG_PATH`
 ở *thời điểm gọi*, nên `runner.py` gán lại biến module là đủ.
 
+### Cuộn file RESET mọi trạng thái suy ra từ lịch sử log
+
+`load_all_bars()` nối MỌI file, nhưng `run_forward_test()` thì **không** —
+nó chỉ đọc file đang hoạt động. Bất cứ thứ gì được suy ra bằng cách quét
+lịch sử log sẽ mất khi cuộn.
+
+Đã xảy ra ở lần cuộn v1 → v2. Lịch retrain được xác định bằng:
+
+```python
+retrained_rows = existing[existing["hmm_retrained"]]
+last_retrain_date = retrained_rows["date"].max().date()  # None nếu rỗng
+```
+
+Lần retrain 2026-08-05 nằm ở `log.csv` (đã đóng), không còn nhìn thấy từ
+`log_v2.csv` → `last_retrain_date = None` → runner retrain ngay ở lần chạy
+kế tiếp (08-08), sớm hơn lịch 7 ngày mất 4 ngày. Vô hại lần đó, nhưng
+**phải lường trước ở mỗi lần cuộn**: kiểm xem có trạng thái nào khác cũng
+suy ra từ lịch sử log không, và ghi lại lần reset vào `docs/DECISIONS.md`.
+
 ## Vì sao sự cố 2026-08-06 xảy ra
 
 `append_row()` chỉ ghi header khi file **chưa tồn tại**:
