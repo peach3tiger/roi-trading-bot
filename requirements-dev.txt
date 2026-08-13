@@ -3,6 +3,9 @@
 
 pytest
 pytest-cov
+# Property-based testing (Phase 12b §A.2). Profile cấu hình ở
+# tests/conftest.py — deadline=None + derandomize=True, xem lý do ở đó.
+hypothesis
 ruff
 mypy
 pandas-stubs
