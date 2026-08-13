@@ -167,8 +167,9 @@ def test_moi_file_da_dong_deu_duoc_ghim_hash() -> None:
         rel = str(path.relative_to(repo))
         assert rel in pinned, (
             f"{rel} đã đóng (nằm trong CLOSED_LOG_PATHS) nhưng CHƯA ghim SHA256 trong "
-            f"tests/golden/frozen_hashes.json — xem bước 4 mục 'Cuộn sang v3' "
-            f"trong forward/SCHEMA.md."
+            f"tests/golden/frozen_hashes.json — xem forward/SCHEMA.md, mục "
+            f"'Nếu vẫn buộc phải cuộn'. Lưu ý: KHÔNG cuộn schema trong thời gian "
+            f"thí nghiệm (tới 2027-08-06) — dùng file phụ forward/extra_<tên>.csv."
         )
 
 

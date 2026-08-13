@@ -1917,29 +1917,81 @@ tính toán. Đó là tôi đoán lý do của người khác rồi ghi phỏng 
 hồ sơ như sự thật — câu chữ §C.1 chịu được cả hai cách đọc, và không có
 gì trong bảng nói cách nào mới đúng.)*
 
-### Phát hiện kèm theo: việc cuộn schema đã RESET lịch retrain
+### Phát hiện kèm theo: lần retrain này lệch nhịp
 
-08-05 → 08-08 cách nhau **3 ngày**, không phải 7. Không phải lỗi cấu
-hình. `forward/logger.py` xác định hạn retrain bằng cách đọc lịch sử
-`hmm_retrained` từ file log ĐANG HOẠT ĐỘNG:
+08-05 → 08-08 cách nhau 3 ngày, không phải 7. Ghi thành mục riêng —
+**"Sai lệch thí nghiệm #1"** ngay dưới đây — vì nó là một sai lệch của
+chính thí nghiệm, không phải một ghi chú về `warning_count`.
+
+---
+
+## Sai lệch thí nghiệm #1 — lịch retrain bị reset khi cuộn schema (2026-08-08)
+
+> **Sổ đăng ký sai lệch.** Mục này mở đầu một danh sách ĐÁNH SỐ: mọi chỗ
+> thí nghiệm forward chạy KHÁC đặc tả, dù vô hại, đều được ghi ở đây với
+> số thứ tự tăng dần. Ở mốc đánh giá 12 tháng (2027-08-06), người dựng lại
+> "thí nghiệm có chạy đúng đặc tả không" cần đọc MỘT danh sách, không phải
+> lục `git log --grep` hay suy ra từ tài liệu schema.
+
+### Sự kiện
+
+Retrain xảy ra ngày **2026-08-08**, cách lần trước (2026-08-05) **3 ngày**
+thay vì 7 như `retrain_interval_days` quy định.
+
+### Nguyên nhân
+
+`run_forward_test()` suy ra `last_retrain_date` bằng cách quét cột
+`hmm_retrained` trong file log **ĐANG HOẠT ĐỘNG**:
 
 ```python
 retrained_rows = existing[existing["hmm_retrained"]]
 last_retrain_date = retrained_rows["date"].max().date()  # None nếu rỗng
 ```
 
-Sau khi cuộn sang `log_v2.csv`, file đó chỉ chứa 08-06 và 08-07 — cả hai
-`hmm_retrained=False`. Lần retrain 08-05 nằm ở `log.csv` (đã đóng) và
-**không còn nhìn thấy được** từ đường này. `last_retrain_date = None` →
-runner coi như chưa từng retrain → retrain ngay.
+Sau khi cuộn sang `log_v2.csv` (xem mục "Forward test dừng im lặng"), file
+đó chỉ chứa 08-06 và 08-07 — cả hai `hmm_retrained=False`. Lần retrain
+08-05 nằm ở `log.csv` đã đóng nên **vô hình** với đường này →
+`last_retrain_date = None` → runner coi như chưa từng retrain → retrain
+ngay ở lần chạy kế tiếp.
 
-Hệ quả **một lần duy nhất**: từ 08-08 trở đi `log_v2.csv` tự mang lịch sử
-retrain của chính nó, nhịp 7 ngày chạy lại bình thường (kế tiếp ~08-15).
-Không mất dữ liệu, không sai bar nào — chỉ là một lần retrain sớm hơn
-lịch 4 ngày.
+### Ảnh hưởng
 
-**Nhưng đây là thứ phải nhớ khi cuộn sang v3:** `load_all_bars()` nối mọi
-file, còn `run_forward_test()` thì KHÔNG — nó chỉ đọc file đang hoạt
-động. Mọi trạng thái suy ra từ lịch sử log (lịch retrain, và bất cứ thứ
-gì thêm sau này) sẽ reset ở mỗi lần cuộn. Đã thêm vào
-`forward/SCHEMA.md`, mục "Cuộn sang v3".
+Một lần retrain sớm 4 ngày. **Không mất bar nào, không sai giá trị nào.**
+Từ 08-08 trở đi `log_v2.csv` tự mang lịch sử retrain của chính nó, nhịp 7
+ngày chạy lại bình thường (kế tiếp ~08-15).
+
+### KHIẾM KHUYẾT ĐÃ BIẾT — KHÔNG SỬA ĐƯỢC
+
+`forward/logger.py` đóng băng với SHA256 ghim trong
+`tests/golden/frozen_hashes.json`. Sửa nó = **kết thúc thí nghiệm hiện
+tại** (CLAUDE.md bất biến #15). Một lần retrain lệch nhịp không đáng để
+đánh đổi 12 tháng dữ liệu.
+
+**Chấp nhận sống chung tới 2027-08-06.**
+
+Cách phòng cho tương lai không phải là sửa `logger.py`, mà là **không cuộn
+schema lần nữa** — xem `forward/SCHEMA.md`, mục "KHÔNG cuộn schema lần nữa
+trong thời gian thí nghiệm" (dùng file phụ `forward/extra_<tên>.csv` khoá
+theo `bar_date` thay vì `log_v3.csv`).
+
+### Vì sao ghi ở ĐÂY chứ không chỉ trong SCHEMA.md
+
+`forward/SCHEMA.md` trả lời câu hỏi *"tôi sắp đổi schema, phải làm gì?"* —
+người đọc nó là người sắp sửa code. Mục này trả lời câu hỏi khác:
+*"thí nghiệm đã chạy đúng đặc tả chưa?"* — người đọc là người đang thẩm
+định kết quả ở mốc 12 tháng, và họ sẽ thấy một lần retrain lệch nhịp trong
+`log_v2.csv` rồi cần lời giải thích **ngay trong hồ sơ thí nghiệm**.
+
+Hai tài liệu, hai câu hỏi, hai nhóm người đọc. Không phải trùng lặp.
+
+### Điều đáng lo hơn bản thân sai lệch
+
+Sai lệch này vô hại. Cái đáng lo là **nó chỉ được phát hiện ba ngày sau,
+một cách tình cờ** — khi kiểm số liệu để viết mục `warning_count` và thắc
+mắc vì sao hai lần retrain cách nhau 3 ngày. Không có phép kiểm nào canh
+"nhịp retrain có đúng `retrain_interval_days` không".
+
+Chưa thêm phép kiểm đó: nó sẽ phải đọc `log_v2.csv` và biết về lần reset
+hợp lệ ở 08-08, tức là một ngoại lệ hardcode ngay từ ngày đầu. Ghi lại như
+một khoảng trống đã biết thay vì dựng một cái canh gác biết trước là sẽ
+phải nói dối.
