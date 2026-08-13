@@ -85,6 +85,10 @@ class AlertType(Enum):
     # trình thì phải sửa code — và một bug được dán nhãn "mất feed" sẽ
     # được xử lý bằng cách chờ, tức là không bao giờ được xử lý.
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # Nhịp retrain HMM lệch khỏi `retrain_interval_days`. Tách riêng khỏi
+    # FORWARD_LOG_STALE: log vẫn tăng dòng đều (không stale), chỉ có lịch
+    # retrain sai — hai triệu chứng khác nhau, hai nguyên nhân khác nhau.
+    RETRAIN_CADENCE_DRIFT = "RETRAIN_CADENCE_DRIFT"
 
 
 @dataclass(frozen=True)

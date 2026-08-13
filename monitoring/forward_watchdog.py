@@ -80,6 +80,165 @@ _DEFAULT_MAX_STALENESS_DAYS = 2
 EXIT_OK = 0
 EXIT_INTERNAL_ERROR = 1
 EXIT_STALE = 2
+EXIT_CADENCE_DRIFT = 3
+
+# ----------------------------------------------------------------------
+# Nhịp retrain
+# ----------------------------------------------------------------------
+
+# MỐC BẮT ĐẦU GIÁM SÁT — không phải ngoại lệ hardcode.
+#
+# Sai lệch #1 (lịch retrain reset khi cuộn schema, xem docs/DECISIONS.md)
+# xảy ra ở khoảng 08-05 → 08-08, TRƯỚC mốc này, và đã được ghi nhận riêng
+# ở đó. Phép kiểm này KHÔNG cần biết gì về nó.
+#
+# Sự khác biệt là quan trọng. Một ngoại lệ hardcode nghĩa là "bỏ qua đúng
+# lần lệch ngày 08-08" — nó biến phép kiểm thành thứ phải mang theo danh
+# sách miễn trừ, và mỗi mục trong danh sách đó là một chỗ phép kiểm nói
+# dối. Một mốc bắt đầu giám sát thì khác: nó nói "cơ chế này bắt đầu chạy
+# từ đây", đúng như mọi hệ thống giám sát khởi động ở một thời điểm nào
+# đó. Trước mốc không có dữ liệu giám sát; sau mốc mọi lệch nhịp đều là
+# bất thường thật, vì quy tắc "KHÔNG cuộn schema trong thời gian thí
+# nghiệm" (forward/SCHEMA.md) đã loại bỏ nguyên nhân duy nhất đã biết.
+#
+# Cụ thể: chỉ xét khoảng cách nào có ĐIỂM SAU >= mốc này. Khoảng
+# 08-05 → 08-08 có điểm sau là 08-08 < 08-09 nên rơi ngoài phạm vi giám
+# sát một cách tự nhiên, không cần nhắc tới nó ở bất kỳ đâu trong code.
+_CADENCE_MONITORING_START = date(2026, 8, 9)
+
+# ±1 ngày: bar là mốc UTC nguyên ngày, và runner có thể chạy bù nhiều bar
+# trong một lần (backfill sau khi máy ngủ), nên một ngày xê dịch là bình
+# thường. Lệch 2 ngày trở lên thì không giải thích được bằng lịch chạy.
+_CADENCE_TOLERANCE_DAYS = 1
+
+CADENCE_OK = "ok"
+CADENCE_DRIFT = "drift"
+CADENCE_NO_DATA = "no_data"  # chưa đủ 2 lần retrain sau mốc giám sát
+CADENCE_UNAVAILABLE = "unavailable"  # không đọc được log/config
+
+
+@dataclass(frozen=True)
+class RetrainGap:
+    """Khoảng cách giữa HAI lần retrain liên tiếp."""
+
+    previous: date
+    current: date
+    days: int
+    ok: bool
+
+
+@dataclass(frozen=True)
+class RetrainCadence:
+    status: str
+    detail: str
+    interval_days: Optional[int] = None
+    gaps: tuple[RetrainGap, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "detail": self.detail,
+            "interval_days": self.interval_days,
+            "monitoring_since": _CADENCE_MONITORING_START.isoformat(),
+            "gaps": [
+                {
+                    "previous": g.previous.isoformat(),
+                    "current": g.current.isoformat(),
+                    "days": g.days,
+                    "ok": g.ok,
+                }
+                for g in self.gaps
+            ],
+        }
+
+
+def check_retrain_cadence(
+    monitoring_start: Optional[date] = None, tolerance_days: int = _CADENCE_TOLERANCE_DAYS
+) -> RetrainCadence:
+    """Nhịp retrain HMM có đúng `retrain_interval_days` không.
+
+    Đọc log ĐÃ NỐI (`forward.runner.load_all_bars()`) chứ không phải file
+    đang hoạt động: chính việc `run_forward_test()` chỉ nhìn file đang
+    hoạt động là nguyên nhân của sai lệch #1. Một phép kiểm mắc lại đúng
+    điểm mù mà nó sinh ra để canh thì vô nghĩa.
+
+    Đặt ở đây, KHÔNG ở `forward/logger.py` — file đó đóng băng với SHA256
+    ghim, sửa nó = kết thúc thí nghiệm (CLAUDE.md bất biến #15). Watchdog
+    là chỗ đúng cho mọi phép kiểm thêm vào giữa chừng: nó chỉ ĐỌC, không
+    tham gia vào đường sinh dữ liệu, nên thêm bao nhiêu cũng không đụng
+    tới tính toàn vẹn của thí nghiệm.
+
+    KHÔNG BAO GIỜ raise — cùng hợp đồng với phần còn lại của watchdog.
+    Không đọc được config/log thì trả `CADENCE_UNAVAILABLE`, không phải
+    `CADENCE_OK`: "không kiểm được" khác hẳn "đã kiểm, không sao".
+    """
+    start = monitoring_start if monitoring_start is not None else _CADENCE_MONITORING_START
+
+    try:
+        from forward.logger import load_frozen_settings
+
+        interval = int(load_frozen_settings()["hmm"]["retrain_interval_days"])
+    except Exception as exc:  # noqa: BLE001 — mọi lỗi đọc config đều là "không kiểm được"
+        return RetrainCadence(
+            status=CADENCE_UNAVAILABLE,
+            detail=f"Không đọc được retrain_interval_days: {type(exc).__name__}: {exc}",
+        )
+
+    try:
+        from forward.runner import load_all_bars
+
+        df = load_all_bars()
+    except Exception as exc:  # noqa: BLE001
+        return RetrainCadence(
+            status=CADENCE_UNAVAILABLE,
+            detail=f"Không đọc được log đã nối: {type(exc).__name__}: {exc}",
+            interval_days=interval,
+        )
+
+    retrain_dates = sorted(d.date() for d in df.loc[df["hmm_retrained"], "date"])
+
+    gaps = tuple(
+        RetrainGap(
+            previous=prev,
+            current=cur,
+            days=(cur - prev).days,
+            ok=abs((cur - prev).days - interval) <= tolerance_days,
+        )
+        for prev, cur in zip(retrain_dates, retrain_dates[1:])
+        # ĐIỂM SAU quyết định phạm vi giám sát — xem chú thích
+        # `_CADENCE_MONITORING_START`.
+        if cur >= start
+    )
+
+    if not gaps:
+        return RetrainCadence(
+            status=CADENCE_NO_DATA,
+            detail=(
+                f"Chưa đủ dữ liệu: {len(retrain_dates)} lần retrain trong log, "
+                f"0 khoảng cách nào có điểm sau >= {start} (mốc bắt đầu giám sát)."
+            ),
+            interval_days=interval,
+        )
+
+    bad = [g for g in gaps if not g.ok]
+    if bad:
+        lines = "; ".join(
+            f"{g.previous} → {g.current} cách {g.days} ngày (chờ đợi {interval}±{tolerance_days})"
+            for g in bad
+        )
+        return RetrainCadence(
+            status=CADENCE_DRIFT,
+            detail=f"{len(bad)}/{len(gaps)} khoảng cách retrain lệch nhịp: {lines}",
+            interval_days=interval,
+            gaps=gaps,
+        )
+
+    return RetrainCadence(
+        status=CADENCE_OK,
+        detail=f"{len(gaps)} khoảng cách retrain, tất cả trong {interval}±{tolerance_days} ngày.",
+        interval_days=interval,
+        gaps=gaps,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -322,11 +481,14 @@ def run_watchdog(
     manager = AlertManager()
     telegram_ok = bool(manager.telegram_bot_token and manager.telegram_chat_id)
 
+    cadence = check_retrain_cadence()
+
     result: dict[str, Any] = {
         "stale": message is not None,
         "message": message,
         "alert_sent": False,
         "telegram_configured": telegram_ok,
+        "retrain_cadence": cadence.as_dict(),
         **freshness.as_dict(),
     }
 
@@ -337,16 +499,36 @@ def run_watchdog(
             "điện thoại. Đây là điểm mù: thí nghiệm có thể dừng mà không ai hay."
         )
 
-    if message is None or not send:
+    if not send:
         return result
 
-    result["alert_sent"] = manager.send(
-        Alert(
-            alert_type=AlertType.FORWARD_LOG_STALE,
-            message=message,
-            severity="ERROR",
+    # Hai cảnh báo ĐỘC LẬP: log có thể vừa tươi vừa lệch nhịp retrain (log
+    # tăng dòng đều mỗi ngày, chỉ lịch retrain sai). Gộp chúng vào một
+    # nhánh `if message is None: return` như bản trước sẽ làm cảnh báo nhịp
+    # retrain không bao giờ phát khi log còn khoẻ — tức là gần như không
+    # bao giờ.
+    if message is not None:
+        result["alert_sent"] = manager.send(
+            Alert(
+                alert_type=AlertType.FORWARD_LOG_STALE,
+                message=message,
+                severity="ERROR",
+            )
         )
-    )
+
+    if cadence.status == CADENCE_DRIFT:
+        result["cadence_alert_sent"] = manager.send(
+            Alert(
+                alert_type=AlertType.RETRAIN_CADENCE_DRIFT,
+                message=(
+                    f"Nhịp retrain HMM lệch khỏi retrain_interval_days.\n"
+                    f"{cadence.detail}\n"
+                    f"Giám sát từ {_CADENCE_MONITORING_START} (xem docs/DECISIONS.md, "
+                    f"'Sai lệch thí nghiệm #1')."
+                ),
+                severity="ERROR",
+            )
+        )
     return result
 
 
@@ -374,7 +556,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         return EXIT_INTERNAL_ERROR
 
     sys.stdout.write(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
-    return EXIT_STALE if result["stale"] else EXIT_OK
+
+    # Log stale ĐI TRƯỚC nhịp retrain khi cả hai cùng sai: log không tăng
+    # dòng nghĩa là thí nghiệm đã dừng, còn lệch nhịp retrain thì thí
+    # nghiệm vẫn chạy. Mã thoát chỉ mang được một giá trị nên nó phải mang
+    # cái nghiêm trọng hơn; cả hai vẫn xuất hiện đầy đủ trong JSON và mỗi
+    # cái có alert riêng.
+    if result["stale"]:
+        return EXIT_STALE
+    if result["retrain_cadence"]["status"] == CADENCE_DRIFT:
+        return EXIT_CADENCE_DRIFT
+    return EXIT_OK
 
 
 if __name__ == "__main__":
