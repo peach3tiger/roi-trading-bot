@@ -8,24 +8,46 @@ phép kiểm, không phải chỉ mất độ tin cậy của nó.
 
 **Đã ĐO, không suy luận.** Prompt §0 giả định `random_state` chưa được cố
 định và backtest chưa tất định. Giả định đó SAI với code hiện tại:
-`HMMRegimeEngine.select_and_train()` vốn đã lặp `random_state` theo một
-dãy cố định. Đo thật trên một window walk-forward đầy đủ (365 IS + 182
-OOS, `n_candidates=[3,4,5,6,7]` × `n_init=10`, `covariance_type=full`):
-hai lần chạy cho `equity_curve` SHA256 giống hệt.
+`select_and_train()` vốn đã lặp `random_state` theo một dãy cố định. Hai
+lần chạy cho `equity_curve` SHA256 giống hệt ngay từ đầu. Việc §0 còn
+thiếu là làm cho tính tất định đó được KHAI BÁO (`hmm.seed`) thay vì tình
+cờ đúng.
 
-Việc duy nhất §0 còn thiếu là làm cho tính tất định đó được KHAI BÁO thay
-vì tình cờ đúng — `hmm.seed` trong `settings.yaml`, mặc định 0, cho đúng
-dãy cũ. Xem docstring `HMMRegimeEngine.__init__`.
+## Hai kịch bản, MỘT hàm dựng
 
-**Chi phí:** ~12 giây mỗi lần chạy, hai lần = ~25s. Đó là giá của việc
-kiểm tính tất định trên CẤU HÌNH THẬT. Chạy với cấu hình rút gọn (ít
-candidate/init hơn) sẽ nhanh hơn nhiều nhưng không kiểm được thứ cần
-kiểm: rủi ro nằm ở chính cấu hình đang dùng để sinh baseline.
+`_build_and_run()` là đường duy nhất dựng backtest ở file này. Hai kịch
+bản chỉ khác nhau ở THAM SỐ — không có logic nào bị nhân đôi, nên bản
+nhanh không thể trôi khỏi bản đầy đủ.
+
+| Kịch bản | Cấu hình | Thời gian (đo thật) | Chạy khi |
+|---|---|---|---|
+| `nhanh` | HMM rút gọn (2 cand × 3 init, diag), 2 window | ~3s | mặc định |
+| `đầy đủ` | HMM thật (5 × 10, full cov), 365+182 | ~31s | `pytest -m slow` |
+
+Cả hai con số là cho HAI lần chạy backtest (tất định cần so hai lần).
+
+**Vì sao bản nhanh phải rút gọn CẢ cấu hình HMM, không chỉ cửa sổ** — đo
+thật, không đoán:
+
+- Chi phí bị chi phối bởi `n_candidates × n_init` lần `.fit()`, KHÔNG
+  phải kích thước cửa sổ. Thu nhỏ cửa sổ mà giữ cấu hình thật còn CHẬM
+  HƠN (5.7s so với 12s cho một window đầy đủ) vì cửa sổ nhỏ tạo NHIỀU
+  window hơn trên cùng khoảng đánh giá, tức nhiều lần retrain hơn.
+- `covariance_type: full` với `n_components` tới 7 cần 881 tham số tự do;
+  trên 120 bar (840 điểm dữ liệu) hmmlearn báo degenerate. Bản nhanh sẽ
+  train model rác — vẫn tất định, nhưng bơm cảnh báo degenerate vào mọi
+  lần chạy suite là tiếng ồn không đổi lấy gì.
+
+Bản nhanh vì thế nhắm đúng việc §0 giao cho nó: bắt lỗi **thứ tự dict,
+numpy chưa seed, song song hoá** — những nguồn ngẫu nhiên ở TẦNG PIPELINE,
+không phụ thuộc cấu hình HMM. Rủi ro riêng của cấu hình thật (5 candidate
+× 10 init, full covariance) do bản `đầy đủ` gánh.
 """
 
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,31 +56,86 @@ import pytest
 
 import main as main_mod
 
-# Cửa sổ NHỎ NHẤT còn hợp lệ: đúng MỘT window walk-forward.
-#
-# `_plan_windows()` lập kế hoạch trên `features` (đã trừ ~741 bar warmup
-# của Tầng 1), và cần `is_bars=365` bar trước khi OOS bắt đầu. Nên
-# `data_start` phải sớm hơn `start` khoảng 741 + 365 bar — đo thật, không
-# đoán: 2018-01-01 cho ~2375 bar thô -> ~1634 bar feature.
-_DATA_START = datetime(2018, 1, 1, tzinfo=timezone.utc)
-_START = datetime(2024, 1, 1, tzinfo=timezone.utc)
-_END = datetime(2024, 7, 2, tzinfo=timezone.utc)
-
 _SYMBOL = "BTCUSDT"
 _CCXT_SYMBOL = "BTC/USDT"
 
+# `_plan_windows()` lập kế hoạch trên `features` (đã trừ ~741 bar warmup
+# Tầng 1) và cần `is_bars` bar trước khi OOS bắt đầu — nên `data_start`
+# phải sớm hơn `start` khoảng 741 + is_bars bar. Đo thật: 2018-01-01 cho
+# ~2375 bar thô -> ~1634 bar feature.
+_DATA_START = datetime(2018, 1, 1, tzinfo=timezone.utc)
 
-@pytest.fixture(scope="module")
-def ohlcv() -> pd.DataFrame:
-    from data.history_loader import HistoryLoader
 
-    return HistoryLoader().load(_CCXT_SYMBOL, "1D", _DATA_START, _END)
+@dataclass(frozen=True)
+class _Scenario:
+    """Tham số phân biệt hai kịch bản. Mọi thứ khác dùng chung."""
+
+    label: str
+    start: datetime
+    end: datetime
+    is_bars: int
+    oos_bars: int
+    hmm_overrides: dict[str, Any]
 
 
-def _run_backtest(settings: dict[str, Any], ohlcv: pd.DataFrame) -> Any:
+_FAST = _Scenario(
+    label="nhanh",
+    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    end=datetime(2024, 3, 1, tzinfo=timezone.utc),
+    is_bars=365,
+    oos_bars=30,
+    # Rút gọn để hai lần chạy vừa ~3s. `diag` thay `full`: trên cửa sổ này
+    # `full` vừa chậm vừa degenerate — xem docstring module.
+    hmm_overrides={"n_candidates": [3, 4], "n_init": 3, "covariance_type": "diag"},
+)
+
+_FULL = _Scenario(
+    label="đầy đủ",
+    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    end=datetime(2024, 7, 2, tzinfo=timezone.utc),
+    is_bars=365,
+    oos_bars=182,
+    hmm_overrides={},  # cấu hình THẬT từ settings.yaml
+)
+
+_SCENARIOS = [
+    pytest.param(_FAST, id="nhanh"),
+    pytest.param(_FULL, id="day-du", marks=pytest.mark.slow),
+]
+
+# Cache theo kịch bản: mỗi kịch bản chạy backtest ĐÚNG HAI LẦN cho cả
+# file, không phải hai lần cho mỗi test.
+_OHLCV: dict[str, pd.DataFrame] = {}
+_RUNS: dict[str, tuple[Any, Any]] = {}
+
+
+def _ohlcv(scenario: _Scenario) -> pd.DataFrame:
+    if scenario.label not in _OHLCV:
+        from data.history_loader import HistoryLoader
+
+        _OHLCV[scenario.label] = HistoryLoader().load(_CCXT_SYMBOL, "1D", _DATA_START, scenario.end)
+    return _OHLCV[scenario.label]
+
+
+def _build_and_run(scenario: _Scenario) -> Any:
+    """ĐƯỜNG DUY NHẤT dựng backtest ở file này.
+
+    Hai kịch bản khác nhau ở tham số truyền vào đây, không ở logic. Một
+    bản sao thứ hai của hàm này sẽ trôi khỏi bản gốc trong vài tháng, và
+    lúc đó "bản nhanh xanh" không còn nói được gì về bản đầy đủ.
+    """
     from backtest.backtester import WalkForwardBacktester
 
-    wf = main_mod.build_walk_forward_config(settings)
+    settings = main_mod.load_settings()
+    if scenario.hmm_overrides:
+        settings = {**settings, "hmm": {**settings["hmm"], **scenario.hmm_overrides}}
+
+    wf = replace(
+        main_mod.build_walk_forward_config(settings),
+        is_bars=scenario.is_bars,
+        oos_bars=scenario.oos_bars,
+        step_bars=scenario.oos_bars,
+    )
     backtester = WalkForwardBacktester(
         hmm_engine=main_mod.build_hmm_engine(settings, min_train_bars=wf.is_bars),
         strategy_orchestrator=main_mod.build_orchestrator(settings),
@@ -67,63 +144,79 @@ def _run_backtest(settings: dict[str, Any], ohlcv: pd.DataFrame) -> Any:
         config=wf,
         feature_config=main_mod.build_feature_config(settings),
     )
-    return backtester.run(_SYMBOL, ohlcv, _START, _END)
+    return backtester.run(_SYMBOL, _ohlcv(scenario), scenario.start, scenario.end)
+
+
+def _two_runs(scenario: _Scenario) -> tuple[Any, Any]:
+    if scenario.label not in _RUNS:
+        _RUNS[scenario.label] = (_build_and_run(scenario), _build_and_run(scenario))
+    return _RUNS[scenario.label]
 
 
 def _digest(frame: pd.DataFrame) -> str:
-    """SHA256 của CSV — so bit-for-bit, không phải `assert_frame_equal` với
-    dung sai. §0 nói "giống bit-for-bit"; một phép so có dung sai sẽ bỏ lọt
-    đúng loại lệch nhỏ mà ngưỡng 0.001 cần loại trừ."""
+    """SHA256 của CSV — so bit-for-bit, KHÔNG phải `assert_frame_equal` có
+    dung sai. §0 nói "bit-for-bit"; một phép so có dung sai sẽ bỏ lọt đúng
+    loại lệch nhỏ mà ngưỡng 0.001 cần loại trừ."""
     return hashlib.sha256(frame.to_csv().encode("utf-8")).hexdigest()
 
 
-@pytest.fixture(scope="module")
-def two_runs(ohlcv: pd.DataFrame) -> tuple[Any, Any]:
-    """Chạy backtest HAI LẦN, dùng lại cho mọi assert trong file — ~25s là
-    chi phí một lần, không phải mỗi test."""
-    settings = main_mod.load_settings()
-    return _run_backtest(settings, ohlcv), _run_backtest(settings, ohlcv)
+# ======================================================================
+# Tất định — cùng phép kiểm, hai kịch bản
+# ======================================================================
 
 
-def test_equity_curve_giong_bit_for_bit(two_runs: tuple[Any, Any]) -> None:
+@pytest.mark.parametrize("scenario", _SCENARIOS)
+def test_equity_curve_giong_bit_for_bit(scenario: _Scenario) -> None:
     """KHẲNG ĐỊNH TRUNG TÂM — nghiệm thu §0."""
-    first, second = two_runs
+    first, second = _two_runs(scenario)
 
     assert _digest(first.equity_curve) == _digest(second.equity_curve)
     assert len(first.equity_curve) > 0, "backtest rỗng thì phép so vô nghĩa"
 
 
+@pytest.mark.parametrize("scenario", _SCENARIOS)
 @pytest.mark.parametrize("attr", ["trade_log", "regime_history", "model_selection"])
-def test_moi_bang_ket_qua_giong_bit_for_bit(two_runs: tuple[Any, Any], attr: str) -> None:
+def test_moi_bang_ket_qua_giong_bit_for_bit(scenario: _Scenario, attr: str) -> None:
     """Không chỉ equity: chuỗi regime và lệnh cũng phải trùng khớp.
 
     `equity_curve` giống nhau mà `regime_history` khác nghĩa là hai đường
     khác nhau tình cờ cho cùng số dư — chưa phải tất định.
     """
-    first, second = two_runs
+    first, second = _two_runs(scenario)
 
     assert _digest(getattr(first, attr)) == _digest(getattr(second, attr))
 
 
-def test_cost_report_giong_nhau(two_runs: tuple[Any, Any]) -> None:
-    first, second = two_runs
+@pytest.mark.parametrize("scenario", _SCENARIOS)
+def test_cost_report_giong_nhau(scenario: _Scenario) -> None:
+    first, second = _two_runs(scenario)
 
     assert first.cost_report.as_dict() == second.cost_report.as_dict()
 
 
-def test_seed_mac_dinh_cho_dung_day_cu(ohlcv: pd.DataFrame) -> None:
-    """`seed=0` phải cho ĐÚNG dãy `random_state` trước khi tham số tồn tại
-    (`range(n_init)`), nếu không mọi baseline đã đo hết hiệu lực.
+@pytest.mark.parametrize("scenario", _SCENARIOS)
+def test_co_it_nhat_hai_window(scenario: _Scenario) -> None:
+    """Tiền đề của cả file: phải có ÍT NHẤT một lần retrain trong phạm vi
+    đo, nếu không phép kiểm không chạm tới `random_state` lần nào và mọi
+    assert phía trên xanh một cách rỗng nghĩa."""
+    first, _ = _two_runs(scenario)
 
-    Kiểm bằng cách so engine dựng từ settings (seed đọc từ config) với
-    engine dựng tay không truyền seed — hai bên phải cho cùng model.
-    """
+    assert len(first.model_selection) >= 1, "không window nào -> không retrain nào -> không kiểm gì"
+
+
+# ======================================================================
+# `seed` phải là thứ được KHAI BÁO, và phải có tác dụng thật
+# ======================================================================
+
+
+def test_seed_mac_dinh_cho_dung_day_cu() -> None:
+    """`seed=0` phải cho ĐÚNG dãy `random_state` trước khi tham số tồn tại
+    (`range(n_init)`), nếu không mọi baseline đã đo hết hiệu lực."""
     from core.hmm_engine import HMMRegimeEngine
 
     settings = main_mod.load_settings()
     assert settings["hmm"]["seed"] == 0, "settings.yaml phải khai báo seed=0"
 
-    from_config = main_mod.build_hmm_engine(settings, min_train_bars=365)
     hmm = settings["hmm"]
     without_seed = HMMRegimeEngine(
         n_candidates=list(hmm["n_candidates"]),
@@ -135,22 +228,18 @@ def test_seed_mac_dinh_cho_dung_day_cu(ohlcv: pd.DataFrame) -> None:
         flicker_threshold=hmm["flicker_threshold"],
     )
 
-    assert from_config.seed == without_seed.seed == 0
+    assert main_mod.build_hmm_engine(settings, min_train_bars=365).seed == without_seed.seed == 0
 
 
-def test_seed_khac_nhau_cho_ket_qua_khac_nhau(ohlcv: pd.DataFrame) -> None:
-    """Đột biến ngược: nếu `seed` KHÔNG ảnh hưởng gì thì cả cơ chế là giả.
-
-    Dùng cấu hình rút gọn (1 candidate, 2 init) — ở đây ta chỉ cần chứng
-    minh seed CÓ tác dụng, không cần cấu hình thật.
-    """
+def test_seed_khac_nhau_cho_ket_qua_khac_nhau() -> None:
+    """Đột biến ngược: nếu `seed` KHÔNG ảnh hưởng gì thì cả cơ chế là giả."""
     import numpy as np
 
     from core.hmm_engine import HMMRegimeEngine
     from data.feature_engineering import compute_all_features
 
-    feature_config = main_mod.build_feature_config(main_mod.load_settings())
-    features = compute_all_features(ohlcv.iloc[:1200], feature_config)
+    settings = main_mod.load_settings()
+    features = compute_all_features(_ohlcv(_FAST).iloc[:1200], main_mod.build_feature_config(settings))
 
     def _train(seed: int) -> Any:
         engine = HMMRegimeEngine(
@@ -164,6 +253,7 @@ def test_seed_khac_nhau_cho_ket_qua_khac_nhau(ohlcv: pd.DataFrame) -> None:
             seed=seed,
         )
         engine.select_and_train(features.iloc[:300])
+        assert engine.model is not None
         return engine.model.means_
 
     assert not np.allclose(_train(0), _train(1000)), (
