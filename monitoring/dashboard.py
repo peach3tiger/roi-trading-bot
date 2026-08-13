@@ -15,10 +15,12 @@ nghiệm thu "Dashboard chạy được... chụp lại màn hình dạng text".
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Callable, Optional
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
@@ -102,6 +104,179 @@ class DashboardState:
     is_testnet: bool
 
 
+# ----------------------------------------------------------------------
+# Panel SO SÁNH BASELINE — CHỈ ĐỌC `drift.json`, không tính lại gì
+# ----------------------------------------------------------------------
+
+# Phase 12b §C.1 (`monitoring/drift.py`) sinh file này. Nó CHƯA tồn tại —
+# panel phải hiển thị được điều đó một cách rõ ràng thay vì để trống.
+_DEFAULT_DRIFT_PATH = Path("monitoring/state/drift.json")
+
+# Bốn trạng thái, CỐ TÌNH tách rời nhau. Gộp "file hỏng" vào "chưa có dữ
+# liệu" là đúng cái bẫy mà panel này sinh ra để tránh: người vận hành đọc
+# "chưa có dữ liệu", cho rằng Phase 12b chưa xây xong, và một file JSON
+# hỏng nằm im vô thời hạn.
+DRIFT_OK = "ok"
+DRIFT_MISSING = "missing"  # chưa có file — TRẠNG THÁI MONG ĐỢI trước Phase 12b
+DRIFT_UNREADABLE = "unreadable"  # có file nhưng không đọc/không hiểu được — SỰ CỐ
+DRIFT_EMPTY = "empty"  # đọc được, đúng schema, nhưng không có chỉ số nào
+
+
+@dataclass(frozen=True)
+class DriftMetric:
+    """MỘT dòng so sánh. `current`/`baseline` là chuỗi ĐÃ ĐỊNH DẠNG sẵn
+    bởi bên ghi — panel không làm phép tính nào trên chúng.
+
+    Cố ý không dùng `Decimal`/`float`: mỗi chỉ số trong bảng Phase 12b §C.1
+    có đơn vị khác nhau (điểm %, tỷ lệ, lần, số đếm). Ép về một kiểu số ở
+    đây nghĩa là panel phải biết đơn vị của từng chỉ số — tức là biết logic
+    drift, đúng thứ nó KHÔNG được biết.
+    """
+
+    name: str
+    current: str
+    baseline: str
+    alert: bool
+
+
+@dataclass(frozen=True)
+class DriftPanelData:
+    """Thứ panel cần để vẽ. `status` luôn là một trong bốn hằng số trên."""
+
+    status: str
+    detail: str
+    path: Path
+    generated_at_utc: Optional[str] = None
+    metrics: tuple[DriftMetric, ...] = ()
+
+
+def _coerce_metric(raw: Any) -> Optional[DriftMetric]:
+    """`None` nếu phần tử không đúng hình dạng — bỏ qua phần tử hỏng còn
+    hơn làm hỏng cả panel, nhưng caller đếm lại để không im lặng."""
+    if not isinstance(raw, dict):
+        return None
+    name = raw.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    return DriftMetric(
+        name=name,
+        current=str(raw.get("current", "?")),
+        baseline=str(raw.get("baseline", "?")),
+        alert=bool(raw.get("alert", False)),
+    )
+
+
+def load_drift_panel_data(path: Optional[Path] = None) -> DriftPanelData:
+    """Đọc `drift.json`. KHÔNG BAO GIỜ raise, KHÔNG BAO GIỜ tính lại drift.
+
+    Đây là bên ĐỌC. Toàn bộ logic so sánh baseline thuộc về
+    `monitoring/drift.py` (Phase 12b §C.1) — nếu panel tự tính khi thiếu
+    file, dashboard sẽ hiển thị một con số KHÁC với con số mà cơ chế cảnh
+    báo dùng, và hai nguồn sự thật cho cùng một chỉ số là cách chắc chắn
+    nhất để không ai tin cái nào.
+
+    **Hợp đồng schema tối thiểu** — đây là thứ Phase 12b phải ghi ra:
+
+        {
+          "generated_at_utc": "2026-08-08T00:05:00+00:00",   // tuỳ chọn
+          "metrics": [
+            {"name": "Phân bố allocation",
+             "current": "28.1 / 19.0 / 15.2 / 37.7 %",
+             "baseline": "30.6 / 18.1 / 16.5 / 34.8 %",
+             "alert": false}
+          ]
+        }
+
+    `current`/`baseline` là CHUỖI đã định dạng, `alert` là bool đã quyết
+    định bởi bên ghi. Panel chỉ tô màu theo `alert`.
+
+    Sai hợp đồng -> `DRIFT_UNREADABLE` kèm thông điệp nói rõ chờ đợi gì,
+    KHÔNG phải `DRIFT_MISSING`.
+    """
+    target = path if path is not None else _DEFAULT_DRIFT_PATH
+
+    if not target.exists():
+        return DriftPanelData(
+            status=DRIFT_MISSING,
+            detail=(
+                f"Chưa có dữ liệu drift — {target} chưa tồn tại.\n"
+                "File này do monitoring/drift.py sinh ra (Phase 12b §C.1), chưa xây."
+            ),
+            path=target,
+        )
+
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 — mọi lỗi đọc/parse đều là "không dùng được"
+        return DriftPanelData(
+            status=DRIFT_UNREADABLE,
+            detail=(
+                f"{target} TỒN TẠI nhưng không đọc được: {type(exc).__name__}: {exc}\n"
+                "Đây KHÔNG phải 'chưa có dữ liệu' — có thứ gì đó đã ghi hỏng file."
+            ),
+            path=target,
+        )
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("metrics"), list):
+        return DriftPanelData(
+            status=DRIFT_UNREADABLE,
+            detail=(
+                f"{target} sai hợp đồng schema — chờ đợi một object có khoá "
+                '"metrics" là list. Xem docstring load_drift_panel_data().'
+            ),
+            path=target,
+        )
+
+    raw_metrics = payload["metrics"]
+    metrics = tuple(m for m in (_coerce_metric(r) for r in raw_metrics) if m is not None)
+    generated_at = payload.get("generated_at_utc")
+    generated_at_str = generated_at if isinstance(generated_at, str) else None
+
+    if not metrics:
+        return DriftPanelData(
+            status=DRIFT_EMPTY,
+            detail=(
+                f"{target} đọc được nhưng không có chỉ số nào dùng được "
+                f"({len(raw_metrics)} phần tử thô, 0 phần tử đúng hình dạng)."
+            ),
+            path=target,
+            generated_at_utc=generated_at_str,
+        )
+
+    skipped = len(raw_metrics) - len(metrics)
+    detail = f"{len(metrics)} chỉ số"
+    if skipped:
+        # Không im lặng bỏ qua: một phần tử sai hình dạng nghĩa là bên ghi
+        # và bên đọc đã lệch hợp đồng, phải nhìn thấy được.
+        detail += f" ({skipped} phần tử sai hình dạng, đã bỏ qua)"
+    return DriftPanelData(
+        status=DRIFT_OK,
+        detail=detail,
+        path=target,
+        generated_at_utc=generated_at_str,
+        metrics=metrics,
+    )
+
+
+def drift_metric_style(metric: DriftMetric) -> str:
+    """Tô màu THEO CỜ `alert` của bên ghi — KHÔNG so sánh
+    `current` với `baseline`.
+
+    Tách thành hàm riêng (thay vì một biểu thức inline trong panel) vì
+    `render_text()` lược bỏ màu, nên một lỗi ở đây KHÔNG quan sát được từ
+    text đã render — đo bằng đột biến: đổi thành
+    `metric.current != metric.baseline` và toàn bộ test panel vẫn xanh.
+    Hàm thuần thì kiểm trực tiếp được.
+
+    Vì sao không được tự so sánh: ngưỡng cảnh báo của từng chỉ số nằm ở
+    bảng Phase 12b §C.1 (lệch > 15 điểm %, > 10 điểm %, > 20%, cao hơn
+    2×...) — mỗi chỉ số một quy tắc khác nhau. Panel so sánh chuỗi bằng
+    `!=` sẽ báo động ở mọi khác biệt dù nhỏ, tức là tự bịa ra một logic
+    drift thứ hai, khác với logic mà cơ chế cảnh báo thật đang dùng.
+    """
+    return _STYLE_DANGER if metric.alert else _STYLE_OK
+
+
 def _risk_style(value: Decimal, limit: Decimal) -> str:
     """Xanh dưới 50% giới hạn, vàng 50-100%, đỏ khi CHẠM/VƯỢT giới hạn.
     `limit <= 0` coi như không có ngưỡng thật (tránh chia 0) -> OK."""
@@ -124,9 +299,17 @@ def _bool_icon(ok: bool) -> str:
 
 
 class Dashboard:
-    def __init__(self, refresh_interval_seconds: int = 5) -> None:
+    def __init__(self, refresh_interval_seconds: int = 5, *, drift_path: Optional[Path] = None) -> None:
         self.refresh_interval_seconds = refresh_interval_seconds
         self.console = Console()
+        # `drift.json` do một TIẾN TRÌNH KHÁC ghi (Phase 12b §C.1), nên
+        # panel đọc lại ở mỗi lần vẽ thay vì nhận qua `DashboardState`.
+        # Hệ quả có chủ ý: `DashboardState` KHÔNG phải thêm field thứ 27 và
+        # `main.py` không phải luồn dữ liệu drift qua toàn bộ vòng lặp chỉ
+        # để hiển thị. Đọc file nhỏ mỗi 5s là chi phí chấp nhận được, và
+        # `load_drift_panel_data()` không bao giờ raise nên I/O ở đây không
+        # làm vỡ `render()`.
+        self._drift_path = drift_path
 
     # ------------------------------------------------------------------
 
@@ -137,6 +320,7 @@ class Dashboard:
             self._position_panel(state),
             self._signals_panel(state),
             self._risk_panel(state),
+            self._drift_panel(),
             self._system_panel(state),
         )
 
@@ -233,6 +417,48 @@ class Dashboard:
             "",
         )
         return Panel(grid, title="RISK", title_align="left")
+
+    def _drift_panel(self) -> Panel:
+        """SO SÁNH BASELINE. Luôn vẽ MỘT panel có nội dung đọc được —
+        không bao giờ để trống, không bao giờ raise.
+
+        "Để trống im lặng" là chế độ hỏng tệ nhất ở đây: một ô rỗng trông
+        y hệt "không có gì đáng lo", trong khi nó có thể nghĩa là cơ chế
+        phát hiện trôi lệch chưa từng chạy. Bốn trạng thái, bốn thông điệp
+        khác nhau, không cái nào rỗng.
+        """
+        data = load_drift_panel_data(self._drift_path)
+
+        if data.status == DRIFT_OK:
+            grid = Table.grid(padding=(0, 3))
+            grid.add_column()
+            grid.add_column()
+            grid.add_column()
+            grid.add_column()
+            grid.add_row("Chỉ số", "Hiện tại", "Baseline", "")
+            for metric in data.metrics:
+                style = drift_metric_style(metric)
+                grid.add_row(
+                    Text(metric.name, style=style),
+                    Text(metric.current, style=style),
+                    Text(metric.baseline, style=style),
+                    Text(_bool_icon(not metric.alert), style=style),
+                )
+            stamp = data.generated_at_utc or "không rõ thời điểm"
+            grid.add_row(Text(f"Cập nhật: {stamp} — {data.detail}"), "", "", "")
+            body: RenderableType = grid
+        elif data.status == DRIFT_MISSING:
+            # VÀNG, không đỏ: trước Phase 12b đây là trạng thái ĐÚNG của hệ
+            # thống, không phải sự cố. Đỏ ở đây sẽ làm dashboard lúc nào
+            # cũng có một ô đỏ và người xem quen mắt bỏ qua nó.
+            body = Text(data.detail, style=_STYLE_WARN)
+        elif data.status == DRIFT_UNREADABLE:
+            # ĐỎ: có file mà không dùng được là sự cố thật.
+            body = Text(data.detail, style=_STYLE_DANGER)
+        else:  # DRIFT_EMPTY
+            body = Text(data.detail, style=_STYLE_WARN)
+
+        return Panel(body, title="SO SÁNH BASELINE", title_align="left")
 
     def _system_panel(self, state: DashboardState) -> Panel:
         grid = Table.grid(padding=(0, 3))
