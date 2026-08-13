@@ -1849,7 +1849,7 @@ báo ok; `write_status` raise được.
 
 ---
 
-## Điểm dữ liệu `warning_count` #2 — 2026-08-08
+## Điểm dữ liệu `warning_count` ĐẦU TIÊN đo được — 2026-08-08 (lần retrain #2)
 
 Ghi ở đây vì thông tin này trước đó chỉ nằm trong commit message
 (`6cf5fee`), mà commit message thì phải `git log --grep` mới tìm ra. Mục
@@ -1890,19 +1890,32 @@ xem mục 2026-08-08 phía trên). Nên xét theo **thứ tự lần retrain** t
 TIÊN. Quy tắc §C.1 ("xu hướng tăng đơn điệu 3 lần liên tiếp") không thể
 tính 08-05 vào chuỗi: không so sánh được với `NaN`.
 
-### Sớm nhất kích hoạt được: 2026-08-22, không phải 08-29
+### Sớm nhất kích hoạt được: 2026-08-29 (đọc theo cách thận trọng)
 
-`retrain_interval_days = 7` (`forward/config_frozen.yaml`). Từ điểm đo
-được đầu tiên:
+`retrain_interval_days = 7` (`forward/config_frozen.yaml`), nên các điểm
+đo được rơi vào ~08-08, ~08-15, ~08-22, ~08-29.
 
-| Điểm đo được | Bar dự kiến |
-|---|---|
-| 1 | 2026-08-08 (đã có) |
-| 2 | ~2026-08-15 |
-| 3 | ~2026-08-22 |
+**Câu chữ §C.1 mơ hồ, hai cách đọc cho hai mốc khác nhau.** Nguyên văn:
+"Xu hướng tăng đơn điệu **3 lần liên tiếp**".
 
-Cần 3 điểm liên tiếp tăng đơn điệu → **sớm nhất 2026-08-22**. Ước lượng
-08-29 ban đầu tính dư một chu kỳ (nó coi 08-05 là một điểm dùng được).
+| Cách đọc | Cần | Sớm nhất |
+|---|---|---|
+| A — 3 ĐIỂM liên tiếp tăng dần | 08-08, 08-15, 08-22 | 2026-08-22 |
+| B — 3 LẦN TĂNG liên tiếp (tức 4 điểm) | + 08-29 | 2026-08-29 |
+
+**Chốt: dùng cách đọc B, mốc 2026-08-29.** Lý do chọn cách muộn hơn: nếu
+lấy 08-22 mà thực tế quy tắc cần 4 điểm, người theo dõi sẽ thấy "đã tới
+mốc mà không có cảnh báo" và đi tìm bug không tồn tại. Sai theo hướng chờ
+lâu hơn thì cùng lắm là phát hiện muộn một chu kỳ 7 ngày; sai theo hướng
+kia tạo ra một cuộc điều tra vô ích.
+
+Khi xây `monitoring/drift.py` (Phase 12b §C.1), **chốt cách đọc trong
+code và ghi lại ở đây** — đừng để nó tiếp tục mơ hồ ở tầng cài đặt.
+
+*(Bản đầu của mục này khẳng định 08-22 là đúng và quy 08-29 cho một lỗi
+tính toán. Đó là tôi đoán lý do của người khác rồi ghi phỏng đoán đó vào
+hồ sơ như sự thật — câu chữ §C.1 chịu được cả hai cách đọc, và không có
+gì trong bảng nói cách nào mới đúng.)*
 
 ### Phát hiện kèm theo: việc cuộn schema đã RESET lịch retrain
 
