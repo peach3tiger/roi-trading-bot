@@ -73,10 +73,10 @@ def test_sai_lech_1_nam_ngoai_pham_vi_giam_sat(wire: Any) -> None:
     """
     wire(_fake_log(["2026-08-05", "2026-08-08"]))
 
-    result = check_retrain_cadence(monitoring_start=_START)
+    result = check_retrain_cadence(monitoring_start=_START, today_utc=date(2026, 8, 13))
 
-    assert result.status == CADENCE_NO_DATA
-    assert result.gaps == ()
+    assert result.status != CADENCE_DRIFT
+    assert result.gaps == (), "không khoảng cách retrain nào được xét"
 
 
 def test_doi_moc_thi_hanh_vi_doi_theo_nhat_quan(wire: Any) -> None:
@@ -190,6 +190,107 @@ def test_khong_bao_gio_raise(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ======================================================================
+# Khoảng HỞ CUỐI — retrain ngừng hẳn
+# ======================================================================
+
+
+def test_dung_nhip_roi_im_lang_60_ngay_van_bi_bat(wire: Any) -> None:
+    """KHẲNG ĐỊNH TRUNG TÂM của phần này.
+
+    Hai lần retrain ĐÚNG NHỊP rồi ngừng hẳn: mọi khoảng cách giữa hai lần
+    retrain đều xanh, nên nếu chỉ kiểm chúng thì `status = ok` — đúng lúc
+    cần báo động nhất. Đây là chế độ hỏng nguy hiểm nhất (retrain chết) mà
+    phép kiểm cặp-đôi mù hoàn toàn.
+    """
+    wire(_fake_log(["2026-08-09", "2026-08-16"]))
+
+    result = check_retrain_cadence(monitoring_start=_START, today_utc=date(2026, 10, 15))
+
+    assert result.status == CADENCE_DRIFT
+    assert all(g.ok for g in result.gaps), "mọi khoảng cách retrain đều đúng nhịp"
+    assert result.trailing_gap is not None
+    assert result.trailing_gap.ok is False
+    assert result.trailing_gap.days == 60
+
+
+def test_thong_diep_noi_CHUA_RETRAIN_khong_phai_nhip_lech(wire: Any) -> None:
+    """Hai triệu chứng dẫn tới hai chỗ điều tra khác nhau, nên thông điệp
+    phải phân biệt được ngay: "chưa retrain N ngày" mô tả một việc KHÔNG
+    xảy ra; "nhịp lệch" mô tả một việc đã xảy ra sai thời điểm."""
+    wire(_fake_log(["2026-08-09", "2026-08-16"]))
+
+    detail = check_retrain_cadence(monitoring_start=_START, today_utc=date(2026, 10, 15)).detail
+
+    assert "CHƯA RETRAIN 60 ngày" in detail
+    assert "lệch nhịp" not in detail
+
+
+@pytest.mark.parametrize(
+    "today,days,expect",
+    [
+        ("2026-08-23", 7, CADENCE_OK),  # đúng nhịp, chưa tới hạn
+        ("2026-08-24", 8, CADENCE_OK),  # 7+1, biên trên
+        ("2026-08-25", 9, CADENCE_DRIFT),  # 7+2, vượt trần
+    ],
+)
+def test_tran_khoang_ho_cuoi(wire: Any, today: str, days: int, expect: str) -> None:
+    wire(_fake_log(["2026-08-09", "2026-08-16"]))
+
+    result = check_retrain_cadence(monitoring_start=_START, today_utc=date.fromisoformat(today))
+
+    assert result.trailing_gap is not None
+    assert result.trailing_gap.days == days
+    assert result.status == expect
+
+
+def test_khoang_ho_cuoi_chi_co_tran_khong_co_san(wire: Any) -> None:
+    """Vừa retrain hôm qua -> khoảng hở 1 ngày. Đó là BÌNH THƯỜNG, không
+    phải "lệch nhịp quá ngắn". Khác `RetrainGap` vốn kiểm cả hai phía."""
+    wire(_fake_log(["2026-08-09", "2026-08-16"]))
+
+    result = check_retrain_cadence(monitoring_start=_START, today_utc=date(2026, 8, 17))
+
+    assert result.status == CADENCE_OK
+    assert result.trailing_gap is not None
+    assert result.trailing_gap.days == 1
+
+
+def test_khoang_ho_cuoi_theo_cung_moc_giam_sat(wire: Any) -> None:
+    """Cùng quy tắc "ĐIỂM SAU quyết định phạm vi" — điểm sau ở đây là hôm
+    nay, nên trước mốc giám sát thì không đo."""
+    wire(_fake_log(["2026-06-01"]))
+
+    result = check_retrain_cadence(monitoring_start=_START, today_utc=date(2026, 8, 8))
+
+    assert result.status == CADENCE_NO_DATA
+    assert result.trailing_gap is None
+
+
+def test_ca_hai_loai_lech_cung_bao_cao(wire: Any) -> None:
+    """Nhịp lệch VÀ ngừng hẳn cùng lúc -> thông điệp phải có cả hai, không
+    chỉ cái gặp trước."""
+    wire(_fake_log(["2026-08-09", "2026-08-25"]))  # cách 16 ngày
+
+    detail = check_retrain_cadence(monitoring_start=_START, today_utc=date(2026, 10, 1)).detail
+
+    assert "lệch nhịp" in detail
+    assert "CHƯA RETRAIN" in detail
+
+
+def test_as_dict_ghi_lai_khoang_ho_cuoi(wire: Any) -> None:
+    wire(_fake_log(["2026-08-09", "2026-08-16"]))
+
+    payload = check_retrain_cadence(monitoring_start=_START, today_utc=date(2026, 10, 15)).as_dict()
+
+    assert payload["trailing_gap"] == {
+        "last_retrain": "2026-08-16",
+        "today": "2026-10-15",
+        "days": 60,
+        "ok": False,
+    }
+
+
+# ======================================================================
 # Ca biên
 # ======================================================================
 
@@ -200,14 +301,18 @@ def test_chua_co_lan_retrain_nao(wire: Any) -> None:
     assert check_retrain_cadence(monitoring_start=_START).status == CADENCE_NO_DATA
 
 
-def test_dung_mot_lan_retrain_chua_do_duoc_khoang_cach(wire: Any) -> None:
-    """Một điểm không tạo được khoảng cách nào — chưa kết luận gì được."""
+def test_dung_mot_lan_retrain_van_do_duoc_khoang_ho_cuoi(wire: Any) -> None:
+    """Một điểm không tạo được khoảng cách GIỮA hai lần retrain — nhưng
+    vẫn đo được khoảng hở tới hôm nay. Đó chính là giá trị của phép kiểm
+    khoảng hở cuối: nó hoạt động ngay từ lần retrain đầu tiên."""
     wire(_fake_log(["2026-08-20"]))
 
-    result = check_retrain_cadence(monitoring_start=_START)
+    result = check_retrain_cadence(monitoring_start=_START, today_utc=date(2026, 8, 24))
 
-    assert result.status == CADENCE_NO_DATA
-    assert "1 lần retrain" in result.detail
+    assert result.gaps == ()
+    assert result.status == CADENCE_OK
+    assert result.trailing_gap is not None
+    assert result.trailing_gap.days == 4
 
 
 def test_nhieu_khoang_bao_cao_dung_so_lech(wire: Any) -> None:

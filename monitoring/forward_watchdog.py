@@ -128,11 +128,32 @@ class RetrainGap:
 
 
 @dataclass(frozen=True)
+class TrailingGap:
+    """Khoảng HỞ CUỐI: từ lần retrain gần nhất tới HÔM NAY.
+
+    Kiểu RIÊNG, không tái dùng `RetrainGap`: ở đó `current` là một lần
+    retrain đã xảy ra, còn ở đây điểm sau là hôm nay — một thời điểm chưa
+    có sự kiện nào. Nhồi hai ý nghĩa vào một kiểu là loại nhập nhằng chỉ
+    lộ ra khi có người đọc `gaps` rồi tưởng mọi `current` đều là ngày
+    retrain.
+
+    Chỉ có TRẦN, không có sàn: khoảng hở ngắn là bình thường (vừa retrain
+    xong). Khác `RetrainGap` vốn kiểm cả hai phía.
+    """
+
+    last_retrain: date
+    today: date
+    days: int
+    ok: bool
+
+
+@dataclass(frozen=True)
 class RetrainCadence:
     status: str
     detail: str
     interval_days: Optional[int] = None
     gaps: tuple[RetrainGap, ...] = ()
+    trailing_gap: Optional[TrailingGap] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -149,13 +170,31 @@ class RetrainCadence:
                 }
                 for g in self.gaps
             ],
+            "trailing_gap": (
+                None
+                if self.trailing_gap is None
+                else {
+                    "last_retrain": self.trailing_gap.last_retrain.isoformat(),
+                    "today": self.trailing_gap.today.isoformat(),
+                    "days": self.trailing_gap.days,
+                    "ok": self.trailing_gap.ok,
+                }
+            ),
         }
 
 
 def check_retrain_cadence(
-    monitoring_start: Optional[date] = None, tolerance_days: int = _CADENCE_TOLERANCE_DAYS
+    monitoring_start: Optional[date] = None,
+    tolerance_days: int = _CADENCE_TOLERANCE_DAYS,
+    today_utc: Optional[date] = None,
 ) -> RetrainCadence:
     """Nhịp retrain HMM có đúng `retrain_interval_days` không.
+
+    Kiểm HAI thứ:
+      1. Khoảng cách giữa hai lần retrain liên tiếp — `interval ± tolerance`.
+      2. Khoảng HỞ CUỐI (`today - lần retrain gần nhất`) — chỉ có trần.
+         Không có nó, "retrain ngừng hẳn" là điểm mù: hai lần đúng nhịp rồi
+         im lặng 60 ngày cho `gaps` toàn xanh và `status = ok`.
 
     Đọc log ĐÃ NỐI (`forward.runner.load_all_bars()`) chứ không phải file
     đang hoạt động: chính việc `run_forward_test()` chỉ nhìn file đang
@@ -210,7 +249,31 @@ def check_retrain_cadence(
         if cur >= start
     )
 
-    if not gaps:
+    # KHOẢNG HỞ CUỐI — từ lần retrain gần nhất tới HÔM NAY.
+    #
+    # Các khoảng ở trên chỉ nhìn được những lần retrain ĐÃ xảy ra, nên
+    # chúng mù hoàn toàn với chế độ hỏng nguy hiểm nhất: retrain NGỪNG HẲN.
+    # Hai lần retrain đúng nhịp rồi im lặng 60 ngày cho `gaps` toàn xanh và
+    # `status = ok` — đúng lúc cần báo động nhất.
+    #
+    # Cùng mốc giám sát, cùng quy tắc "ĐIỂM SAU quyết định phạm vi": điểm
+    # sau ở đây là hôm nay, nên phép kiểm bật khi `today >= start`.
+    #
+    # Chỉ có TRẦN (`> interval + tolerance`), không có sàn: khoảng hở ngắn
+    # nghĩa là vừa retrain xong — bình thường, không phải bất thường.
+    today = today_utc if today_utc is not None else datetime.now(timezone.utc).date()
+    trailing: Optional[TrailingGap] = None
+    if retrain_dates and today >= start:
+        last_retrain = retrain_dates[-1]
+        idle_days = (today - last_retrain).days
+        trailing = TrailingGap(
+            last_retrain=last_retrain,
+            today=today,
+            days=idle_days,
+            ok=idle_days <= interval + tolerance_days,
+        )
+
+    if not gaps and trailing is None:
         return RetrainCadence(
             status=CADENCE_NO_DATA,
             detail=(
@@ -221,23 +284,45 @@ def check_retrain_cadence(
         )
 
     bad = [g for g in gaps if not g.ok]
+    problems: list[str] = []
     if bad:
         lines = "; ".join(
             f"{g.previous} → {g.current} cách {g.days} ngày (chờ đợi {interval}±{tolerance_days})"
             for g in bad
         )
-        return RetrainCadence(
-            status=CADENCE_DRIFT,
-            detail=f"{len(bad)}/{len(gaps)} khoảng cách retrain lệch nhịp: {lines}",
-            interval_days=interval,
-            gaps=gaps,
+        problems.append(f"{len(bad)}/{len(gaps)} khoảng cách retrain lệch nhịp: {lines}")
+    if trailing is not None and not trailing.ok:
+        # Thông điệp CỐ TÌNH khác hẳn nhánh trên: "chưa retrain N ngày" mô
+        # tả một việc KHÔNG xảy ra, còn "nhịp lệch" mô tả một việc đã xảy
+        # ra sai thời điểm. Người đọc alert cần phân biệt ngay — hai triệu
+        # chứng này dẫn tới hai chỗ điều tra khác nhau.
+        problems.append(
+            f"CHƯA RETRAIN {trailing.days} ngày — lần cuối {trailing.last_retrain}, "
+            f"hôm nay {trailing.today} (trần {interval}+{tolerance_days} ngày)"
         )
 
+    if problems:
+        return RetrainCadence(
+            status=CADENCE_DRIFT,
+            detail=". ".join(problems),
+            interval_days=interval,
+            gaps=gaps,
+            trailing_gap=trailing,
+        )
+
+    parts = []
+    if gaps:
+        parts.append(f"{len(gaps)} khoảng cách retrain, tất cả trong {interval}±{tolerance_days} ngày")
+    else:
+        parts.append(f"chưa có khoảng cách retrain nào sau {start}")
+    if trailing is not None:
+        parts.append(f"chưa retrain {trailing.days} ngày (trần {interval}+{tolerance_days})")
     return RetrainCadence(
         status=CADENCE_OK,
-        detail=f"{len(gaps)} khoảng cách retrain, tất cả trong {interval}±{tolerance_days} ngày.",
+        detail=". ".join(parts) + ".",
         interval_days=interval,
         gaps=gaps,
+        trailing_gap=trailing,
     )
 
 
