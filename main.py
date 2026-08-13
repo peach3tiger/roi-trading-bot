@@ -19,7 +19,7 @@ import logging
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -878,6 +878,16 @@ class LiveLoopState:
     last_clock_drift_ms: float | None = None
     last_clock_round_trip_ms: float | None = None
     last_clock_check_at: str | None = None
+    # BA TRẦN của bar gần nhất, str(Decimal) — Phase 12b §B.1. Đã có
+    # `current_allocation_pct` (trần CUỐI) từ trước; ba field này nói thêm
+    # TẦNG NÀO đã tạo ra nó. Persist vì `health.json` được ghi ở tầng vòng
+    # lặp, sau khi `process_one_bar()` đã trả về và `SignalGeneratorResult`
+    # đã ra khỏi phạm vi — và vì một tiến trình `--dashboard` riêng cũng
+    # đọc được. None = chưa xử lý bar nào trong phiên này, HOẶC snapshot cũ
+    # ghi trước khi ba field này tồn tại (xem docstring load_state_snapshot).
+    last_hmm_allocation: str | None = None
+    last_trend_gate_cap: str | None = None
+    last_risk_manager_cap: str | None = None
 
 
 def write_state_snapshot(path: Path, state: LiveLoopState) -> None:
@@ -904,6 +914,99 @@ def load_state_snapshot(path: Path) -> LiveLoopState | None:
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         logger.warning("%s hỏng/không đọc được (%s) — bỏ qua, coi như phiên mới.", path, exc)
         return None
+
+
+def _decimal_or_none(raw: str | None) -> Decimal | None:
+    """`None` khi chưa có giá trị HOẶC khi chuỗi hỏng — `health.json` là
+    đường quan sát, một snapshot cũ/hỏng không được phép làm sập vòng lặp
+    chính. `_check_invariants()` bỏ qua trường `None` nên hậu quả xấu nhất
+    là mất một phép kiểm, không phải một kết luận sai."""
+    if raw is None:
+        return None
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        logger.warning("Không đọc được số %r từ state_snapshot — bỏ qua ở health.json.", raw)
+        return None
+
+
+def read_breaker_level(risk_manager: Any) -> str:
+    """Level của lần `CircuitBreaker.check()` GẦN NHẤT, đọc từ lịch sử.
+
+    KHÔNG gọi `check()`: nó `append` vào `_history` mỗi lần gọi và log
+    WARNING khi level khác NONE. `health.json` được ghi mỗi 60 giây, nên
+    gọi `check()` từ đây sẽ bơm ~1440 bản ghi/ngày vào lịch sử breaker và
+    lặp lại cùng một dòng WARNING mỗi phút — một phép QUAN SÁT không được
+    làm thay đổi thứ nó quan sát.
+
+    Chưa có lần check nào (bot vừa khởi động, chưa xử lý bar) → "NONE".
+    """
+    history = risk_manager.circuit_breaker.get_history()
+    if not history:
+        return "NONE"
+    return str(history[-1].level.value)
+
+
+def build_health_inputs(
+    state: LiveLoopState,
+    *,
+    now: datetime,
+    api_ok: bool,
+    hmm_model_age_days: float | None,
+    unfilled_orders: int,
+    oldest_unfilled_age_seconds: float | None,
+    circuit_breaker: str,
+    fees_pct_of_gross: float | None,
+    last_alert_minutes_ago: float | None,
+    testnet: bool,
+) -> Any:
+    """`LiveLoopState` (đã persist) + vài giá trị chỉ sống ở tầng vòng lặp
+    → `HealthInputs`. Phase 12b §B.1.
+
+    `bars_behind` TÍNH LẠI ở đây qua `compute_bars_behind(now)`, không đọc
+    từ snapshot — cùng lý do đã ghi ở docstring hàm đó: một giá trị lưu
+    sẵn sẽ đứng yên ở "0" ngay cả khi tiến trình đã chết, đúng lúc trường
+    này tồn tại để báo động.
+    """
+    import pandas as pd
+
+    from monitoring.health import HealthInputs
+
+    last_bar = (
+        pd.Timestamp(state.last_processed_bar, tz="UTC").to_pydatetime()
+        if state.last_processed_bar
+        else None
+    )
+    return HealthInputs(
+        updated_at=now,
+        last_bar_time=last_bar,
+        bars_behind=compute_bars_behind(state.last_processed_bar, now),
+        api_ok=api_ok,
+        api_latency_ms=state.poll_latency_ms,
+        poll_latency_ms=state.poll_latency_ms,
+        clock_skew_ms=state.last_clock_drift_ms,
+        hmm_regime=state.current_regime_label,
+        hmm_confidence=None,
+        hmm_model_age_days=hmm_model_age_days,
+        trend_gate=state.current_trend_structure,
+        hmm_allocation=_decimal_or_none(state.last_hmm_allocation),
+        trend_gate_cap=_decimal_or_none(state.last_trend_gate_cap),
+        risk_manager_cap=_decimal_or_none(state.last_risk_manager_cap),
+        final_allocation=_decimal_or_none(state.current_allocation_pct),
+        position_delta_pct=None,
+        unfilled_orders=unfilled_orders,
+        unfilled_value_usdt=None,
+        oldest_unfilled_age_seconds=oldest_unfilled_age_seconds,
+        circuit_breaker=circuit_breaker,
+        cumulative_fees_usdt=_decimal_or_none(state.cumulative_fees_paid),
+        fees_pct_of_gross=fees_pct_of_gross,
+        last_alert_minutes_ago=last_alert_minutes_ago,
+        uptime_seconds=max(
+            0.0,
+            (now - datetime.fromisoformat(state.session_started_at_utc)).total_seconds(),
+        ),
+        testnet=testnet,
+    )
 
 
 def _extract_fee_paid(order_result: Any) -> Decimal:
@@ -1707,6 +1810,13 @@ def process_one_bar(
         last_clock_drift_ms=clock_drift_ms,
         last_clock_round_trip_ms=clock_round_trip_ms,
         last_clock_check_at=clock_checked_at,
+        # Ba trần đọc THẲNG từ `SignalGeneratorResult` — KHÔNG tính lại ở
+        # đây. Tính lại nghĩa là dựng đường thứ hai cho cùng một phép, và
+        # đường thứ hai sẽ trôi lệch (đúng thứ `test_wiring_equivalence.py`
+        # tồn tại để canh).
+        last_hmm_allocation=str(result.hmm_allocation),
+        last_trend_gate_cap=str(result.trend_gate_cap),
+        last_risk_manager_cap=str(result.risk_manager_cap),
     )
 
 
@@ -1939,6 +2049,62 @@ def run_live_loop(
     os_signal.signal(os_signal.SIGINT, _handle_shutdown_signal)
     os_signal.signal(os_signal.SIGTERM, _handle_shutdown_signal)
 
+    # Phase 12b §B.1/§B.3 — ảnh chụp sức khoẻ. `api_ok` bắt đầu bằng True:
+    # `check_exchange_reachable` ở bước 1-2 đã chạy và đã thoát nếu FAIL,
+    # nên tới được đây nghĩa là lần gọi sàn gần nhất đã thành công.
+    from monitoring.health import HealthThresholds, assert_healthy_or_alert, evaluate, write_health
+
+    health_thresholds = HealthThresholds.from_settings(settings)
+    health_path = state_dir / "health.json"
+    api_ok = True
+
+    def _snapshot_health() -> Any:
+        """Đo TẠI THỜI ĐIỂM GỌI — `now`/`bars_behind` phải là hiện tại, không
+        phải giá trị đóng băng lúc dựng closure."""
+        model_age_days: float | None
+        try:
+            model_age_days = (
+                datetime.now(timezone.utc) - hmm_engine.training_date
+            ).total_seconds() / 86400
+        except (TypeError, AttributeError):
+            # Model chưa train xong / chưa có `training_date` — không biết
+            # tuổi thì nói KHÔNG BIẾT (`None`), đừng đoán 0: 0 nghĩa là
+            # "vừa train xong", và một lời nói dối lạc quan ở đây làm mất
+            # đúng cảnh báo "model quá cũ" mà §B.1 sinh ra để phát.
+            model_age_days = None
+        return evaluate(
+            build_health_inputs(
+                state,
+                now=datetime.now(timezone.utc),
+                api_ok=api_ok,
+                hmm_model_age_days=model_age_days,
+                unfilled_orders=0,
+                oldest_unfilled_age_seconds=None,
+                circuit_breaker=read_breaker_level(signal_generator.risk_manager),
+                fees_pct_of_gross=None,
+                last_alert_minutes_ago=None,
+                testnet=testnet,
+            ),
+            health_thresholds,
+        )
+
+    if max_iterations is None:
+        # Luồng nền, daemon: `assert_healthy_or_alert()` NGỦ 60 giây trước
+        # khi đo (§B.3), chạy nó trực tiếp ở đây sẽ chặn vòng lặp chính
+        # đúng 60 giây ngay lúc khởi động. `daemon=True` để Ctrl-C không
+        # phải chờ nó.
+        #
+        # Bỏ qua khi `max_iterations` được đặt (chỉ test dùng): một luồng
+        # nền ngủ 60s sống lâu hơn cả bài test đã sinh ra nó.
+        import threading
+
+        threading.Thread(
+            target=assert_healthy_or_alert,
+            args=(_snapshot_health, alert_manager),
+            daemon=True,
+            name="startup-health-check",
+        ).start()
+
     iterations = 0
 
     while not stop_requested:
@@ -1961,6 +2127,10 @@ def run_live_loop(
             poll_started_at = time.monotonic()
             ohlcv = history_loader.load(ccxt_symbol, "1D", data_start, latest_bar.to_pydatetime())
             poll_latency_ms = (time.monotonic() - poll_started_at) * 1000
+            # Lần gọi sàn gần nhất THÀNH CÔNG — xoá cờ hỏng do vòng trước
+            # đặt. Đặt ở ĐÂY chứ không ở đầu vòng: đầu vòng chưa gọi mạng,
+            # đánh dấu "ok" ở đó là khẳng định một điều chưa kiểm chứng.
+            api_ok = True
             last_poll_at = datetime.now(timezone.utc).isoformat()
             # Gắn ngay vào `state` — cả hai nhánh dưới đây (warmup chưa đủ
             # HOẶC xử lý bar bình thường) đều phải mang theo, không chỉ
@@ -2089,6 +2259,21 @@ def run_live_loop(
             alert_manager.send(
                 Alert(AlertType.API_LOST, f"Lỗi không bắt được trong vòng lặp chính: {exc}", severity="ERROR")
             )
+            api_ok = False
+
+        finally:
+            # `finally`, KHÔNG phải cuối thân vòng lặp: phần lớn chu kỳ 60s
+            # thoát sớm bằng `continue` (chưa có bar mới) — đó là trạng thái
+            # BÌNH THƯỜNG nhất của bot, và một `health.json` chỉ được cập
+            # nhật ở nhánh "có bar mới" sẽ nằm im cả ngày rồi trông hệt như
+            # một tiến trình đã chết. Cũng chạy sau nhánh `except`, nên một
+            # vòng lỗi vẫn ghi lại được trạng thái vừa hỏng.
+            try:
+                write_health(_snapshot_health(), health_path)
+            except _PROGRAMMING_ERRORS as exc:
+                _alert_programming_error(
+                    alert_manager=alert_manager, exc=exc, where="ghi health.json"
+                )
 
         time.sleep(poll_interval)
 

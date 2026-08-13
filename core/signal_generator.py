@@ -33,6 +33,25 @@ class SignalGeneratorResult:
     decision: RiskDecision
     regime_state: RegimeState
     is_flickering: bool
+    # BỐN giá trị của chuỗi tầng, lộ ra để CHẨN ĐOÁN (Phase 12b §B.1 —
+    # `monitoring/health.py`). Trước đây `generate()` tính chúng rồi vứt
+    # đi, nên `health.json` chỉ nói được allocation cuối là bao nhiêu chứ
+    # không nói được TẦNG NÀO đang giới hạn — thông tin quan trọng nhất
+    # khi có gì bất thường. `tests/test_wiring_equivalence.py` từng phải
+    # gọi lại `orchestrator.generate_signal()` lần hai chỉ để lấy
+    # `hmm_allocation`; file test đó KHÔNG được sửa theo trong cùng thay
+    # đổi này (một phép kiểm không nên đổi cùng lúc với thứ nó kiểm).
+    #
+    # `risk_manager_cap` == `final_allocation` trong đường dây hiện tại —
+    # giữ CẢ HAI là có chủ ý, không phải thừa: phép so
+    # `final == min(hmm, trend_gate, risk)` ở `health.py::_check_invariants`
+    # chỉ đỏ khi risk manager trả về allocation CAO HƠN trần của hai tầng
+    # trước, tức đúng chế độ hỏng mà CLAUDE.md bất biến #2 cấm. Gộp hai
+    # trường lại là bỏ mất phép kiểm đó.
+    hmm_allocation: Decimal  # TRƯỚC khi áp trần trend gate
+    trend_gate_cap: Decimal
+    risk_manager_cap: Decimal  # 0 khi risk manager TỪ CHỐI lệnh
+    final_allocation: Decimal
 
 
 def compose_layer_allocations(*caps: Decimal) -> Decimal:
@@ -96,12 +115,28 @@ class SignalGenerator:
             is_flickering,
         )
 
+        hmm_allocation = signal.target_allocation_pct
         trend_gate_cap = self.trend_gate.get_allocation_cap(bars)
         signal = self._apply_layer_caps(signal, trend_gate_cap)
 
         decision = self.risk_manager.validate_signal(signal, portfolio_state)
+        # Từ chối = không giữ vị thế nào, tức trần bằng 0. KHÔNG dùng
+        # `signal.target_allocation_pct` làm giá trị thay thế: đó là thứ
+        # risk manager vừa BÁC BỎ, ghi nó vào `health.json` sẽ vẽ ra một
+        # trạng thái chưa từng xảy ra.
+        risk_manager_cap = (
+            decision.modified_signal.target_allocation_pct
+            if decision.approved and decision.modified_signal is not None
+            else Decimal("0")
+        )
         return SignalGeneratorResult(
-            decision=decision, regime_state=regime_state, is_flickering=is_flickering
+            decision=decision,
+            regime_state=regime_state,
+            is_flickering=is_flickering,
+            hmm_allocation=hmm_allocation,
+            trend_gate_cap=trend_gate_cap,
+            risk_manager_cap=risk_manager_cap,
+            final_allocation=risk_manager_cap,
         )
 
     def _apply_layer_caps(self, signal: Signal, trend_gate_cap: Decimal) -> Signal:

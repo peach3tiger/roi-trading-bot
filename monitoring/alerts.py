@@ -89,6 +89,13 @@ class AlertType(Enum):
     # FORWARD_LOG_STALE: log vẫn tăng dòng đều (không stale), chỉ có lịch
     # retrain sai — hai triệu chứng khác nhau, hai nguyên nhân khác nhau.
     RETRAIN_CADENCE_DRIFT = "RETRAIN_CADENCE_DRIFT"
+    # `monitoring/health.py::assert_healthy_or_alert` — status != "ok" ở
+    # lần kiểm 60s sau khởi động. Nhãn riêng vì nguyên nhân có thể là bất
+    # kỳ điều kiện nào trong §B.1 (circuit breaker halt, model HMM quá cũ,
+    # lệch đồng hồ, lệnh treo), phần lớn KHÔNG liên quan tới feed hay API.
+    # Dùng lại DATA_FEED_LOST/API_LOST ở đây sẽ gửi người vận hành đi kiểm
+    # tra mạng cho một vấn đề nằm ở chỗ khác.
+    HEALTH_CHECK_FAILED = "HEALTH_CHECK_FAILED"
 
 
 @dataclass(frozen=True)

@@ -233,6 +233,13 @@ def wired(world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     order_executor = _FakeOrderExecutor(exchange_client=exchange)
     monkeypatch.setattr(main_mod, "build_order_executor", lambda *a, **k: order_executor)
 
+    # MỘT instance dùng lại cho mọi lần `run_live_loop()` trong cùng một
+    # test — `CircuitBreaker._history` phải cộng dồn qua các lần gọi thì
+    # `test_health_khong_goi_circuit_breaker_check` mới đo được gì.
+    shared_risk_manager = RiskManager(
+        _risk_manager_config(), halt_lock_path=state_dir / "trading_halted.lock"
+    )
+
     def _fake_signal_generator(_settings: Any, hmm_engine: Any, **kwargs: Any) -> SignalGenerator:
         # Risk manager NỚI (max_trades_per_day cao, cửa sổ chống trùng 0)
         # để test đo được đường nối dây, không phải đo cổng risk.
@@ -248,27 +255,37 @@ def wired(world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             )
         )
         orchestrator = StrategyOrchestrator(min_confidence=0.0, rebalance_threshold_pct=Decimal("0"))
-        rm = RiskManager(_risk_manager_config(), halt_lock_path=state_dir / "trading_halted.lock")
-        return SignalGenerator(hmm_engine, trend_gate, orchestrator, rm)
+        return SignalGenerator(hmm_engine, trend_gate, orchestrator, shared_risk_manager)
 
     monkeypatch.setattr(main_mod, "build_signal_generator", _fake_signal_generator)
 
     alert_manager = _RecordingAlertManager()
     monkeypatch.setattr(main_mod, "build_alert_manager", lambda *a, **k: alert_manager)
 
-    # --- đồng hồ vòng lặp: kịch bản mốc bar cho từng vòng ---------------
-    # Gọi lần 1 = lúc khởi động; lần 2/3/4 = vòng 1/2/3.
-    scripted = [last - pd.Timedelta(days=1)] + [
+    # --- đồng hồ vòng lặp: kịch bản mốc bar cho từng VÒNG ---------------
+    #
+    # Đánh chỉ số bằng SỐ VÒNG ĐÃ XONG (`len(health_writes)`, mỗi vòng ghi
+    # health đúng một lần trong `finally`), KHÔNG bằng số lần gọi.
+    #
+    # Bản cũ đếm số lần gọi và giả định "một lần gọi mỗi vòng, cộng một
+    # lần lúc khởi động". Giả định đó vỡ ngay khi một caller thứ hai xuất
+    # hiện: `build_health_inputs()` gọi `compute_bars_behind()`, vốn cũng
+    # gọi `_latest_closed_bar_date()`. Kịch bản bị tiêu thụ hai lần mỗi
+    # vòng và toàn bộ lịch trình trượt đi một nhịp — im lặng, vì mọi test
+    # cũ chỉ đếm TỔNG chứ không đối chiếu vòng nào làm gì.
+    #
+    # Trong vận hành thật hàm này THUẦN theo `now`, gọi bao nhiêu lần cũng
+    # cho cùng kết quả; chỉ bản giả lập theo kịch bản mới nhạy cảm với số
+    # lần gọi. Đếm theo vòng khôi phục đúng tính chất đó.
+    health_writes: list[dict[str, Any]] = []
+    scripted = [
         last - pd.Timedelta(days=1),  # vòng 1: pending = LAST-3, LAST-2, LAST-1
         last - pd.Timedelta(days=1),  # vòng 2: không có bar mới -> sleep
         last,  # vòng 3: 1 bar mới
     ]
-    calls = {"n": 0}
 
     def _scripted_latest_bar(_now: datetime) -> pd.Timestamp:
-        i = min(calls["n"], len(scripted) - 1)
-        calls["n"] += 1
-        return scripted[i]
+        return scripted[min(len(health_writes), len(scripted) - 1)]
 
     monkeypatch.setattr(main_mod, "_latest_closed_bar_date", _scripted_latest_bar)
 
@@ -322,6 +339,27 @@ def wired(world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     sleeps: list[float] = []
     monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
 
+    # --- spy `write_health` (Phase 12b §B.1) ---------------------------
+    # `run_live_loop()` import nó BÊN TRONG hàm, nên vá ở module nguồn là
+    # đủ và không cần biết thứ tự import. Ghi lại số lần gọi + số bản ghi
+    # lịch sử breaker TẠI THỜI ĐIỂM mỗi lần ghi — đó là thứ cho phép đo
+    # từng vòng poll riêng lẻ mà chỉ cần chạy vòng lặp MỘT lần (chạy hai
+    # lần không được: `_FakeOrderExecutor` không có `restore_known_stop`).
+    import monitoring.health as health_mod
+
+    real_write_health = health_mod.write_health
+
+    def _spy_write_health(report: Any, path: Any = None) -> Any:
+        health_writes.append(
+            {
+                "status": report.status,
+                "breaker_history_len": len(shared_risk_manager.circuit_breaker.get_history()),
+            }
+        )
+        return real_write_health(report, path)
+
+    monkeypatch.setattr(health_mod, "write_health", _spy_write_health)
+
     args = argparse.Namespace(dry_run=False, live=False, config="config/settings.yaml")
 
     return {
@@ -334,6 +372,8 @@ def wired(world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "load_calls": load_calls,
         "last": last,
         "state_dir": state_dir,
+        "risk_manager": shared_risk_manager,
+        "health_writes": health_writes,
     }
 
 
@@ -454,3 +494,111 @@ def test_state_snapshot_ghi_lai_bar_cuoi(wired: dict[str, Any]) -> None:
 
     payload = json.loads((wired["state_dir"] / "state_snapshot.json").read_text(encoding="utf-8"))
     assert payload["last_processed_bar"] == wired["last"].date().isoformat()
+
+
+# ======================================================================
+# Phase 12b §B.1 — health.json ghi từ VÒNG LẶP THẬT
+#
+# `tests/test_health.py` kiểm quy tắc `ok/degraded/down` trên đầu vào dựng
+# tay. Nó KHÔNG kiểm được phần nối dây: vòng lặp có gọi `write_health()`
+# không, có gọi ở nhánh "không có bar mới" không, ba trần có tới được file
+# không. Đó là đúng khoảng trống mà file này tồn tại để lấp.
+# ======================================================================
+
+
+def _health(wired: dict[str, Any]) -> dict[str, Any]:
+    return json.loads((wired["state_dir"] / "health.json").read_text(encoding="utf-8"))
+
+
+def test_health_json_duoc_ghi_sau_vong_lap(wired: dict[str, Any]) -> None:
+    main_mod.run_live_loop(wired["args"], wired["settings"], max_iterations=3)
+
+    assert (wired["state_dir"] / "health.json").exists()
+
+
+def test_health_json_co_du_bon_truong_allocation(wired: dict[str, Any]) -> None:
+    """Điểm §B.1 nói thiết kế gốc THIẾU. Ba trần phải đi từ
+    `SignalGeneratorResult` qua `LiveLoopState` tới file — nếu bất kỳ mắt
+    xích nào đứt, chúng về `None` và test này đỏ."""
+    main_mod.run_live_loop(wired["args"], wired["settings"], max_iterations=3)
+    payload = _health(wired)
+
+    for key in ("hmm_allocation", "trend_gate_cap", "risk_manager_cap", "final_allocation"):
+        assert payload[key] is not None, key
+
+
+def test_health_json_khong_vi_pham_bat_bien_2(wired: dict[str, Any]) -> None:
+    """Đường dây thật, chạy thật: `final` không được lớn hơn trần nào."""
+    main_mod.run_live_loop(wired["args"], wired["settings"], max_iterations=3)
+    payload = _health(wired)
+
+    caps = [Decimal(payload[k]) for k in ("hmm_allocation", "trend_gate_cap", "risk_manager_cap")]
+    assert Decimal(payload["final_allocation"]) == min(caps)
+    assert "invariant_violations" not in payload
+
+
+def test_health_json_ghi_ca_o_vong_khong_co_bar_moi(wired: dict[str, Any]) -> None:
+    """Vòng 2 của kịch bản KHÔNG có bar mới — thoát sớm bằng `continue`.
+    Đó là trạng thái bình thường nhất của một bot bar-1D, và một
+    `health.json` chỉ cập nhật ở nhánh "có bar mới" sẽ nằm im cả ngày rồi
+    trông hệt như một tiến trình đã chết.
+
+    Đếm số lần `write_health()` được gọi thay vì so dấu thời gian: 3 vòng
+    poll phải cho ĐÚNG 3 lần ghi. Nếu lời gọi nằm ở cuối thân vòng lặp
+    thay vì trong `finally`, vòng 2 bị `continue` nhảy qua và con số này
+    còn 2.
+    """
+    main_mod.run_live_loop(wired["args"], wired["settings"], max_iterations=3)
+
+    assert len(wired["health_writes"]) == 3
+
+
+def test_health_json_nam_trong_state_dir(wired: dict[str, Any]) -> None:
+    """Cùng thư mục với `state_snapshot.json` — một volume, một đường sao
+    lưu, ngoài cây mã nguồn (xem docstring `monitoring/health.py`)."""
+    main_mod.run_live_loop(wired["args"], wired["settings"], max_iterations=1)
+
+    assert (wired["state_dir"] / "health.json").exists()
+    assert not Path("monitoring/state/health.json").exists()
+
+
+def test_health_khong_goi_circuit_breaker_check(wired: dict[str, Any]) -> None:
+    """`CircuitBreaker.check()` GHI vào `_history` mỗi lần gọi. `health.json`
+    ghi mỗi chu kỳ poll (60s trong vận hành), nên gọi `check()` từ đường
+    quan sát sẽ bơm ~1440 bản ghi rác/ngày vào lịch sử breaker và lặp lại
+    cùng một dòng WARNING mỗi phút — một phép QUAN SÁT không được làm thay
+    đổi thứ nó quan sát.
+
+    Đo bằng TỔNG: mỗi bar được xử lý sinh đúng một bản ghi (`validate_signal`
+    gọi `check()` một lần), nên lịch sử phải dài đúng bằng số bar đã xử lý.
+    Nếu đường health cũng gọi `check()`, con số này lớn hơn đúng bằng số
+    vòng poll. So tổng thay vì so từng vòng để khẳng định không phụ thuộc
+    vòng nào rảnh — chi tiết đó là của kịch bản, không phải của bất biến.
+    """
+    main_mod.run_live_loop(wired["args"], wired["settings"], max_iterations=3)
+
+    so_bar = len(wired["processed"])
+    so_ban_ghi = len(wired["risk_manager"].circuit_breaker.get_history())
+
+    assert so_ban_ghi == so_bar, (
+        f"{so_ban_ghi} bản ghi breaker cho {so_bar} bar đã xử lý — dư "
+        f"{so_ban_ghi - so_bar}, đúng bằng số vòng poll nếu đường health đang gọi check()."
+    )
+
+
+def test_read_breaker_level_khong_doi_lich_su() -> None:
+    """Đơn vị, tách khỏi vòng lặp: đọc 100 lần không thêm bản ghi nào."""
+    rm = RiskManager(_risk_manager_config(), halt_lock_path=Path("/tmp/khong-ton-tai.lock"))
+    truoc = len(rm.circuit_breaker.get_history())
+
+    for _ in range(100):
+        main_mod.read_breaker_level(rm)
+
+    assert len(rm.circuit_breaker.get_history()) == truoc
+
+
+def test_read_breaker_level_chua_check_lan_nao_la_none() -> None:
+    rm = RiskManager(_risk_manager_config(), halt_lock_path=Path("/tmp/khong-ton-tai.lock"))
+
+    assert main_mod.read_breaker_level(rm) == "NONE"
+

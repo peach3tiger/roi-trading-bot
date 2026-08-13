@@ -154,3 +154,10 @@ monitoring:
   # hệt như key sai, xem ops/RUNBOOK.md mục CLOCK_DRIFT).
   clock_drift_alert_ms: 1000
   clock_drift_halt_ms: 2500
+  # monitoring/health.py §B.1 — lệnh chưa khớp lâu hơn chừng này giây thì
+  # health.json xuống "degraded". KHÁC execution.order_timeout_seconds (30,
+  # sau đó OrderExecutor HUỶ lệnh): ngưỡng này nói "một lệnh lẽ ra đã phải
+  # được huỷ từ lâu mà vẫn còn treo" — tức là dấu hiệu vòng huỷ không chạy,
+  # không phải dấu hiệu thị trường chậm khớp. Để bằng 30 sẽ báo degraded ở
+  # mọi lệnh bình thường đang chờ trong cửa sổ timeout của chính nó.
+  unfilled_order_degraded_seconds: 300
