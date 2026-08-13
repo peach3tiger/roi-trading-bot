@@ -383,6 +383,125 @@ gần như chắc chắn không có lệnh chờ.
 
 ---
 
+## `health.json` — `status: degraded`
+
+**Triệu chứng:** `${STATE_DIR}/health.json` có `"status": "degraded"`, hoặc
+một cảnh báo `HEALTH_CHECK_FAILED` mức WARNING 60 giây sau khi bot khởi động
+(`monitoring/health.py::assert_healthy_or_alert`, Phase 12b §B.3).
+
+**Đọc `reasons` TRƯỚC.** File tự nói vì sao nó không phải `ok` — đừng đoán
+từ triệu chứng, đừng đi kiểm tra mạng theo phản xạ:
+
+```bash
+python -c "import json,os,pathlib;p=pathlib.Path(os.environ.get('STATE_DIR','state'))/'health.json';d=json.loads(p.read_text());print(d['status']);[print(' -',r) for r in d['reasons']]"
+```
+
+`degraded` nghĩa là **bot vẫn đang chạy và vẫn đang giao dịch**, chỉ là một
+điều kiện đã lệch khỏi bình thường. Nó KHÔNG phải lý do dừng bot. Bốn
+nguyên nhân, theo đúng thứ tự hay gặp:
+
+1. **`Chậm N bar` (`bars_behind` 1–2)** — bar mới nhất đã đóng nhưng bot
+   chưa xử lý xong. Bình thường trong vài phút đầu sau 00:00 UTC hoặc sau
+   một lần khởi động lại: vòng poll 60s cần vài nhịp để bắt kịp. Tự khỏi.
+   **Can thiệp tay khi:** còn `degraded` sau 30 phút, hoặc `bars_behind`
+   tăng dần qua các lần đọc. Lúc đó xem mục "Mất dữ liệu giá" bên trên.
+
+2. **`Lệch đồng hồ ...ms`** — vượt `monitoring.clock_drift_alert_ms`
+   (1000ms) nhưng chưa tới ngưỡng dừng lệnh (`clock_drift_halt_ms`, 2500ms).
+   Xem mục **CLOCK_DRIFT** bên trên để xử lý; **can thiệp NGAY**, đừng chờ:
+   khoảng cách giữa 1000 và 2500ms rất hẹp và khi vượt 2500 bot ngừng gửi
+   lệnh mới hoàn toàn.
+
+3. **`Có lệnh chưa khớp ...s`** — một lệnh treo quá
+   `monitoring.unfilled_order_degraded_seconds` (300s). Đáng lo vì
+   `execution.order_timeout_seconds` là 30s: lệnh lẽ ra đã bị huỷ từ lâu.
+   **Can thiệp NGAY** — đây là dấu hiệu vòng huỷ không chạy, không phải
+   dấu hiệu thị trường chậm khớp. Kiểm tra lệnh mở trên sàn, đối chiếu
+   `logs/trades.log`, huỷ tay nếu cần.
+
+4. **`Model HMM cũ N ngày`** — quá 2× `hmm.retrain_interval_days` (14
+   ngày). Retrain đã thất bại im lặng nhiều lần liên tiếp. Xem mục **HMM
+   retrain lỗi** bên trên. **Can thiệp trong ngày**, không khẩn cấp: bot
+   vẫn ra quyết định, nhưng bằng một model không còn phản ánh chế độ thị
+   trường hiện tại — càng để lâu càng khó biết các quyết định gần đây có
+   giá trị gì.
+
+**Không có nguyên nhân nào ở trên mà vẫn `degraded`?** `reasons` là danh
+sách vét cạn — rỗng mà status không phải `ok` nghĩa là `health.json` và
+`monitoring/health.py::evaluate` đã lệch nhau. Đó là bug, xem mục
+"`invariant_violations`" bên dưới.
+
+---
+
+## `health.json` — `status: down`
+
+**Triệu chứng:** `"status": "down"`, hoặc cảnh báo `HEALTH_CHECK_FAILED`
+mức **CRITICAL**.
+
+`down` nghĩa là **bot có thể vẫn còn tiến trình sống nhưng không còn giao
+dịch được**. Ba nguyên nhân, loại trừ nhau:
+
+1. **`Circuit breaker đang halt (...)`** — KHÔNG phải sự cố kỹ thuật. Đây
+   là hệ thống phòng thủ đang làm đúng việc của nó. Đi thẳng tới mục
+   **"Circuit breaker kích hoạt"** bên trên và làm theo level. Đặc biệt:
+   **đừng khởi động lại bot để "cho hết down"** — với `PEAK_HALT` thì
+   `ops/entrypoint.sh` sẽ từ chối khởi động, và nếu bằng cách nào đó nó
+   khởi động được thì bạn vừa vô hiệu hoá đúng cơ chế đã chặn một chuỗi
+   thua lỗ.
+
+2. **`API không phản hồi ở lần gọi gần nhất`** — lần gọi sàn gần nhất ném
+   lỗi. Xem mục **"Mất dữ liệu giá"** và **"Xác thực sàn thất bại"** bên
+   trên (hai nguyên nhân khác nhau, cùng triệu chứng ở đây — `logs/main.log`
+   phân biệt được: lỗi mạng/timeout vs `-2015`/`-2014`/`AuthenticationError`).
+   Bot tự thử lại mỗi 60s; **can thiệp tay khi** quá 15 phút không tự khỏi.
+
+3. **`Chậm N bar (> 2)`** — quá hai chu kỳ bar mà không xử lý được bar
+   nào. Với bar 1D nghĩa là **hơn hai ngày im lặng**. Đây là chế độ hỏng
+   đã thực sự xảy ra ngày 2026-08-06..08 (forward test dừng im lặng ba
+   ngày, xem `docs/DECISIONS.md`). Kiểm tra theo thứ tự:
+   - Tiến trình còn sống không? (`docker compose ps`, hoặc `launchctl print`
+     cho job forward test)
+   - `logs/main.log` dừng ở đâu, dòng cuối nói gì?
+   - `${STATE_DIR}/state_snapshot.json` — `written_at_utc` là bao giờ?
+   - Nếu tiến trình đã chết: khởi động lại rồi đọc mục **"Khôi phục sau
+     crash"**. Bot tự tua lại các bar bị lỡ (`_pending_bar_dates`), chỉ bar
+     cuối được phép đặt lệnh.
+
+**Đừng xoá `health.json` để "reset trạng thái".** Nó được ghi đè mỗi chu
+kỳ poll; xoá nó chỉ làm mất bằng chứng của lần hỏng vừa rồi và không đổi
+được gì trong hành vi của bot.
+
+---
+
+## `health.json` — có trường `invariant_violations`
+
+**Triệu chứng:** `health.json` chứa khoá `invariant_violations`, và/hoặc
+một cảnh báo `INTERNAL_ERROR` mức CRITICAL.
+
+**Đây KHÔNG phải sự cố vận hành. Đây là bug trong code.** `status` có thể
+vẫn là `ok` — có chủ ý: `degraded`/`down` nghĩa là "chờ hoặc thử lại", còn
+vi phạm bất biến nghĩa là "phải sửa code". Trộn hai thứ lại thì bug được
+xử lý bằng cách chờ, tức là không bao giờ được xử lý.
+
+Nội dung vi phạm hiện chỉ có một loại: `final_allocation != min(hmm_allocation,
+trend_gate_cap, risk_manager_cap)` — CLAUDE.md **bất biến #2**, nguyên tắc
+lõi của toàn bộ mô hình phòng thủ nhiều lớp.
+
+**Can thiệp NGAY, thủ công:**
+
+1. **Dừng bot.** Đây là một trong rất ít trường hợp đáng dừng: một tầng
+   phòng thủ đang không giới hạn được thứ nó phải giới hạn, và mỗi bar
+   tiếp theo là một lệnh đặt dưới giả định sai.
+2. Ghi lại `health.json` nguyên văn (bằng chứng — nó sẽ bị ghi đè sau 60
+   giây nếu bot còn chạy).
+3. `pytest tests/test_properties.py tests/test_wiring_equivalence.py` —
+   hai file này canh đúng bất biến đó ở tầng đơn vị. Nếu chúng xanh trong
+   khi hệ thống thật vi phạm, khoảng trống nằm ở phần NỐI DÂY, không phải
+   ở công thức.
+4. Không khởi động lại cho tới khi tìm ra nguyên nhân.
+
+---
+
 ## Kiểm tra nhanh (không có sự cố cụ thể)
 
 ```bash
@@ -397,4 +516,10 @@ docker compose -f ops/docker-compose.yml logs -f bot
 
 # Trạng thái healthcheck Docker (OK/unhealthy) của container đang chạy
 docker inspect --format='{{json .State.Health}}' regime-trader-crypto
+
+# Sức khoẻ lúc chạy: status + lý do (monitoring/health.py, ghi mỗi chu kỳ poll)
+python -c "import json,os,pathlib;p=pathlib.Path(os.environ.get('STATE_DIR','state'))/'health.json';d=json.loads(p.read_text());print(d['status'],'|',d['updated_at']);[print(' -',r) for r in d['reasons']]"
+
+# Tầng nào đang giới hạn allocation (bốn trường, không chỉ final)
+python -c "import json,os,pathlib;p=pathlib.Path(os.environ.get('STATE_DIR','state'))/'health.json';d=json.loads(p.read_text());[print(f'{k:18} {d[k]}') for k in ('hmm_allocation','trend_gate_cap','risk_manager_cap','final_allocation')]"
 ```

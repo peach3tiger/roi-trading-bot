@@ -435,3 +435,59 @@ def test_mac_dinh_la_60_giay() -> None:
     """§B.3 nói rõ 60 giây — ghim để một lần "tối ưu" xuống 1 giây không
     lặng lẽ biến phép kiểm này thành kiểm lúc bot chưa kịp chạy bar nào."""
     assert health._STARTUP_CHECK_DELAY_S == 60.0
+
+
+# ----------------------------------------------------------------------
+# §B.2 — RUNBOOK phải theo kịp `evaluate()`
+# ----------------------------------------------------------------------
+
+_RUNBOOK = Path(__file__).resolve().parent.parent / "ops" / "RUNBOOK.md"
+
+# Mỗi điều kiện §B.1 -> một đầu vào kích hoạt nó + một mẩu chữ PHẢI có
+# trong RUNBOOK. Mẩu chữ lấy từ chính thông điệp `reasons` sinh ra, nên
+# đổi lời trong `evaluate()` mà quên cập nhật RUNBOOK sẽ đỏ ở đây.
+_DIEU_KIEN: list[tuple[str, dict[str, Any], str]] = [
+    ("bars_behind -> degraded", {"bars_behind": 1}, "Chậm N bar"),
+    ("bars_behind -> down", {"bars_behind": 5}, "Chậm N bar (> 2)"),
+    ("api_ok -> down", {"api_ok": False}, "API không phản hồi ở lần gọi gần nhất"),
+    ("breaker halt -> down", {"circuit_breaker": "PEAK_HALT"}, "Circuit breaker đang halt"),
+    ("lệch đồng hồ", {"clock_skew_ms": 1500.0}, "Lệch đồng hồ"),
+    (
+        "lệnh treo",
+        {"unfilled_orders": 1, "oldest_unfilled_age_seconds": 400.0},
+        "Có lệnh chưa khớp",
+    ),
+    ("model cũ", {"hmm_model_age_days": 30.0}, "Model HMM cũ"),
+]
+
+
+@pytest.mark.parametrize(
+    "ten,dau_vao,manh_chu", _DIEU_KIEN, ids=[c[0] for c in _DIEU_KIEN]
+)
+def test_moi_dieu_kien_co_muc_trong_runbook(
+    ten: str, dau_vao: dict[str, Any], manh_chu: str
+) -> None:
+    """Một trạng thái `degraded`/`down` mà RUNBOOK không giải thích được sẽ
+    khiến người vận hành đoán — và cách đoán rẻ nhất là khởi động lại bot,
+    đúng phản ứng SAI cho `PEAK_HALT` (xoá mất cơ chế đã chặn chuỗi thua lỗ).
+
+    Test này ghim theo chiều "code -> tài liệu": thêm một điều kiện mới vào
+    `evaluate()` mà quên viết mục RUNBOOK thì phải bổ sung vào `_DIEU_KIEN`
+    ở đây, và lúc đó không viết mục RUNBOOK sẽ đỏ ngay.
+    """
+    report = evaluate(_ok_inputs(**dau_vao))
+    assert report.status != STATUS_OK, f"{ten}: đầu vào không kích hoạt được điều kiện"
+
+    assert manh_chu in _RUNBOOK.read_text(encoding="utf-8"), (
+        f"{ten}: `evaluate()` sinh lý do {report.reasons!r} nhưng ops/RUNBOOK.md "
+        f"không có mẩu chữ {manh_chu!r} — người vận hành đọc được trạng thái "
+        "nhưng không có hướng dẫn xử lý."
+    )
+
+
+def test_runbook_co_muc_cho_ca_ba_trang_thai() -> None:
+    noi_dung = _RUNBOOK.read_text(encoding="utf-8")
+
+    assert "## `health.json` — `status: degraded`" in noi_dung
+    assert "## `health.json` — `status: down`" in noi_dung
+    assert "## `health.json` — có trường `invariant_violations`" in noi_dung
