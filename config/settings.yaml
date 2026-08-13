@@ -63,6 +63,12 @@ hmm:
   stability_bars: 3
   flicker_window: 20
   flicker_threshold: 4
+  # Gốc dãy random_state cho n_init lần khởi tạo GaussianHMM. KHÔNG phải
+  # để chỉnh: nó tồn tại để tính tất định được KHAI BÁO thay vì tình cờ
+  # đúng. Đổi giá trị này làm MỌI baseline đã đo hết hiệu lực cùng lúc
+  # (reports/pruned8_base, tests/snapshots/) — xem tests/test_determinism.py
+  # và docstring HMMRegimeEngine.__init__.
+  seed: 0
 
 features:
   tier1_ohlcv: true              # bắt buộc

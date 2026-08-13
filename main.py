@@ -275,6 +275,10 @@ def build_hmm_engine(settings: dict[str, Any], *, min_train_bars: int | None = N
         stability_bars=hmm["stability_bars"],
         flicker_window=hmm["flicker_window"],
         flicker_threshold=hmm["flicker_threshold"],
+        # `.get()` chứ không `[...]`: `forward/config_frozen.yaml` được đóng
+        # băng TRƯỚC khi khoá này tồn tại và không được sửa. Thiếu khoá ->
+        # 0, đúng hành vi trước khi tham số này có mặt.
+        seed=hmm.get("seed", 0),
     )
 
 

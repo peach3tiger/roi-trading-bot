@@ -165,7 +165,24 @@ class HMMRegimeEngine:
         stability_bars: int,
         flicker_window: int,
         flicker_threshold: int,
+        seed: int = 0,
     ) -> None:
+        """`seed` — gốc của dãy `random_state` truyền cho `GaussianHMM`.
+
+        CÓ MẶC ĐỊNH, bắt buộc phải thế: `forward/logger.py` (đóng băng,
+        SHA256 ghim) dựng engine này không truyền `seed`. Một tham số bắt
+        buộc ở đây sẽ làm file đóng băng vỡ ngay, và sửa nó = kết thúc thí
+        nghiệm (CLAUDE.md bất biến #15).
+
+        `seed=0` cho dãy `0..n_init-1` — ĐÚNG hành vi trước khi tham số này
+        tồn tại (`random_state=seed for seed in range(n_init)`), nên mọi
+        kết quả backtest/forward đã ghi vẫn tái lập được bit-for-bit.
+
+        Tham số này KHÔNG phải để chỉnh. Nó tồn tại để tính tất định trở
+        thành thứ ĐƯỢC KHAI BÁO thay vì tình cờ đúng — đổi nó nghĩa là mọi
+        baseline đã đo (reports/pruned8_base, tests/snapshots/) hết hiệu
+        lực cùng lúc.
+        """
         self.n_candidates = list(n_candidates)
         self.n_init = n_init
         self.covariance_type = covariance_type
@@ -173,6 +190,7 @@ class HMMRegimeEngine:
         self.stability_bars = stability_bars
         self.flicker_window = flicker_window
         self.flicker_threshold = flicker_threshold
+        self.seed = seed
 
         self.model = None
         self.feature_names: list[str] = []
@@ -251,13 +269,20 @@ class HMMRegimeEngine:
             best_restart: GaussianHMM | None = None
             best_restart_score = -np.inf
 
-            for seed in range(self.n_init):
+            # `self.seed + restart` (không phải `restart` trần): dãy
+            # random_state được KHAI BÁO từ config thay vì trùng hợp bằng
+            # chỉ số vòng lặp. `seed=0` cho đúng dãy cũ 0..n_init-1.
+            #
+            # Đây là thứ làm ngưỡng regression 0.001 có nghĩa: hai lần chạy
+            # cùng dữ liệu phải cho cùng model. Đo thật ở
+            # tests/test_determinism.py, không suy luận.
+            for restart in range(self.n_init):
                 candidate = GaussianHMM(
                     n_components=n_components,
                     covariance_type=self.covariance_type,
                     n_iter=_EM_MAX_ITER,
                     tol=_EM_TOL,
-                    random_state=seed,
+                    random_state=self.seed + restart,
                 )
                 candidate.fit(X)
                 score = candidate.score(X)
