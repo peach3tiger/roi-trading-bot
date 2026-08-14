@@ -658,6 +658,78 @@ cụ).
 
 ---
 
+## Nạp watchdog + data harness vào launchd — BỐN LỆNH
+
+Hai plist NGUỒN đã commit ở `ops/launchd/`. Chúng **không tự hoạt động**
+— phải copy vào `~/Library/LaunchAgents/` rồi bootstrap.
+
+```bash
+# 1. COPY hai plist vào LaunchAgents
+cp /Users/lbeyewear/regime-trader-crypto/ops/launchd/com.regime-trader-crypto.watchdog.plist \
+   /Users/lbeyewear/regime-trader-crypto/ops/launchd/com.regime-trader-crypto.data-harness.plist \
+   ~/Library/LaunchAgents/
+```
+
+```bash
+# 2. NẠP (bootstrap vào domain gui của user hiện tại)
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.regime-trader-crypto.watchdog.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.regime-trader-crypto.data-harness.plist
+```
+
+```bash
+# 3. KIỂM TRẠNG THÁI (PID + exit code lần chạy cuối)
+launchctl print gui/$(id -u)/com.regime-trader-crypto.watchdog | grep -E "state|pid|last exit"
+```
+
+```bash
+# 4. GỠ
+launchctl bootout gui/$(id -u)/com.regime-trader-crypto.watchdog; launchctl bootout gui/$(id -u)/com.regime-trader-crypto.data-harness
+```
+
+### XÁC MINH SAU KHI NẠP — "load không báo lỗi" KHÔNG phải bằng chứng
+
+`launchctl bootstrap` im lặng chỉ nghĩa là plist hợp lệ. Nó **không** nói
+tiến trình chạy được: sai đường dẫn Python, thiếu dependency, hay crash
+ngay khi khởi động đều cho cùng một sự im lặng đó. Đây đúng chế độ hỏng
+đã xảy ra 2026-08-06→08 (forward test dừng im lặng 3 ngày vì job nạp
+"thành công" nhưng exit 1 mỗi lần chạy).
+
+Chạy lệnh này ~40 giây sau khi bootstrap:
+
+```bash
+echo "── launchctl thấy job không, PID bao nhiêu ──" && launchctl list | grep regime-trader-crypto && echo "── stderr có gì (RỖNG là tốt) ──" && tail -5 logs/watchdog.err.log logs/data_harness.err.log 2>/dev/null && echo "── watchdog có ĐANG ĐỌC heartbeat không: mtime phải MỚI ──" && ls -l state/heartbeat.json 2>/dev/null || echo "  (chưa có heartbeat.json — bot chưa chạy, đúng nếu chỉ mới nạp watchdog)"
+```
+
+Đọc kết quả như sau:
+
+| Dấu hiệu | Nghĩa |
+|---|---|
+| `launchctl list` có dòng, cột đầu là **số** (PID) | tiến trình ĐANG CHẠY |
+| `launchctl list` có dòng, cột đầu là `-` | đã đăng ký nhưng **KHÔNG chạy** — đọc `.err.log` |
+| cột thứ hai khác `0` | lần chạy cuối **thoát với lỗi** đó |
+| không có dòng nào | bootstrap chưa thành công |
+
+**Bằng chứng mạnh nhất là `state/heartbeat.json` có `mtime` tăng dần khi
+bot chạy** — nó chứng minh cả bot lẫn đường ghi state đều sống. Watchdog
+đọc đúng file đó, nên `mtime` đứng yên quá 90 giây là lúc watchdog sẽ kết
+thúc bot (xem mục `WATCHDOG_KILL`).
+
+### KHÔNG có KeepAlive — có chủ ý
+
+Cả hai plist đều KHÔNG đặt `KeepAlive`.
+
+Watchdog tồn tại để kết thúc bot khi bot treo, và nó không được tự khởi
+động lại bot. Nếu chính watchdog được `KeepAlive` hồi sinh, ta có một tiến
+trình giết-rồi-sống-lại vô hạn mà không ai để ý — và biểu đồ uptime trông
+hoàn hảo. Watchdog chết **phải thấy được**: `launchctl list` mất dòng của
+nó, và `heartbeat.json` cũ dần mà không ai kết thúc bot.
+
+Data harness còn một lý do riêng: nó **ghi `data_quality.lock`**, tức có
+quyền dừng việc sinh signal. Một tiến trình có quyền đó mà tự hồi sinh sau
+khi chết vì lỗi lập trình sẽ ghi lock lặp lại mà không ai đọc được nguyên
+nhân.
+
+---
+
 ## Vì sao KHÔNG dùng blue-green (quyết định kiến trúc)
 
 Người đọc sau này sẽ muốn đảo ngược quyết định này. Đọc hết mục này trước.

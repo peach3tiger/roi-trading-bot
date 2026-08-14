@@ -71,9 +71,12 @@ kill+restart thật, `--dry-run` 24h, dashboard/Telegram thật.
    đáng tin trên Binance spot. Không bịa bằng cặp proxy chưa kiểm chứng.
 4. Phase 12c (`prompts/phase-12c-shadow-deploy.md`). Xây nó cũng đóng luôn
    mục nghiệm thu ĐẠT-một-cách-rỗng ở dưới.
-4b. Nạp launchd job cho `monitoring.watchdog` và `monitoring.data_harness`
-   — code xong, **chưa job nào được nạp**. Khuôn plist ở `ops/RUNBOOK.md`
-   mục "Chạy watchdog và data harness".
+4b. Nạp launchd job cho `monitoring.watchdog` và `monitoring.data_harness`.
+   Hai plist ĐÃ SINH ở `ops/launchd/` (đã `plutil -lint` OK), **chưa copy
+   vào `~/Library/LaunchAgents/`** — đó là việc người dùng làm. Bốn lệnh
+   + lệnh XÁC MINH (chứng minh tiến trình đang chạy thật, không chỉ "load
+   không báo lỗi") ở `ops/RUNBOOK.md` mục "Nạp watchdog + data harness vào
+   launchd — BỐN LỆNH".
 5. **Đọc log CI #8 (`c7fb25b`), job "Cổng §E", xem bước nào đỏ.** Hai khả
    năng có ý nghĩa khác hẳn nhau: một test slow hỏng riêng trên CI, hay cơ
    chế biên lai `.slow_receipt.json` không hoạt động trên runner sạch. Xem

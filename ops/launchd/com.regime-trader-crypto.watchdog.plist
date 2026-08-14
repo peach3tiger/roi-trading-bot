@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent cho monitoring/watchdog.py — tiến trình RIÊNG giám sát bot.
+
+  File NGUỒN đã commit trong repo. KHÔNG tự động hoạt động ở đây — phải
+  copy vào ~/Library/LaunchAgents/ rồi `launchctl bootstrap`. Bốn lệnh đầy
+  đủ ở `ops/RUNBOOK.md` mục "Chạy watchdog và data harness".
+
+  Đường dẫn TUYỆT ĐỐI khớp máy đã dựng (/Users/lbeyewear/regime-trader-crypto).
+  Chạy máy khác thì sửa cả ProgramArguments, WorkingDirectory, STATE_DIR
+  và hai đường log trước khi copy.
+
+  KHÔNG CÓ KeepAlive — CÓ CHỦ Ý, và đây là điểm quan trọng nhất của file này.
+
+  Watchdog tồn tại để KẾT THÚC bot khi bot treo, và nó KHÔNG được tự khởi
+  động lại bot (CLAUDE.md #16/Phase 12d §A.4 mục 5). Nếu chính watchdog
+  được KeepAlive hồi sinh, ta có một tiến trình giết-rồi-sống-lại vô hạn
+  mà không ai để ý — và biểu đồ uptime trông hoàn hảo.
+
+  Watchdog chết PHẢI THẤY ĐƯỢC: `launchctl list` mất dòng của nó, và
+  heartbeat.json cũ dần mà không ai kết thúc bot. Im lặng hồi sinh sẽ
+  che mất cả hai tín hiệu.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.regime-trader-crypto.watchdog</string>
+
+    <!--
+      Gọi THẲNG interpreter của venv, KHÔNG qua `python3` của hệ thống:
+      launchd chạy với PATH tối thiểu và sẽ lấy nhầm Python hệ thống (thiếu
+      pandas/hmmlearn). Đây cũng chính là interpreter đang chạy forward test
+      — Python 3.9.6, xem docs/STATE.md.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/lbeyewear/regime-trader-crypto/.venv/bin/python</string>
+        <string>-m</string>
+        <string>monitoring.watchdog</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/lbeyewear/regime-trader-crypto</string>
+
+    <!--
+      STATE_DIR TƯỜNG MINH. Mặc định trong code là `./state` (tương đối với
+      thư mục làm việc) — đúng ở đây, nhưng viết ra để một lần đổi
+      WorkingDirectory không âm thầm đổi luôn chỗ đọc/ghi state. Cả bot,
+      watchdog và data harness PHẢI trỏ cùng một thư mục, nếu không
+      watchdog sẽ canh một heartbeat.json không ai ghi.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>STATE_DIR</key>
+        <string>/Users/lbeyewear/regime-trader-crypto/state</string>
+    </dict>
+
+    <!--
+      Tiến trình chạy vòng lặp vô hạn, không phải job theo lịch — nên
+      RunAtLoad để nó khởi động ngay khi nạp, KHÔNG có
+      StartCalendarInterval.
+    -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/lbeyewear/regime-trader-crypto/logs/watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/lbeyewear/regime-trader-crypto/logs/watchdog.err.log</string>
+</dict>
+</plist>
