@@ -502,6 +502,162 @@ lõi của toàn bộ mô hình phòng thủ nhiều lớp.
 
 ---
 
+## WATCHDOG_KILL — watchdog đã kết thúc bot
+
+**Triệu chứng:** cảnh báo `WATCHDOG_KILL` mức CRITICAL, và
+`${STATE_DIR}/watchdog_kill.json` tồn tại.
+
+**Bot KHÔNG tự khởi động lại. Đó là thiết kế.** Watchdog giết bot rồi
+supervisor bật lại ngay sẽ tạo một vòng lặp crash mà không ai để ý — bot
+chết và sống lại cả ngàn lần, mỗi lần để lại một trạng thái dở dang, và
+biểu đồ uptime trông hoàn hảo.
+
+```bash
+python -c "import json,os,pathlib;p=pathlib.Path(os.environ.get('STATE_DIR','state'))/'watchdog_kill.json';d=json.loads(p.read_text());print(d['killed_at_utc'],d['reason']);print(d['detail']);print('tín hiệu:',d['signal_used'])"
+```
+
+Ba `reason`, ba nguyên nhân khác nhau:
+
+| `reason` | Nghĩa | Nhìn vào đâu |
+|---|---|---|
+| `heartbeat_stale` | Tiến trình còn sống nhưng không tiến — deadlock, hoặc kẹt trong một lời gọi mạng không timeout | `logs/main.log` dòng cuối; `last_heartbeat.bar_ts` cho biết kẹt ở bar nào |
+| `loop_seq_stuck` | Heartbeat vẫn được ghi (mtime tươi) nhưng vòng lặp đứng — nặng hơn `stale`, nghĩa là có luồng còn sống nhưng luồng chính kẹt | Cùng chỗ; nghi ngờ deadlock giữa hai luồng |
+| `pid_gone` | Bot đã chết trước khi watchdog kịp làm gì | Log hệ thống: OOM killer, panic, `docker logs` |
+
+`signal_used`: `SIGTERM` = bot thoát sạch, `state_snapshot.json` nhiều khả
+năng còn đúng. `SIGKILL` = bot **không** phản hồi trong 30 giây; snapshot
+có thể cũ hơn thực tế trên sàn.
+
+**Bắt buộc trước khi khởi động lại:**
+
+```bash
+python scripts/recovery_checklist.py    # thoát khác 0 nếu có mục NGHIÊM TRỌNG
+```
+
+Xoá `watchdog_kill.json` sau khi đã đọc — file này bị ghi đè ở lần kill
+tiếp theo, nên nó không phải nhật ký.
+
+---
+
+## DATA_QUALITY — `data_quality.lock` tồn tại
+
+**Triệu chứng:** cảnh báo `DATA_QUALITY_FAILED`, log bot lặp
+`data_quality.lock tồn tại — DỪNG sinh signal`.
+
+**Bot vẫn chạy, vẫn giữ vị thế và stop, chỉ không sinh signal mới.** Nó bỏ
+qua TOÀN BỘ việc xử lý bar — kể cả enforce stop-loss, có chủ ý: nhánh đó
+so giá bar với stop, và giá bar chính là thứ vừa bị tuyên bố là không tin
+được. Đóng vị thế theo một mức giá sai là hiện thực hoá một khoản lỗ chưa
+từng xảy ra.
+
+```bash
+python -c "import json,os,pathlib;p=pathlib.Path(os.environ.get('STATE_DIR','state'))/'data_quality.lock';d=json.loads(p.read_text());[print(f\"{v['check']:28} {v['bar']:26} {v['detail']}\") for v in d['violations']]"
+```
+
+**`LARGE_PRICE_MOVE` KHÔNG khoá bot.** Nếu bạn thấy cảnh báo đó mà không
+thấy lock, đó là đúng hành vi: giá nhảy >30% đã được xác nhận bởi nguồn
+thứ hai, tức là biến động THẬT. Bot phải chạy tiếp — đó là lúc trend gate
+hạ trần và risk manager cắt size, chính là thứ hệ thống được xây để làm.
+
+**Xử lý:** điều tra nguồn dữ liệu (`data/history_loader.py` cache? sàn trả
+sai?), sửa, rồi `rm ${STATE_DIR}/data_quality.lock` **bằng tay**. Không tự
+hết hạn — một lock tự hết hạn nghĩa là nguyên nhân không bao giờ bị điều
+tra.
+
+---
+
+## EMERGENCY_KILL — dừng khẩn cấp thủ công
+
+```bash
+python scripts/emergency_kill.py --reason "mô tả ngắn vì sao"
+```
+
+Nó làm: ghi `trading_halted.lock` → huỷ lệnh VÀO/REBALANCE → **giữ nguyên
+mọi lệnh bảo vệ** → **KHÔNG đóng vị thế spot** → SIGTERM bot, 30s, SIGKILL
+→ in tóm tắt.
+
+**Đọc kỹ cảnh báo cuối bản in nếu còn vị thế.** Stop-loss của hệ thống này
+**không nằm trên sàn** — `modify_stop()` chỉ ghi vào bộ nhớ tiến trình,
+enforce do vòng lặp bot làm mỗi bar. Sau khi script chạy xong, vị thế còn
+nguyên và **không còn gì canh nó**. Hoặc đặt stop thủ công trên sàn ngay,
+hoặc theo dõi tay tới khi khởi động lại.
+
+Vì sao không đóng vị thế: đóng trong hoảng loạn là hiện thực hoá khoản lỗ
+ở đúng thời điểm tệ nhất, và nó mâu thuẫn với luận điểm của hệ thống —
+giảm tỷ trọng theo biến động, không thoát sạch.
+
+---
+
+## Chạy watchdog và data harness — launchd (macOS) / systemd (Linux)
+
+Cả hai là **tiến trình riêng**, không phải thread trong bot. Một tiến
+trình bị treo không tự phát hiện được rằng nó đang treo.
+
+### macOS — launchd
+
+`launchd` có `KeepAlive` (khởi động lại khi tiến trình **thoát**) nhưng
+**không phát hiện được tiến trình treo**. Không có tương đương
+`systemd Type=notify` + `WatchdogSec`. Nên trên macOS bắt buộc phải chạy
+`monitoring/watchdog.py` như một job riêng:
+
+```xml
+<!-- ~/Library/LaunchAgents/com.regime-trader.watchdog.plist -->
+<key>ProgramArguments</key>
+<array>
+  <string>/ĐƯỜNG/DẪN/TUYỆT/ĐỐI/.venv/bin/python</string>
+  <string>-m</string><string>monitoring.watchdog</string>
+</array>
+<key>WorkingDirectory</key><string>/ĐƯỜNG/DẪN/TUYỆT/ĐỐI/regime-trader-crypto</string>
+<key>KeepAlive</key><true/>
+<key>StandardOutPath</key><string>.../logs/watchdog.out.log</string>
+<key>StandardErrorPath</key><string>.../logs/watchdog.err.log</string>
+```
+
+`StandardErrorPath` **bắt buộc**: một job không có nó thì lỗi không để lại
+dấu vết nào — đó là cách sự cố forward test ẩn được 3 ngày (2026-08-06 →
+08-08).
+
+Cùng khuôn cho `monitoring.data_harness`.
+
+Kiểm job đang chạy thật (đọc `runs` và `last exit code`, không chỉ "có
+trong danh sách"):
+
+```bash
+launchctl print gui/$(id -u)/com.regime-trader.watchdog | grep -E "state|runs|last exit"
+```
+
+### Linux — systemd, tốt hơn
+
+Dùng `Type=notify` + `WatchdogSec=60` + `sd_notify` cho chính tiến trình
+bot: **kernel** giám sát, không phải một tiến trình Python khác cũng có
+thể chết. `monitoring/watchdog.py` chỉ là đường thay thế cho macOS.
+
+```ini
+[Service]
+Type=notify
+WatchdogSec=60
+Restart=no          # KHÔNG tự khởi động lại — xem mục WATCHDOG_KILL
+```
+
+`Restart=no` là có chủ ý và trùng lý do watchdog không tự bật lại bot.
+
+---
+
+## Kiểm cấu hình trước khi khởi động
+
+```bash
+python config/validate.py              # đầy đủ, cần credential
+python config/validate.py --skip-env   # CI, không có credential thật
+```
+
+Kiểm 10 section bắt buộc, biến môi trường (**rỗng cũng là thiếu**), hash
+`forward/config_frozen.yaml`, cờ `testnet`, và 6 bất biến `CLAUDE.md`
+bằng **AST** (không grep — grep bắt nhầm docstring đang giải thích tại sao
+cấm `predict()`, và cách sửa duy nhất là viết lại docstring cho vừa công
+cụ).
+
+---
+
 ## Kiểm tra nhanh (không có sự cố cụ thể)
 
 ```bash
