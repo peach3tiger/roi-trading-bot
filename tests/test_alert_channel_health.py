@@ -102,7 +102,13 @@ def test_kenh_file_hong_khong_chan_kenh_tu_xa(tmp_path: Path, monkeypatch: pytes
     class _Resp:
         status_code = 200
 
-    monkeypatch.setattr(alerts_mod.requests, "post", lambda *a, **k: (posted.append("sent"), _Resp())[1])
+    # `(append(...), _Resp())[1]` — ghi nhận rồi trả `_Resp`. mypy phàn nàn
+    # `append` trả None; đó chính là phần tử [0] bị bỏ đi, không phải lỗi.
+    monkeypatch.setattr(
+        alerts_mod.requests,
+        "post",
+        lambda *a, **k: (posted.append("sent"), _Resp())[1],  # type: ignore[func-returns-value]
+    )
 
     manager = _manager(tmp_path, telegram_bot_token="t", telegram_chat_id="c")
     assert manager._alert_logger is not None

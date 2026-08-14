@@ -200,7 +200,9 @@ def test_run_watchdog_khong_gui_khi_log_khoe(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("stale", [False, True])
-def test_bao_cao_trang_thai_kenh_ke_ca_khi_log_khoe(tmp_path: Path, monkeypatch, stale: bool) -> None:
+def test_bao_cao_trang_thai_kenh_ke_ca_khi_log_khoe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale: bool
+) -> None:
     """`telegram_configured` phải có trong MỌI lần chạy, không chỉ khi có sự cố.
 
     Nếu chỉ kiểm kênh lúc cần gửi, thì phát hiện "Telegram chưa cấu hình"
@@ -220,7 +222,7 @@ def test_bao_cao_trang_thai_kenh_ke_ca_khi_log_khoe(tmp_path: Path, monkeypatch,
     assert res["alert_sent"] is False  # send=False -> không bao giờ gửi thật
 
 
-def test_bao_cao_kenh_chua_cau_hinh(tmp_path: Path, monkeypatch) -> None:
+def test_bao_cao_kenh_chua_cau_hinh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Biến rỗng (`TELEGRAM_BOT_TOKEN=`) phải bị coi là CHƯA cấu hình.
 
     Đúng trạng thái `.env` của máy này lúc dựng watchdog: tên biến có mặt,
@@ -234,7 +236,7 @@ def test_bao_cao_kenh_chua_cau_hinh(tmp_path: Path, monkeypatch) -> None:
     assert run_watchdog(p, today_utc=_TODAY, send=False)["telegram_configured"] is False
 
 
-def test_load_dotenv_khong_ghi_de_moi_truong_that(tmp_path, monkeypatch) -> None:
+def test_load_dotenv_khong_ghi_de_moi_truong_that(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Biến đã có trong `os.environ` phải THẮNG `.env`.
 
     launchd không có env của shell nên `.env` là nguồn duy nhất khi chạy

@@ -107,7 +107,10 @@ class _ExchangeStub:
 
 
 def _executor(exchange: _ExchangeStub) -> OrderExecutor:
-    return OrderExecutor(exchange, limit_offset_pct=Decimal("0.05"), timeout_seconds=0)
+    # `_ExchangeStub` khớp CẤU TRÚC `ExchangeClient` (đủ method test cần)
+    # nhưng không kế thừa nó — cố ý: stub kế thừa ABC sẽ phải cài mọi
+    # method, kể cả những method test này không dùng tới.
+    return OrderExecutor(exchange, limit_offset_pct=Decimal("0.05"), timeout_seconds=0)  # type: ignore[arg-type]
 
 
 # ======================================================================
@@ -783,7 +786,8 @@ def test_bug9_gia_lich_su_doi_thi_tinh_lai() -> None:
     cache.get(ohlcv)
 
     revised = ohlcv.copy()
-    revised.iloc[10, revised.columns.get_loc("close")] = 999.0
+    # stub pandas không biết `get_loc` trả `int` cho Index thường.
+    revised.iloc[10, revised.columns.get_loc("close")] = 999.0  # type: ignore[index]
     cache.get(revised)
 
     assert cache.misses == 2

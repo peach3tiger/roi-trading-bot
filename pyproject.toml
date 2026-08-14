@@ -40,3 +40,15 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 ignore_missing_imports = true
 exclude = ["data/cache"]
+
+# `tests/` được mypy kiểm như mọi nơi khác (`disallow_untyped_defs` VẪN bật),
+# trừ `warn_return_any`. Lý do: phần lớn helper trong test trả thẳng kết quả
+# của `yaml.safe_load`/`pd.read_csv`/`json.loads` — stub của chúng trả `Any`,
+# nên cảnh báo này chỉ đòi thêm một dòng `cast()` không tăng độ an toàn nào.
+#
+# Trước 2026-08-14 `mypy .` DỪNG ở file đầu tiên với "Source file found twice
+# under different module names" (thiếu `tests/__init__.py`) — tức là toàn bộ
+# repo chưa từng được kiểm hết. Xem docstring `tests/__init__.py`.
+[[tool.mypy.overrides]]
+module = "tests.*"
+warn_return_any = false

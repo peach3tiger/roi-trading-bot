@@ -205,7 +205,8 @@ def wired(world: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         def load(self, symbol: str, tf: str, start: Any, end: Any) -> pd.DataFrame:
             end_ts = pd.Timestamp(end)
             load_calls.append(end_ts)
-            return ohlcv.loc[:end_ts]
+            # stub pandas không nhận Timestamp làm biên slice của `.loc`.
+            return ohlcv.loc[:end_ts]  # type: ignore[misc]
 
     import data.history_loader as hist
 
