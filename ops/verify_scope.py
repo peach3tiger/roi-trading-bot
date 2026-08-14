@@ -278,10 +278,20 @@ ACCEPTANCE_PATHS: tuple[tuple[str, str, bool], ...] = (
     # dẫn — nhưng nó vẫn là một đường dẫn thật, và nếu thư mục biến mất thì
     # mục nghiệm thu "chỉ có thao tác đọc" trở nên vô nghĩa. Canh luôn.
     ("forward/", 'grep -rn "forward/" monitoring/ tests/regression_harness.py', False),
-    # Phase 12c — CHƯA XÂY. Mục nghiệm thu của nó
-    # (`grep -rn "order_executor|submit_order" ops/shadow_runner.py`) hiện
-    # ĐẠT một cách RỖNG: grep trên file không tồn tại trả 0 kết quả.
-    ("ops/shadow_runner.py", 'grep -rn "order_executor|submit_order" ops/shadow_runner.py', True),
+    # Phase 12c ĐÃ XÂY (2026-08-14) — trước đó mục nghiệm thu
+    # `grep -rn "order_executor|submit_order" ops/shadow_runner.py` ĐẠT một
+    # cách RỖNG vì file không tồn tại. Giờ nó kiểm thật, nên cờ đổi sang
+    # "bắt buộc tồn tại": nếu file biến mất, mục nghiệm thu quay lại trạng
+    # thái rỗng và phải FAIL chứ không im lặng "sạch".
+    #
+    # Lưu ý: phép kiểm THẬT cho file này là AST
+    # (`config/validate.py::check_shadow_runner_no_executor`), không phải
+    # grep — docstring của `shadow_runner.py` cố ý nhắc tên `order_executor`
+    # để giải thích lệnh cấm, và grep sẽ báo động vì chính lời giải thích
+    # đó (cùng bài học §C.2 với `.predict(`).
+    ("ops/shadow_runner.py", 'AST: config/validate.py::check_shadow_runner_no_executor', False),
+    ("ops/shadow_diff.py", "so log shadow với log production (Phase 12c §B)", False),
+    ("ops/compare_versions.py", "cổng so sánh ngoại tuyến (Phase 12c §A)", False),
 )
 
 

@@ -50,7 +50,7 @@ import logging
 from contextvars import ContextVar
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 # "-" chứ không phải "" hay None: một dòng log ngoài phạm vi bar vẫn phải
 # có trường `trace`, để `grep trace=` không bao giờ bỏ sót dòng nào vì
@@ -157,7 +157,20 @@ def capped_by(
     }[tang]
 
 
-def log_layer(logger: logging.Logger, layer: str, **fields: Any) -> None:
+class SupportsLayerLog(Protocol):
+    """Chỉ đòi thứ `log_layer` thật sự dùng.
+
+    `logging.Logger` thoả; `ops/shadow_runner.py::_ShadowLogger` (ghi JSONL
+    thẳng vào `ops/shadow/`) cũng thoả. Buộc kiểu cụ thể `logging.Logger`
+    sẽ ép shadow runner phải đi qua `monitoring/logger.py` và ghi vào
+    `logs/` — trộn chung thư mục với instance production, tức là
+    `shadow_diff` có thể so một file với chính nó.
+    """
+
+    def info(self, msg: str, *, extra: Optional[dict[str, Any]] = None) -> None: ...
+
+
+def log_layer(logger: SupportsLayerLog, layer: str, **fields: Any) -> None:
     """Một dòng cho một tầng. `trace` do `TraceFilter` chèn.
 
     Định dạng CHUNG cho `main.py` và `ops/shadow_runner.py` — đó là điều

@@ -173,14 +173,37 @@ def test_duong_dan_nghiem_thu_ton_tai(duong_dan: str, muc: str) -> None:
     assert (_ROOT / duong_dan).exists(), f"`{muc}` sẽ trả rỗng vì {duong_dan} không tồn tại"
 
 
-def test_duong_dan_chua_xay_duoc_danh_dau_ro() -> None:
-    """`ops/shadow_runner.py` (Phase 12c) chưa có. Mục nghiệm thu của nó
-    hiện ĐẠT một cách RỖNG — điều đó phải hiện trong bảng, dán nhãn "CHƯA
-    XÂY", chứ không im lặng vắng mặt."""
-    chua_xay = [c for c in check_paths() if c.scope == "CHƯA XÂY"]
+def test_danh_dau_CHUA_XAY_phai_that_su_chua_xay() -> None:
+    """Cờ `expected_missing=True` là một lời khai "mục nghiệm thu này hiện
+    RỖNG". Khi file được xây xong mà cờ còn nguyên, lời khai thành SAI —
+    và nó sai theo hướng nguy hiểm: một phép kiểm thật bị dán nhãn "chưa
+    kiểm được gì", nên không ai đọc kết quả của nó.
 
-    assert chua_xay, "không còn mục 'chưa xây' nào — cập nhật ACCEPTANCE_PATHS"
-    assert all("RỖNG" in c.detail for c in chua_xay)
+    Đã xảy ra 2026-08-14: `ops/shadow_runner.py` được xây ở Phase 12c và
+    cờ vẫn là `True`.
+    """
+    con_thieu = [
+        p for p, _muc, duoc_phep in ACCEPTANCE_PATHS if duoc_phep and (_ROOT / p).exists()
+    ]
+
+    assert not con_thieu, (
+        f"đánh dấu CHƯA XÂY nhưng file ĐÃ TỒN TẠI: {con_thieu}\n"
+        "Đổi cờ sang False trong ops/verify_scope.py::ACCEPTANCE_PATHS — "
+        "mục nghiệm thu đó giờ kiểm thật."
+    )
+
+
+def test_khong_con_muc_nghiem_thu_rong() -> None:
+    """Trạng thái MONG MUỐN: không mục nghiệm thu nào ĐẠT một cách rỗng.
+
+    Test này được phép xanh với danh sách rỗng — khác
+    `test_danh_dau_CHUA_XAY_phai_that_su_chua_xay`, vốn bắt cờ nói dối.
+    Nếu Phase sau thêm một mục chưa xây, nó sẽ hiện ở đây và bảng
+    `verify_scope` in ra nhãn CHƯA XÂY.
+    """
+    rong = [c for c in check_paths() if c.scope == "CHƯA XÂY"]
+
+    assert all("RỖNG" in c.detail for c in rong), "mục chưa xây phải nói rõ nó rỗng"
 
 
 def test_duong_dan_bien_mat_thi_bao_KHONG_OK(tmp_path: Path) -> None:

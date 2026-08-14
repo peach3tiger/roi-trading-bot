@@ -1461,7 +1461,7 @@ def _build_exit_signal(
 
 def _build_portfolio_state(
     *,
-    order_executor: Any,
+    exchange_client: Any,
     signal_generator: Any,
     symbol: str,
     close_price: Decimal,
@@ -1472,11 +1472,17 @@ def _build_portfolio_state(
     một PortfolioState theo đúng một cách — hai bản sao chép tay sẽ trôi
     lệch nhau, và `validate_signal` nhận state khác nhau ở hai nhánh là
     đúng loại khác biệt không ai để ý cho tới khi nó gây hại.
+
+    Nhận `exchange_client` chứ KHÔNG phải `order_executor` (đổi 2026-08-14,
+    Phase 12c §B): hàm này chỉ ĐỌC số dư và vị thế — nó chưa bao giờ cần
+    khả năng đặt lệnh. Nhờ vậy `ops/shadow_runner.py` dùng lại được đúng
+    hàm này mà không phải nhắc tới `order_executor` ở bất kỳ đâu, tức là
+    một BẢN CÀI ĐẶT duy nhất cho cả hai đường thay vì hai bản sẽ trôi lệch.
     """
     from core.risk_manager import PortfolioState
 
-    balance = order_executor.exchange_client.get_balance()
-    positions = {p.symbol: p for p in order_executor.exchange_client.get_positions()}
+    balance = exchange_client.get_balance()
+    positions = {p.symbol: p for p in exchange_client.get_positions()}
     qty = positions[symbol].qty if symbol in positions else Decimal("0")
     equity = balance.total + qty * close_price
     # daily_pnl/weekly_pnl/peak_equity/drawdown: KHÔNG được risk_manager.
@@ -1686,7 +1692,7 @@ def process_one_bar(
             regime_label=state.current_regime_label,
         )
         exit_portfolio_state, _, _, _ = _build_portfolio_state(
-            order_executor=order_executor,
+            exchange_client=order_executor.exchange_client,
             signal_generator=signal_generator,
             symbol=symbol,
             close_price=close_price,
@@ -1747,7 +1753,7 @@ def process_one_bar(
         )
 
     portfolio_state, balance, positions, equity = _build_portfolio_state(
-        order_executor=order_executor,
+        exchange_client=order_executor.exchange_client,
         signal_generator=signal_generator,
         symbol=symbol,
         close_price=close_price,
