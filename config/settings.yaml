@@ -161,3 +161,14 @@ monitoring:
   # không phải dấu hiệu thị trường chậm khớp. Để bằng 30 sẽ báo degraded ở
   # mọi lệnh bình thường đang chờ trong cửa sổ timeout của chính nó.
   unfilled_order_degraded_seconds: 300
+  # monitoring/drift.py §C.1 — ngưỡng cảnh báo trôi lệch so với baseline
+  # backtest Phase 7 (tests/snapshots/phase7_baseline/). BẢN THÂN baseline
+  # KHÔNG nằm ở đây: nó là kết quả ĐO, đọc từ file, không phải tham số
+  # chỉnh được — xem docstring monitoring/drift.py.
+  drift:
+    allocation_pts: 15.0        # bất kỳ mức nào trong 4 mức lệch quá chừng này điểm %
+    rebalance_pts: 10.0
+    fee_pct_of_gross_max: 20.0  # TUYỆT ĐỐI, không so baseline: phí ăn 20%
+                                 # lợi nhuận gộp là xấu bất kể baseline bao nhiêu
+    flicker_multiple: 2.0       # cao hơn baseline chừng này lần
+    trend_gate_block_pts: 20.0

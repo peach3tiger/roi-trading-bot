@@ -1995,3 +1995,63 @@ Chưa thêm phép kiểm đó: nó sẽ phải đọc `log_v2.csv` và biết v�
 hợp lệ ở 08-08, tức là một ngoại lệ hardcode ngay từ ngày đầu. Ghi lại như
 một khoảng trống đã biết thay vì dựng một cái canh gác biết trước là sẽ
 phải nói dối.
+
+
+## Ngưỡng drift §C.1 quá chặt so với nhiễu cửa sổ 30 bar (2026-08-14)
+
+**Đo, không suy đoán.** Cài xong `monitoring/drift.py` theo đúng §C.1
+(cửa sổ trượt 30 ngày, ngưỡng 15 điểm % cho phân bố allocation, 20 điểm %
+cho thời gian trend gate chặn HMM), rồi trượt cửa sổ đó qua chính baseline
+Phase 7:
+
+| | Tỷ lệ cửa sổ baseline tự báo động |
+|---|---|
+| Phân bố allocation (4 mức) | **99.0 %** |
+| Thời gian trend gate chặn HMM | **72.9 %** |
+| Ít nhất một cảnh báo | **99.7 %** (2255/2262 cửa sổ) |
+
+Nguyên nhân: phân bố allocation trên cửa sổ 30 bar có **độ lệch chuẩn ~41
+điểm %**. Ngưỡng 15 điểm nằm sâu bên trong nhiễu tự nhiên. Đổi mốc so từ
+"toàn kỳ" sang "trung vị của cửa sổ" KHÔNG cứu được (100.0 % / 32.7 %) —
+vấn đề nằm ở kích thước cửa sổ so với biên độ chỉ số, không nằm ở chọn mốc.
+
+Bề rộng dải p1–p99 của phân bố allocation theo kích thước cửa sổ:
+
+```
+ 30 bar : [100.0, 100.0,  98.0, 100.0]
+ 90 bar : [100.0,  55.6,  70.0,  95.6]
+182 bar : [100.0,  40.1,  51.1,  92.9]
+365 bar : [ 87.2,  35.9,  30.0,  81.9]
+```
+
+Ba trong bốn rổ phủ trọn 0–100 % ở cửa sổ 30 bar: chỉ số này gần như
+KHÔNG mang thông tin ở kích thước cửa sổ mà §C.1 quy định. Nó bắt đầu có
+nghĩa từ khoảng 180 bar.
+
+### Quyết định
+
+Giữ nguyên mọi ngưỡng §C.1 — **không nới một con số nào**. Thêm một điều
+kiện THỨ HAI: cảnh báo chỉ bật khi giá trị đồng thời **nằm ngoài dải
+p1–p99 của chính baseline đo trên cửa sổ CÙNG kích thước**
+(`monitoring/drift.py::Bands`). Đủ LỚN (ngưỡng §C.1) **và** đủ HIẾM (dải).
+
+Kết quả đo lại: tỷ lệ báo động sai trên chính baseline **99.7 % → 1.02 %**.
+
+Vì sao không chọn cách khác:
+
+- *Nới ngưỡng*: sẽ phải nới lên hơn 40 điểm % để im, lúc đó ngưỡng không
+  còn phát hiện được gì.
+- *Kéo dài cửa sổ lên 180 bar*: đúng về mặt thống kê, nhưng §C.1 nói rõ 30
+  ngày, và một chỉ báo phản ứng sau sáu tháng thì quá chậm cho vai trò
+  "phát hiện trôi lệch trước khi thua lỗ xuất hiện". `run(window_days=...)`
+  nhận tham số nên vẫn thử được khi có nhu cầu.
+- *Bỏ chỉ số*: nó vẫn có giá trị QUAN SÁT (in ra mỗi lần chạy) kể cả khi
+  chưa đủ tin cậy để báo động.
+
+### Hệ quả phải biết
+
+Ở cửa sổ 30 bar, chỉ số "phân bố allocation" thực tế chỉ báo động ở những
+trường hợp rất cực đoan. Đừng đọc "drift im lặng" thành "hành vi khớp
+baseline" — nó chỉ nghĩa là chưa có gì đủ cực đoan để phân biệt được với
+nhiễu. `tests/test_drift.py::test_dai_allocation_gan_nhu_phu_tron_o_cua_so_30_bar`
+giữ bằng chứng cho điều này và sẽ đỏ nếu ai đó lặng lẽ đổi cách tính dải.

@@ -108,9 +108,22 @@ class DashboardState:
 # Panel SO SÁNH BASELINE — CHỈ ĐỌC `drift.json`, không tính lại gì
 # ----------------------------------------------------------------------
 
-# Phase 12b §C.1 (`monitoring/drift.py`) sinh file này. Nó CHƯA tồn tại —
-# panel phải hiển thị được điều đó một cách rõ ràng thay vì để trống.
-_DEFAULT_DRIFT_PATH = Path("monitoring/state/drift.json")
+# `monitoring/drift.py` (Phase 12b §C.1) sinh file này.
+#
+# Đường dẫn ĐÃ ĐỔI 2026-08-14: `monitoring/state/drift.json` (như §C.1
+# viết) -> `${STATE_DIR}/drift.json`. `monitoring/state/` nằm trong cây MÃ
+# NGUỒN, và `status.json` đã phải chuyển khỏi đúng chỗ ấy ngày 2026-08-08
+# (xem `alerts.py::_default_status_path`). Bên GHI (`drift.py`) và bên ĐỌC
+# (file này) phải đổi TRONG CÙNG MỘT commit — tách ra thì panel sẽ hiện
+# "chưa có dữ liệu drift" dù `drift.py` đã chạy xong, và người debug đi
+# tìm nhầm chỗ.
+#
+# Hàm chứ không phải hằng số mức module: `STATE_DIR` được đặt lúc chạy, và
+# một hằng số tính lúc import sẽ đóng băng giá trị sai.
+def _default_drift_path() -> Path:
+    from monitoring.drift import default_drift_path
+
+    return default_drift_path()
 
 # Bốn trạng thái, CỐ TÌNH tách rời nhau. Gộp "file hỏng" vào "chưa có dữ
 # liệu" là đúng cái bẫy mà panel này sinh ra để tránh: người vận hành đọc
@@ -193,7 +206,7 @@ def load_drift_panel_data(path: Optional[Path] = None) -> DriftPanelData:
     Sai hợp đồng -> `DRIFT_UNREADABLE` kèm thông điệp nói rõ chờ đợi gì,
     KHÔNG phải `DRIFT_MISSING`.
     """
-    target = path if path is not None else _DEFAULT_DRIFT_PATH
+    target = path if path is not None else _default_drift_path()
 
     if not target.exists():
         return DriftPanelData(
