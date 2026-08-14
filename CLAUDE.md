@@ -211,6 +211,60 @@ khi chạy là phép kiểm rẻ và chắc chắn.
 
 ---
 
+### 18. Không đặt ngưỡng trước khi đo phân phối nền
+
+Mọi ngưỡng cảnh báo phải kèm **bằng chứng về tỷ lệ báo động giả khi áp lên
+chính dữ liệu baseline**. Ngưỡng đặt bằng trực giác hoặc bằng "con số
+tròn" đã sai nhiều lần trong dự án này.
+
+**Quy trình bắt buộc:**
+
+1. Trượt cửa sổ **cùng kích thước** với cửa sổ mà cảnh báo sẽ dùng qua
+   toàn bộ baseline.
+2. Đo phân phối chỉ số trên các cửa sổ đó.
+3. Đặt ngưỡng **theo phân vị**, không theo số tròn.
+4. **Báo cáo tỷ lệ báo động giả đo được** — con số này phải nằm trong
+   commit hoặc `docs/DECISIONS.md`, không phải trong đầu người viết.
+
+Bước 1 là bước hay bị bỏ nhất và là bước quan trọng nhất: so một cửa sổ 30
+bar với con số trung bình toàn kỳ là so hai thứ có phương sai khác nhau
+hàng chục lần, và mọi ngưỡng đặt trên phép so đó đều vô nghĩa.
+
+**Bằng chứng đã ghi trong `docs/DECISIONS.md`:**
+
+| Ngưỡng | Số tròn ban đầu | Sau khi đo | Ghi ở |
+|---|---|---|---|
+| `circuit_breaker` daily/weekly reduce+halt | 4.0 / 6.0 / 10.0 / 14.0 | 3.85 / 6.34 / 9.48 / 13.72 (p2.5, p0.5) | "Phase 8 — hiệu chỉnh ngưỡng circuit breaker" |
+| Drift §C.1 (allocation 15 điểm %, trend gate 20 điểm %) | 15 / 10 / 20 | giữ ngưỡng, **thêm** dải p1–p99 vì FP đo được là **99.7%** | "Ngưỡng drift §C.1 quá chặt so với nhiễu cửa sổ 30 bar" |
+
+*Hai dòng trên là những lần đã ĐO và ghi lại. Còn một loạt ngưỡng khác
+trong `config/settings.yaml` vẫn là số tròn chưa có bằng chứng phân phối
+— `clock_drift_alert_ms` 1000, `clock_drift_halt_ms` 2500,
+`large_pnl_alert_pct` 2.0, `unfilled_order_degraded_seconds` 300,
+`alert_rate_limit_seconds` 900, `_DEFAULT_DEGRADED_AFTER` 3,
+`WARNING_TREND_LEN` 3, `WINDOW_DAYS` 30. Chúng chưa sai theo cách đo được,
+nhưng cũng chưa được chứng minh là đúng. Quy tắc này áp dụng cho ngưỡng
+MỚI; ngưỡng cũ nào được đụng tới thì phải đo lúc đó.*
+
+### 19. Mọi khẳng định "sạch" phải kèm PHẠM VI đã kiểm
+
+Một công cụ báo "không có vấn đề" không nói được nó đã nhìn vào đâu. Bốn
+chế độ hỏng, cả bốn đều làm một cổng rỗng trông như một cổng xanh:
+
+- `grep -rn "..." duong/dan/` trên thư mục **không tồn tại** → rỗng, exit
+  1, và trong một checklist thủ công thì "không có kết quả" là ĐẠT.
+- `pytest` với `addopts = "-m 'not slow'"` → "toàn bộ xanh" chỉ đúng với
+  phần đã chọn.
+- `mypy .` dừng ở lỗi phân giải module đầu tiên → "Found 1 error" thay vì
+  kiểm 84 file. Đã xảy ra, phát hiện 2026-08-14.
+- `cmd | tail` nuốt exit code (xem #17).
+
+**Bắt buộc:** mỗi mục nghiệm thu dạng "không có kết quả / sạch" phải in ra
+phạm vi kèm theo — số file đã kiểm, số test đã collect, đường dẫn đã tồn
+tại. `ops/verify_scope.py` cơ giới hoá điều này; `tests/test_verify_scope.py`
+ghim nó. Đường dẫn trong một mục nghiệm thu mà không tồn tại là **FAIL**,
+không phải "sạch".
+
 ## Phong cách code
 
 - Python 3.11+, type hint đầy đủ
