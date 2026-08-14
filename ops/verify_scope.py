@@ -69,6 +69,35 @@ def tracked_python_files(*, repo_root: Path = _REPO_ROOT) -> tuple[str, ...]:
     return tuple(sorted(line for line in proc.stdout.splitlines() if line))
 
 
+def untracked_python_files(*, repo_root: Path = _REPO_ROOT) -> tuple[str, ...]:
+    """`.py` CHƯA `git add` nhưng không bị `.gitignore` loại.
+
+    `ruff`/`mypy` nhìn thấy chúng, git thì chưa. Không tách riêng con số
+    này thì "86 file kiểm / 84 file git theo dõi" trông như một sai lệch
+    thay vì hai file vừa tạo chưa commit.
+    """
+    proc = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "*.py"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git ls-files --others thất bại: {proc.stderr.strip()}")
+    return tuple(sorted(line for line in proc.stdout.splitlines() if line))
+
+
+def visible_python_files(*, repo_root: Path = _REPO_ROOT) -> tuple[str, ...]:
+    """Mọi `.py` mà một công cụ chạy `.` NHÌN THẤY được — mốc so đúng cho
+    `ruff`/`mypy`."""
+    return tuple(
+        sorted(
+            set(tracked_python_files(repo_root=repo_root))
+            | set(untracked_python_files(repo_root=repo_root))
+        )
+    )
+
+
 # ----------------------------------------------------------------------
 # ruff
 # ----------------------------------------------------------------------
@@ -143,7 +172,7 @@ def mypy_checked_count(*, repo_root: Path = _REPO_ROOT) -> Optional[int]:
 
 
 def check_mypy(*, repo_root: Path = _REPO_ROOT) -> ScopeCheck:
-    tracked = tracked_python_files(repo_root=repo_root)
+    visible = visible_python_files(repo_root=repo_root)
     n = mypy_checked_count(repo_root=repo_root)
     if n is None:
         return ScopeCheck(
@@ -157,13 +186,24 @@ def check_mypy(*, repo_root: Path = _REPO_ROOT) -> ScopeCheck:
         )
     return ScopeCheck(
         tool="mypy .",
-        scope=f"{n} file .py (git theo dõi {len(tracked)})",
+        scope=f"{n} file .py (thấy được {len(visible)})",
         # Ngưỡng là SỐ FILE GIT THEO DÕI, không phải hằng số 84. Một con số
         # ghim cứng sẽ đỏ mỗi lần thêm file mới (nhiễu) và vẫn xanh nếu
         # repo teo lại đúng bằng số đó (điểm mù). So với git thì cả hai
         # chiều đều đúng và không phải bảo trì.
-        ok=n >= len(tracked),
-        detail="" if n >= len(tracked) else f"TỤT {len(tracked) - n} file so với git",
+        # HAI chiều. `>=` một mình không đủ: một hàm đọc số hỏng trả
+        # 99999 cũng thoả, và lúc đó công cụ đo phạm vi báo một con số bịa
+        # ra với vẻ đầy thẩm quyền. Đo được bằng đột biến, và đã đo.
+        ok=n == len(visible),
+        detail=(
+            ""
+            if n == len(visible)
+            else (
+                f"TỤT {len(visible) - n} file so với thực tế"
+                if n < len(visible)
+                else f"BÁO THỪA {n - len(visible)} file — con số không đáng tin"
+            )
+        ),
     )
 
 

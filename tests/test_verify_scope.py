@@ -260,3 +260,42 @@ def test_cli_tren_repo_that_thoat_khong() -> None:
     from ops.verify_scope import run_all
 
     assert all(c.ok for c in run_all()), format_report(run_all())
+
+
+def test_mypy_bao_DUNG_so_file_khong_phai_chi_khong_it_hon() -> None:
+    """Hai chiều, không chỉ `>=`.
+
+    Đo bằng đột biến: thay `mypy_checked_count()` bằng `return 99999` thì
+    một khẳng định `n >= len(tracked)` vẫn XANH — và lúc đó công cụ đo
+    phạm vi đang in một con số bịa ra với vẻ đầy thẩm quyền. Đúng loại giả
+    an toàn mà CLAUDE.md #19 sinh ra để chặn.
+    """
+    from ops.verify_scope import visible_python_files
+
+    assert mypy_checked_count() == len(visible_python_files())
+
+
+def test_mypy_bao_thua_so_file_thi_bao_KHONG_OK(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ops.verify_scope as vs
+
+    monkeypatch.setattr(vs, "mypy_checked_count", lambda **_: 99999)
+    ket_qua = check_mypy()
+
+    assert not ket_qua.ok
+    assert "BÁO THỪA" in ket_qua.detail
+
+
+def test_moc_so_phu_TOAN_REPO_khong_phai_mot_goc() -> None:
+    """`tracked_python_files()` là mốc so cho cả ruff lẫn mypy. Thu hẹp nó
+    (ví dụ `git ls-files "core/*.py"`) làm CẢ HAI phép kiểm luôn "đủ" —
+    một điểm mù duy nhất vô hiệu hoá hai cổng cùng lúc.
+
+    Đo bằng đột biến: thu hẹp mốc so, mọi test khác vẫn xanh.
+    """
+    tracked = set(tracked_python_files())
+    thu_muc_goc = {f.split("/")[0] for f in tracked if "/" in f}
+
+    # Mọi package thật của dự án phải có mặt.
+    assert {"core", "monitoring", "broker", "data", "backtest", "ops", "tests"} <= thu_muc_goc
+    assert "main.py" in tracked, "mốc so bỏ sót file ở gốc repo"
+    assert len(tracked) > 50, f"mốc so chỉ có {len(tracked)} file — có vẻ đã bị thu hẹp"
