@@ -1,6 +1,9 @@
 """Cấu hình dùng chung cho toàn bộ test suite.
 
-Hiện chỉ có một việc: chốt profile Hypothesis. Đặt ở `conftest.py` chứ
+Hai việc: chốt profile Hypothesis, và ghi biên lai cho cổng §E
+(`ops/readiness_gate.py`) sau mỗi phiên `-m slow` xanh.
+
+Profile Hypothesis đặt ở `conftest.py` chứ
 không ở từng file test — profile phải được nạp TRƯỚC khi bất kỳ
 `@given` nào chạy, và conftest là chỗ duy nhất bảo đảm được điều đó bất
 kể pytest thu thập file theo thứ tự nào.
@@ -8,6 +11,7 @@ kể pytest thu thập file theo thứ tự nào.
 
 from __future__ import annotations
 
+import pytest
 from hypothesis import HealthCheck, settings
 
 # `deadline=None` — Hypothesis mặc định bỏ 200ms cho MỖI ví dụ. Property
@@ -48,3 +52,36 @@ settings.register_profile(
 )
 
 settings.load_profile("ci")
+
+
+# ----------------------------------------------------------------------
+# Biên lai chạy slow — cổng §E (`ops/readiness_gate.py`)
+# ----------------------------------------------------------------------
+
+
+def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
+    """Ghi `.slow_receipt.json` sau một phiên `-m slow` XANH HOÀN TOÀN.
+
+    Sinh biên lai TỰ ĐỘNG, từ chính lần chạy thật, thay vì để người ta gõ
+    tay một con dấu "tôi đã chạy rồi" — một lời khai không ai kiểm chứng
+    thì không phải bằng chứng.
+
+    Ba điều kiện, tất cả đều cần:
+      - phiên này CÓ chạy test `slow` (`-m slow`); một phiên mặc định
+        (`-m 'not slow'`) không được phép sinh biên lai;
+      - `exitstatus == 0` — một phiên slow ĐỎ mà vẫn cấp biên lai thì cổng
+        chỉ kiểm "đã chạy", không kiểm "đã qua";
+      - không có test nào bị bỏ dở (`session.testsfailed == 0`).
+    """
+    if exitstatus != 0 or session.testsfailed:
+        return
+
+    slow_count = sum(
+        1 for item in getattr(session, "items", []) if item.get_closest_marker("slow") is not None
+    )
+    if slow_count == 0:
+        return
+
+    from ops.readiness_gate import write_receipt
+
+    write_receipt(slow_tests=slow_count)

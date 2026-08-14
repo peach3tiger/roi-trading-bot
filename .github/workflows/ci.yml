@@ -1,0 +1,83 @@
+# CI — cổng chất lượng chạy trên mỗi push/PR.
+#
+# Điểm khác một workflow pytest thông thường: `pyproject.toml` đặt
+# `addopts = "-m 'not slow'"`, nên `pytest` trần KHÔNG phải là "chạy tất
+# cả". Bộ đầy đủ là HAI lệnh. Job `slow` bên dưới quyết định có chạy lệnh
+# thứ hai hay không bằng chính phép kiểm của cổng §E
+# (`ops/readiness_gate.py`), không bằng trí nhớ của người mở PR.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  fast:
+    name: Bộ mặc định + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: ruff
+        run: ruff check .
+      - name: mypy
+        run: mypy .
+      - name: pytest (mặc định, -m 'not slow')
+        run: pytest -q
+
+  slow-gate:
+    name: Cổng §E — test chậm khi chạm tầng quyết định
+    runs-on: ubuntu-latest
+    steps:
+      # `fetch-depth: 0` — cổng chạy `git diff <base>..HEAD`; một bản
+      # checkout nông không có `base` để so, và cổng sẽ hỏng theo kiểu
+      # "không kiểm được" thay vì "kiểm và cho qua". Đó là khác biệt quan
+      # trọng nhất trong file này.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Xác định mốc so sánh
+        id: base
+        run: |
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            # Push thẳng lên main: so với commit ngay trước.
+            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Diff có chạm core/ hoặc backtest/ không?
+        id: scope
+        run: |
+          set -o pipefail
+          # KHÔNG đọc exit code sau pipe (CLAUDE.md #17) — `grep` không tìm
+          # thấy trả 1, và ở đây "không tìm thấy" là kết quả HỢP LỆ, không
+          # phải lỗi. Đếm dòng thay vì đọc mã thoát.
+          n=$(git diff --name-only "${{ steps.base.outputs.ref }}..HEAD" \
+              | grep -cE '^(core|backtest)/' || true)
+          echo "n=$n" >> "$GITHUB_OUTPUT"
+          echo "File trong phạm vi cổng: $n"
+
+      - name: pytest -m slow (BẮT BUỘC khi diff chạm tầng quyết định)
+        if: steps.scope.outputs.n != '0'
+        run: pytest -m slow -q
+
+      - name: Cổng §E
+        if: steps.scope.outputs.n != '0'
+        run: python ops/readiness_gate.py --base "${{ steps.base.outputs.ref }}"
+
+      - name: Bỏ qua (diff không chạm tầng quyết định)
+        if: steps.scope.outputs.n == '0'
+        run: echo "Diff không chạm core/ hay backtest/ — slow không bắt buộc."

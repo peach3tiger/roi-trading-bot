@@ -49,3 +49,7 @@ htmlcov/
 # không phải mã nguồn. Với derandomize=True (tests/conftest.py) nó không
 # ảnh hưởng khả năng tái lập, nên commit nó chỉ thêm nhiễu vào diff.
 .hypothesis/
+# Biên lai chạy `pytest -m slow` (ops/readiness_gate.py, cổng §E). Sinh
+# tự động bởi tests/conftest.py, gắn với NỘI DUNG core/+backtest/ nên
+# vô nghĩa trên máy khác — artifact cục bộ, không phải mã nguồn.
+.slow_receipt.json
