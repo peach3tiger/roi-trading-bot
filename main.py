@@ -2059,9 +2059,11 @@ def run_live_loop(
     # `check_exchange_reachable` ở bước 1-2 đã chạy và đã thoát nếu FAIL,
     # nên tới được đây nghĩa là lần gọi sàn gần nhất đã thành công.
     from monitoring.health import HealthThresholds, assert_healthy_or_alert, evaluate, write_health
+    from monitoring.watchdog import HEARTBEAT_FILENAME, write_heartbeat
 
     health_thresholds = HealthThresholds.from_settings(settings)
     health_path = state_dir / "health.json"
+    heartbeat_file = state_dir / HEARTBEAT_FILENAME
     api_ok = True
 
     def _snapshot_health() -> Any:
@@ -2279,6 +2281,26 @@ def run_live_loop(
             except _PROGRAMMING_ERRORS as exc:
                 _alert_programming_error(
                     alert_manager=alert_manager, exc=exc, where="ghi health.json"
+                )
+            # Heartbeat cho `monitoring/watchdog.py` (Phase 12d §A). Trong
+            # `finally` cùng lý do với health.json: phần lớn chu kỳ 60s
+            # thoát sớm bằng `continue`, và một heartbeat chỉ cập nhật ở
+            # nhánh "có bar mới" sẽ làm watchdog giết bot mỗi ngày một lần.
+            #
+            # `loop_seq=iterations` — số vòng poll, KHÔNG phải số bar đã xử
+            # lý: watchdog cần biết VÒNG LẶP còn quay hay không, và bar 1D
+            # nghĩa là số bar đứng yên suốt 24 giờ một cách hoàn toàn bình
+            # thường. Dùng số bar ở đây sẽ làm quy tắc `loop_seq_stuck` báo
+            # động mỗi ngày.
+            try:
+                write_heartbeat(
+                    heartbeat_file,
+                    loop_seq=iterations,
+                    bar_ts=state.last_processed_bar,
+                )
+            except _PROGRAMMING_ERRORS as exc:
+                _alert_programming_error(
+                    alert_manager=alert_manager, exc=exc, where="ghi heartbeat.json"
                 )
 
         time.sleep(poll_interval)

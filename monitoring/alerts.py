@@ -102,6 +102,18 @@ class AlertType(Enum):
     # digest bị nuốt vì trùng cửa sổ 15 phút với một alert khác là mất
     # hẳn bản ghi của cả ngày hôm đó.
     DAILY_DIGEST = "DAILY_DIGEST"
+    # `monitoring/watchdog.py` §A.4 — watchdog đã KẾT THÚC tiến trình bot.
+    # CRITICAL và nhãn riêng: đây là sự kiện duy nhất trong hệ thống mà
+    # sau nó bot KHÔNG tự chạy lại. Trộn vào API_LOST/HEALTH_CHECK_FAILED
+    # sẽ làm nó trông như một sự cố tự phục hồi được.
+    WATCHDOG_KILL = "WATCHDOG_KILL"
+    # `monitoring/data_harness.py` §B.3 — |Δ| > 30% trong một bar ĐÃ được
+    # xác nhận bởi nguồn thứ hai. Biến động THẬT, không phải lỗi dữ liệu:
+    # bot chạy tiếp, không ghi lock.
+    LARGE_PRICE_MOVE = "LARGE_PRICE_MOVE"
+    # `monitoring/data_harness.py` §B.2 — dữ liệu sai (low > high, thiếu
+    # bar, volume 0...). Đã ghi `data_quality.lock`, bot dừng sinh signal.
+    DATA_QUALITY_FAILED = "DATA_QUALITY_FAILED"
 
 
 @dataclass(frozen=True)
