@@ -1,12 +1,35 @@
 # STATE — bàn giao trạng thái
 
-Đọc file này đầu mỗi phiên. Tối đa một trang. Chi tiết ở `DECISIONS.md` và
+Đọc file này đầu mỗi phiên. Chi tiết ở `DECISIONS.md` và
 `VALIDATION_REPORT.md`. Cập nhật ở cuối mỗi phase, ghi đè, không phụ lục thêm.
+
+> **Quy tắc "tối đa một trang" ở dòng này ĐÃ VỠ và tôi không giả vờ ngược
+> lại.** File dài 580 dòng tính tới 2026-08-14, và mỗi phase lại thêm một
+> mục. Hai lựa chọn, cần bạn chốt: (a) cắt gọn về đúng một trang, đẩy
+> phần lịch sử xuống `DECISIONS.md` — mất khả năng đọc-một-chỗ; (b) bỏ
+> câu "tối đa một trang" và chấp nhận đây là sổ bàn giao đầy đủ. Cho tới
+> khi chốt, phần cần đọc TRƯỚC nằm ở mục "Đang ở đâu" ngay dưới.
 
 ## Đang ở đâu
 
-- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới). 419 passed
-  / 0 skipped.
+- Phase 1–11 xong (Phase 11 = monitoring, 2026-08-07, xem dưới).
+  **Phase 12b XONG 2026-08-14** (harness engineering, xem mục riêng).
+  **731 passed / 6 slow passed / 0 skipped**; `ruff` sạch;
+  `mypy` 86/86 file (xem mục "mypy chưa từng chạy hết repo" bên dưới).
+  Bộ đầy đủ là HAI lệnh: `pytest && pytest -m slow`.
+- **Phase 12b — harness engineering (2026-08-14).** 7 module mới:
+  `monitoring/health.py` (ảnh chụp sức khoẻ lúc chạy →
+  `${STATE_DIR}/health.json`, KHÁC `ops/health_check.py`),
+  `monitoring/drift.py` (so hành vi với baseline Phase 7 →
+  `${STATE_DIR}/drift.json`), `monitoring/daily_digest.py`
+  (`logs/digest/YYYY-MM-DD.md`, 00:05 UTC),
+  `tests/regression_harness.py` (~137s, `-m slow`),
+  `tests/test_snapshot.py` (~8s canary), `ops/readiness_gate.py` (cổng §E),
+  `ops/verify_scope.py` (CLAUDE.md #19). Cộng `.github/workflows/ci.yml`
+  (CI lần đầu có trong dự án) và `docs/READINESS_GATE.md`.
+  **Ba tầng hồi quy, đừng để trùng nhau:** `test_forward_golden` <1s /
+  `test_snapshot` ~8s / `regression_harness` ~137s — vai trò từng tầng ghi
+  trong docstring `tests/test_snapshot.py`.
 - **9 bug tầng thực thi đã sửa (2026-08-08)** — bar bị lỡ + `execute`,
   `close_position(bar_timestamp)`, normalize orderLinkId, stop-loss qua
   `validate_signal`, `_requested_qty` đọc từ sàn, pre-flight số dư khả
@@ -406,6 +429,88 @@ tìm ra nguyên nhân thật.
 thêm một cột log — phải có entry `DECISIONS.md` **tại thời điểm thay
 đổi**. Quy trình cuộn schema: 5 bước trong `forward/SCHEMA.md`.
 
+## Bất biến/quy trình MỚI trong CLAUDE.md (2026-08-14)
+
+Hai bất biến mới, một bổ sung, một cổng cơ giới hoá — KHÔNG phải năm cái
+mới: **#16 và #17 đã có từ trước phiên này** (commit `cb13932`).
+
+| | Nội dung | Trạng thái |
+|---|---|---|
+| #16 | Đột biến trước khi tin một phép kiểm mới | **CÓ TỪ TRƯỚC.** Bổ sung 2026-08-08: bắt buộc commit/`git stash` trước khi chạy kịch bản đột biến; timeout ≤60s mỗi bước; khôi phục trong `finally` của TỪNG bước; assert không còn dấu vết |
+| #17 | Không đọc exit code sau pipe | **CÓ TỪ TRƯỚC**, không đổi |
+| **#18** | **Không đặt ngưỡng trước khi đo phân phối nền** | MỚI. Quy trình 4 bước: trượt cửa sổ cùng kích thước qua baseline → đo phân phối → đặt theo phân vị → BÁO CÁO tỷ lệ báo động giả |
+| **#19** | **Mọi khẳng định "sạch" phải kèm PHẠM VI đã kiểm** | MỚI. Cơ giới hoá bằng `ops/verify_scope.py` |
+| **§E** | **`pytest -m slow` BẮT BUỘC khi diff chạm `core/` hoặc `backtest/`** | MỚI. `ops/readiness_gate.py` + CI. Bảng cổng: `docs/READINESS_GATE.md` |
+
+**Cổng §E hoạt động thế nào:** biên lai `.slow_receipt.json` (gitignore)
+sinh TỰ ĐỘNG từ `tests/conftest.py` sau một phiên `-m slow` xanh hoàn
+toàn; nó ghi **SHA256 nội dung `core/`+`backtest/`**, không phải commit
+SHA — chạy slow xong rồi sửa tiếp `core/` mà chưa commit sẽ cho biên lai
+"khớp HEAD" nhưng vô giá trị. Chạy tay:
+`pytest -m slow && python ops/readiness_gate.py --base origin/main`.
+
+---
+
+## Ba ngưỡng đã hiệu chỉnh bằng ĐO (2026-08-14) — đọc trước khi đụng cảnh báo
+
+Áp dụng CLAUDE.md #18. Chi tiết + bảng phân vị: `docs/DECISIONS.md` mục
+"ĐO #1/#2/#3" và "Phân loại 8 ngưỡng còn lại".
+
+| Ngưỡng | Cũ | Mới | Báo động giả đo được |
+|---|---|---|---|
+| `monitoring.large_pnl_alert_pct` | 2.0 (p82.4) | **2.93** (p90) | 32.0 → 18.2 lần/năm |
+| `drift.WARNING_TREND_LEN` | 3 | **4** | 1 lần mỗi 6.0 tuần → mỗi 24 tuần |
+| `drift` cửa sổ phân bố allocation | 30 bar | **`ALLOCATION_WINDOW_DAYS` = 365** | 99.7% → 3.22% |
+
+**Điều quan trọng nhất phải nhớ về drift:** ở cửa sổ 30–182 bar, chỉ số
+phân bố allocation **KHÔNG phân biệt được một bot hỏng hoàn toàn với hoạt
+động bình thường** (đo trực tiếp, không suy luận). Đừng đọc "drift im
+lặng" thành "hành vi khớp baseline". Nó chỉ có sức phát hiện từ 365 bar,
+tức là forward test phải chạy tới 2027-08-06 mới có dữ liệu đầy đủ cho chỉ
+số này.
+
+Còn 5 ngưỡng chưa đo, đã phân loại: 2 có căn cứ từ ràng buộc sàn
+(`clock_drift_*`), 1 hoãn vì chưa có baseline
+(`unfilled_order_degraded_seconds` — backtest KHÔNG mô phỏng độ trễ khớp
+nên không có gì để trượt cửa sổ), 2 là lựa chọn vận hành không có sự thật
+nền (`alert_rate_limit_seconds`, `_DEFAULT_DEGRADED_AFTER`).
+
+---
+
+## `mypy .` chưa từng chạy hết repo cho tới 2026-08-14
+
+Thiếu `tests/__init__.py` trong khi ba file test dùng
+`from tests.test_main_loop import ...` → mypy dừng ở
+`"Source file found twice under different module names"` **sau khi kiểm 0
+file**. Xác minh có từ trước Phase 12b (checkout `5c49fa5`, `bdae60d`).
+Nghĩa là mọi lần "mypy sạch" trước đây nghĩa là "mypy chưa kiểm được gì" —
+lỗi XÁC MINH lần thứ tư trong dự án (xem CLAUDE.md #16).
+
+Sau khi thêm `tests/__init__.py`: mypy lộ 15 lỗi tiềm ẩn, **không cái nào
+là bug thật** (9 lỗi `warn_return_any` từ stub pandas/yaml → tắt riêng cho
+`tests.*`; 3 annotation thiếu → thêm; 3 `# type: ignore[...]` có địa chỉ
+kèm lý do). `disallow_untyped_defs` VẪN bật cho `tests/`.
+
+---
+
+## Mục nghiệm thu ĐẠT một cách RỖNG — đã phát hiện, chưa đóng
+
+`ops/verify_scope.py` rà mọi công cụ trong danh sách nghiệm thu và in
+PHẠM VI thay vì chỉ "sạch". Nó tìm ra:
+
+- **`grep -rn "order_executor|submit_order" ops/shadow_runner.py`
+  (nghiệm thu Phase 12c) hiện ĐẠT vì `ops/shadow_runner.py` KHÔNG TỒN
+  TẠI.** Nó chứng minh file không có, không chứng minh gì về nội dung.
+  Đóng khi xây Phase 12c.
+- `pytest` mặc định thu 731/737 test — 6 test `slow` bị loại bởi
+  `addopts = "-m 'not slow'"`. "Toàn bộ xanh" từ một lệnh là **đúng một
+  nửa**.
+
+Chạy: `python ops/verify_scope.py` (thoát khác 0 nếu một đường dẫn nghiệm
+thu không tồn tại).
+
+---
+
 ## Việc còn treo, theo thứ tự ưu tiên
 
 0. **`.env` có `TELEGRAM_BOT_TOKEN=`/`TELEGRAM_CHAT_ID=` GIÁ TRỊ RỖNG** →
@@ -426,14 +531,24 @@ thêm một cột log — phải có entry `DECISIONS.md` **tại thời điểm
 3. `AlertType.STABLECOIN_DEPEG`/`CLOCK_DRIFT` liên tục mỗi bar — cần chọn
    nguồn giá USDT/USD và thêm `ExchangeClient.get_server_time()` (xem mục
    Phase 11 ở trên).
-4. Phase 12b (`prompts/phase-12b-harness-engineering.md`) /
-   Phase 12c (`prompts/phase-12c-shadow-deploy.md`) — đã có trong `prompts/`,
-   chưa bắt đầu xây.
+4. **Phase 12b — XONG 2026-08-14.** Phase 12c
+   (`prompts/phase-12c-shadow-deploy.md`) — đã có trong `prompts/`, chưa
+   bắt đầu xây. Xây nó cũng đóng luôn mục nghiệm thu ĐẠT-một-cách-rỗng ở
+   trên.
+5. `prompts/phase-12d-operational-safety.md` — **được nhắc tới hai lần
+   nhưng KHÔNG TỒN TẠI** trong `prompts/`, không có trong lịch sử git,
+   không được file nào tham chiếu. Cần bản gốc trước khi thực hiện.
+6. `.github/workflows/ci.yml` **chưa từng chạy trên GitHub thật** — viết
+   xong ở phiên 2026-08-14 nhưng không có cách kiểm chứng tại máy. Lần
+   push tiếp theo là lần đầu nó chạy; đọc kết quả trước khi tin.
 
 ## Việc tiếp theo
 
 [testnet hết bị chặn] -> nghiệm thu CCXTClient + main.py + dashboard/Telegram
-qua mạng thật -> Phase 12b (harness engineering) -> Phase 12c (shadow deploy).
+qua mạng thật -> Phase 12c (shadow deploy).
+
+Phase 12b đã xong và KHÔNG phụ thuộc testnet — đó là lý do nó chạy trước
+trong lúc testnet còn bị chặn.
 
 ## Quy tắc đã học, không lặp lại
 
