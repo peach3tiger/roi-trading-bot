@@ -15,13 +15,34 @@ on:
 
 jobs:
   fast:
-    name: Bộ mặc định + lint
+    # MATRIX HAI PHIÊN BẢN, không phải một.
+    #
+    # 3.11 là bản `pyproject.toml` khai (`python_version`) và `CLAUDE.md`
+    # §Phong cách yêu cầu. 3.9 là bản THẬT SỰ đang chạy thí nghiệm forward
+    # 12 tháng: cả hai launchd job đều gọi
+    # `/Users/lbeyewear/regime-trader-crypto/.venv/bin/python` = 3.9.6.
+    #
+    # Trước 2026-08-15, CI chỉ kiểm 3.11 — nghĩa là ĐƯỜNG CODE ĐANG SINH RA
+    # DỮ LIỆU THÍ NGHIỆM chưa từng được CI kiểm lần nào. Mọi khẳng định
+    # "CI xanh" đều nói về một interpreter khác với interpreter thật.
+    #
+    # KHÔNG nâng `.venv` để "cho khớp": nâng giữa chừng sẽ cài lại
+    # numpy/hmmlearn ở phiên bản khác, đủ để đổi kết quả HMM — tức đổi
+    # điều kiện của chính thí nghiệm đang chạy. Cách đúng là kiểm CẢ HAI.
+    name: Bộ mặc định + lint (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      # `fail-fast: false` — nếu 3.9 đỏ và 3.11 xanh, ta cần THẤY cả hai.
+      # Dừng sớm sẽ che mất việc bản kia có qua hay không, và đó chính là
+      # thông tin phân biệt "lỗi của phiên bản" với "lỗi của code".
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
 
@@ -37,8 +58,19 @@ jobs:
 
       - name: ruff
         run: ruff check .
-      - name: mypy
-        run: mypy .
+
+      # `--python-version` theo MATRIX, không theo `pyproject.toml`.
+      #
+      # `pyproject.toml` giữ `python_version = "3.11"` — đó là mục tiêu
+      # KHAI BÁO của dự án (CLAUDE.md §Phong cách "Python 3.11+"), và hạ
+      # nó xuống 3.9 sẽ hợp thức hoá cái venv 3.9 thành mục tiêu thay vì
+      # giữ nó là một khoảng trống cần đóng.
+      #
+      # Đo 2026-08-15: mypy SẠCH dưới CẢ 3.9 lẫn 3.11 (108 file). Nên đây
+      # là phòng xa, không phải vá một lỗi đang có. Xem docs/DECISIONS.md.
+      - name: mypy (theo phiên bản của job)
+        run: mypy --python-version ${{ matrix.python-version }} .
+
       - name: pytest (mặc định, -m 'not slow')
         run: pytest -q
 
@@ -49,6 +81,11 @@ jobs:
       # "sạch").
       - name: PHẠM VI ĐÃ KIỂM
         run: |
+          echo "── interpreter ──────────────────────────────────────"
+          echo "  job này chạy Python: $(python -V 2>&1)"
+          echo "  (matrix: 3.9 = bản forward test THẬT dùng qua launchd;"
+          echo "           3.11 = bản pyproject/CLAUDE.md khai)"
+          echo
           echo "── test đã collect ──────────────────────────────────"
           echo "mặc định (addopts = -m 'not slow'):"
           pytest --collect-only -q 2>/dev/null | tail -1

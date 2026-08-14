@@ -116,12 +116,15 @@ và `...forward-watchdog.plist` đều gọi
 | `.github/workflows/ci.yml` (cả hai job) | 3.11 |
 | `CLAUDE.md` §Phong cách code | "3.11+" |
 
-**Nghĩa là: đường code đang chạy thí nghiệm 12 tháng được type-check và
-test dưới một Python KHÁC với Python nó thực thi.** Mọi khẳng định "mypy
-sạch" / "CI xanh" đều nói về 3.11; không có phép kiểm nào chạy trên 3.9.6
-ngoài chính `pytest` ở local.
+**ĐÃ ĐÓNG MỘT NỬA 2026-08-15:** CI giờ chạy matrix `["3.9", "3.11"]` cho
+job "Bộ mặc định + lint", `fail-fast: false`, và `mypy --python-version`
+theo từng job. Đo lúc thêm: cả `mypy` lẫn `ruff` đều SẠCH dưới cả hai
+(108 file).
 
-**KHÔNG SỬA.** Forward test đang chạy trên cấu hình đóng băng
+Còn lại: job `slow-gate` vẫn chỉ chạy 3.11 (test chậm ~2.5 phút × 2 phiên
+bản là cái giá chưa đáng trả cho một cổng chỉ chạy khi diff chạm `core/`).
+
+**KHÔNG NÂNG `.venv`.** Forward test đang chạy trên cấu hình đóng băng
 (`forward/config_frozen.yaml` + `forward/logger.py`, ghim SHA256); đổi
 interpreter là đổi điều kiện thí nghiệm giữa chừng. Ghi ra để nó là một
 khoảng trống ĐÃ BIẾT thay vì một giả định thầm lặng — `CLAUDE.md` #19.

@@ -2808,3 +2808,62 @@ năng có ý nghĩa rất khác nhau:
 **Chưa kiểm được vì máy này không có `gh` và tôi không đọc được log CI.**
 Ghi ra thay vì đoán. Việc cần làm: mở log CI #8, xem bước nào đỏ trong job
 "Cổng §E", rồi ghi tiếp vào mục này.
+
+
+## CI matrix 3.9 + 3.11 — đóng khoảng trống "interpreter thật chưa được kiểm" (2026-08-15)
+
+### Vấn đề
+
+`docs/STATE.md` đã ghi từ 2026-08-14: cả hai launchd job của forward test
+gọi `/Users/lbeyewear/regime-trader-crypto/.venv/bin/python` = **Python
+3.9.6**, trong khi `pyproject.toml` khai `python_version = "3.11"`, `ruff`
+dùng `target-version = py311`, `CLAUDE.md` §Phong cách nói "Python 3.11+",
+và CI chỉ kiểm 3.11.
+
+**Đường code đang sinh ra dữ liệu của thí nghiệm 12 tháng chưa từng được
+CI kiểm lần nào.** Mọi khẳng định "CI xanh" đều nói về một interpreter
+khác với interpreter thật.
+
+### KHÔNG nâng `.venv`
+
+Nâng venv lên 3.11 giữa chừng sẽ cài lại `numpy`/`hmmlearn` ở phiên bản
+khác — đủ để đổi kết quả EM và do đó đổi regime, allocation, mọi thứ. Đó
+là **đổi điều kiện của chính thí nghiệm đang chạy**, cùng loại vi phạm với
+sửa `forward/config_frozen.yaml`.
+
+Cách đúng: CI kiểm **cả hai**.
+
+### Đo trước khi quyết định `mypy python_version`
+
+| | Kết quả |
+|---|---|
+| `mypy .` (python_version = 3.11) | Success, 108 file |
+| `mypy --python-version 3.9 .` | Success, 108 file |
+| `ruff check . --target-version py39` | All checks passed |
+
+**Cả ba đều sạch.** Nên matrix là phòng xa, không phải vá một lỗi đang có.
+
+**Quyết định: giữ `python_version = "3.11"` trong `pyproject.toml`, và CI
+truyền `--python-version` theo matrix.**
+
+Hạ `pyproject` xuống 3.9 bị loại vì nó **hợp thức hoá cái venv 3.9 thành
+mục tiêu** thay vì giữ nó là một khoảng trống cần đóng. Mục tiêu khai báo
+của dự án vẫn là 3.11+; sự thật hôm nay là forward test chạy 3.9; hai điều
+đó cùng đúng và tài liệu phải phản ánh cả hai, không phải làm phẳng một
+cái cho tiện.
+
+### `fail-fast: false`
+
+Nếu 3.9 đỏ và 3.11 xanh, ta cần THẤY cả hai. Dừng sớm che mất thông tin
+phân biệt "lỗi của phiên bản" với "lỗi của code".
+
+### Bước "PHẠM VI ĐÃ KIỂM" in interpreter
+
+`CLAUDE.md` #19 — hai job cùng tên nhau sẽ không phân biệt được trong log
+nếu không in ra chúng chạy Python nào. Tên job cũng mang `py${{ matrix.python-version }}`.
+
+### Nếu job 3.9 đỏ
+
+Đó là **lỗi thật đã tồn tại từ lâu**, không phải lỗi mới do matrix tạo ra
+— và nó nằm trên đúng interpreter đang chạy thí nghiệm. Sửa thật, KHÔNG
+loại 3.9 khỏi matrix cho xanh.
