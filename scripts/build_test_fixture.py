@@ -12,6 +12,31 @@ location` — Binance chặn IP runner), nhưng CI chỉ làm lộ ra khiếm kh
 
 Một test tất định phải có ĐẦU VÀO tất định.
 
+## Hai cột ĐÃ BỎ, và cái giá của việc bỏ
+
+`HistoryLoader` trả 9 cột; fixture giữ 7. Hai cột bị bỏ:
+
+- **`quote_volume`** — không hàm nào trong `data/`, `core/`, `backtest/`,
+  `monitoring/` đọc nó.
+- **`taker_buy_quote_volume`** — như trên.
+  `data/feature_engineering.py` dùng `taker_buy_base_volume` (ĐÃ GIỮ) cho
+  `taker_buy_ratio`; nó không dùng bản `quote`.
+
+Bỏ hai cột đó đưa file từ 228 KB xuống 171 KB — dưới trần 200 KB. Một cột
+không ai đọc thì không phải bằng chứng của gì cả.
+
+**`trade_count` KHÔNG nằm trong hai cột bị bỏ — nó được GIỮ.** Điều đó
+quan trọng vì Phase 12d §B.2 bắt `monitoring/data_harness.py` kiểm
+`trade_count >= 0`: nếu cột đó bị bỏ, mọi test dựng dữ liệu từ fixture này
+sẽ **không kiểm được điều kiện đó** và phép kiểm sẽ xanh một cách rỗng
+nghĩa. Cùng lý do `volume` được giữ (§B.2 kiểm `volume >= 0` và
+`volume != 0`).
+
+Hai cột ĐÃ BỎ không xuất hiện trong phép kiểm nào của §B.2, nên việc bỏ
+chúng không làm mất phép kiểm nào. Thêm một kiểm mới chạm tới
+`quote_volume`/`taker_buy_quote_volume` thì phải sinh lại fixture với cột
+đó — `COLUMNS` bên dưới là chỗ duy nhất quyết định.
+
 ## Chạy lại khi nào
 
 Gần như không bao giờ. Fixture được ghim SHA256 trong

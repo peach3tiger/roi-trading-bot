@@ -92,6 +92,37 @@ kill+restart thật, `--dry-run` 24h, dashboard/Telegram thật.
   báo điều này; `test_stop_khong_ton_tai_tren_san` sẽ đỏ nếu `broker/` bắt
   đầu gửi stop thật, buộc đọc lại cả hai script.
 
+## Phạm vi CHƯA ĐƯỢC KIỂM — forward test chạy Python khác CI
+
+**Đo, không suy luận.** `~/Library/LaunchAgents/com.regime-trader-crypto.forward-test.plist`
+và `...forward-watchdog.plist` đều gọi
+`/Users/lbeyewear/regime-trader-crypto/.venv/bin/python` → **Python 3.9.6**.
+
+| Nơi | Python |
+|---|---|
+| Forward test (launchd, ĐANG CHẠY thật) | **3.9.6** |
+| `monitoring.forward_watchdog` (launchd) | **3.9.6** |
+| `pyproject.toml: python_version` (mypy kiểm theo) | 3.11 |
+| `pyproject.toml: target-version` (ruff) | py311 |
+| `.github/workflows/ci.yml` (cả hai job) | 3.11 |
+| `CLAUDE.md` §Phong cách code | "3.11+" |
+
+**Nghĩa là: đường code đang chạy thí nghiệm 12 tháng được type-check và
+test dưới một Python KHÁC với Python nó thực thi.** Mọi khẳng định "mypy
+sạch" / "CI xanh" đều nói về 3.11; không có phép kiểm nào chạy trên 3.9.6
+ngoài chính `pytest` ở local.
+
+**KHÔNG SỬA.** Forward test đang chạy trên cấu hình đóng băng
+(`forward/config_frozen.yaml` + `forward/logger.py`, ghim SHA256); đổi
+interpreter là đổi điều kiện thí nghiệm giữa chừng. Ghi ra để nó là một
+khoảng trống ĐÃ BIẾT thay vì một giả định thầm lặng — `CLAUDE.md` #19.
+
+Hệ quả cụ thể đã gặp: `requirements-dev.txt` phải ghim **lùi**
+`pandas-stubs==2.2.2.240807` (bản cuối còn hỗ trợ 3.9) để local và CI cùng
+một stub. Ngày một dependency bỏ 3.9, bản ghim đó hết đường và khoảng
+trống này thành sự cố. Xem `docs/DECISIONS.md` mục "CI đỏ lần chạy đầu
+tiên".
+
 ## Ranh giới không được vượt
 
 - `forward/logger.py` + `forward/config_frozen.yaml` **đóng băng**, ghim

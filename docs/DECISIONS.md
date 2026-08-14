@@ -2365,3 +2365,57 @@ chặn.
 
 Sau thay đổi này **không còn file test nào gọi mạng**, nên không cần
 `@pytest.mark.network` và không có test nào bị loại khỏi CI.
+
+
+## Mẫu LẶP LẠI: lỗi bị che bởi lỗi đứng trước (2026-08-14)
+
+Không phải một sự cố riêng lẻ. Đây là **lần thứ tư** cùng một mẫu.
+
+### Lần này
+
+`tests/test_snapshot.py` gọi `HistoryLoader()` — tức là qua MẠNG — và nó
+chạy ở bộ **mặc định**, mỗi commit. Trên CI, Binance trả 451 cho IP runner
+GitHub, nên nó **phải** đỏ.
+
+Nhưng job `fast` báo đỏ ở `mypy`, không ở `pytest`. Lý do: các bước trong
+một job GitHub Actions chạy TUẦN TỰ và dừng ở bước đầu tiên thất bại.
+
+```yaml
+- name: ruff    -> pass
+- name: mypy    -> FAIL, job dừng tại đây
+- name: pytest  -> KHÔNG BAO GIỜ CHẠY
+```
+
+Đọc log CI thì thấy đúng hai lỗi: `mypy` và `pytest -m slow`. Kết luận tự
+nhiên — và SAI — là "có hai vấn đề". Thực tế là **ba**: lỗi thứ ba nằm
+im phía sau `mypy`, và nó chỉ lộ ra sau khi lỗi thứ nhất được sửa. Nếu chỉ
+sửa `mypy` rồi push, lần chạy kế tiếp lại đỏ ở một chỗ "mới" mà thật ra đã
+ở đó suốt.
+
+### Cùng một mẫu với ba lần trước
+
+| Lần | Lỗi che | Lỗi bị che | Hậu quả |
+|---|---|---|---|
+| — | `cmd \| tail` | mã thoát của `cmd` | `$?` trả mã thoát của `tail`, luôn 0 (`CLAUDE.md` #17) |
+| 2026-08-14 | mypy dừng ở lỗi phân giải module | 15 lỗi kiểu trong `tests/` | "mypy sạch" = "mypy chưa kiểm được gì" |
+| 2026-08-14 | thiếu `config/__init__.py` | như trên, lần hai | `ops/verify_scope.py` bắt được ngay |
+| 2026-08-14 | bước `mypy` của CI | `test_snapshot.py` gọi mạng | "hai job đỏ" thật ra là ba lỗi |
+
+Điểm chung: **một phép kiểm thất bại SỚM làm phép kiểm sau nó không chạy,
+và cái không chạy trông giống hệt cái đã qua.** Số lượng lỗi nhìn thấy
+được là một cận DƯỚI, không phải tổng.
+
+### Hệ quả cho quy trình
+
+1. **Đừng đếm lỗi từ log CI.** Sửa lỗi đầu, chạy lại, đếm lại. Số ban đầu
+   luôn là cận dưới.
+2. Bước **"PHẠM VI ĐÃ KIỂM"** (`CLAUDE.md` #19) trong `ci.yml` được đặt ở
+   **CUỐI** job `fast` một cách có chủ ý: nếu bất kỳ bước nào trước nó
+   thất bại, phạm vi KHÔNG được in ra — và một báo cáo phạm vi vắng mặt là
+   tín hiệu "chưa kiểm hết", đọc được ngay từ danh sách bước.
+3. Không dùng `continue-on-error` để "thấy hết lỗi một lượt". Nó biến một
+   job đỏ thành một job xanh-có-chú-thích, và chú thích thì không ai đọc.
+   Đổi lại, chấp nhận sửa theo vòng: mỗi vòng lộ ra lớp tiếp theo.
+
+Ba lỗi lần này được sửa TRONG CÙNG MỘT commit chính vì đã lường trước lớp
+thứ ba, không phải vì log CI đã nói ra nó.
