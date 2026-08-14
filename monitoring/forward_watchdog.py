@@ -552,6 +552,7 @@ def run_watchdog(
     max_staleness_days: int = _DEFAULT_MAX_STALENESS_DAYS,
     today_utc: Optional[date] = None,
     send: bool = True,
+    env_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     freshness = inspect_log(path, today_utc)
     message = build_alert_message(freshness, max_staleness_days)
@@ -562,7 +563,14 @@ def run_watchdog(
     # không. Nếu chỉ kiểm lúc có sự cố thì phát hiện "Telegram chưa cấu
     # hình" đúng vào hôm cần nó nhất — tức là không phát hiện gì cả.
     # `telegram_configured` xuất hiện trong watchdog.out.log MỖI NGÀY.
-    load_dotenv()
+    # `env_path=None` (mặc định, và là thứ DUY NHẤT vận hành dùng) -> đọc
+    # `.env` thật. Tham số tồn tại để TEST truyền đường dẫn tạm: bản cũ
+    # gọi `load_dotenv()` cứng, nên mọi test chạm `run_watchdog` đều đọc
+    # `.env` THẬT của máy dev và rò credential sang các test sau — xem
+    # `tests/conftest.py::_cach_ly_moi_truong`. Một phụ thuộc ngầm vào
+    # trạng thái máy là thứ phải làm cho TƯỜNG MINH, không phải thứ để
+    # test đi vòng.
+    load_dotenv(env_path)
     manager = AlertManager()
     telegram_ok = bool(manager.telegram_bot_token and manager.telegram_chat_id)
 

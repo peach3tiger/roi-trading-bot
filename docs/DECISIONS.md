@@ -2421,50 +2421,94 @@ Ba lỗi lần này được sửa TRONG CÙNG MỘT commit chính vì đã lư�
 thứ ba, không phải vì log CI đã nói ra nó.
 
 
-## Bộ test đọc `.env` THẬT — đỏ khi credential được điền (2026-08-14)
+## Bộ test đọc `.env` THẬT — và ĐÃ gửi POST ra api.telegram.org (2026-08-14)
 
 ### Triệu chứng
 
 Hai test trong `tests/test_monitoring_alerts.py` chuyển từ xanh sang đỏ
-**mà không dòng code nào đổi**:
-
-```
-test_telegram_not_called_when_not_configured
-test_webhook_not_called_when_not_configured
-```
-
-Thứ đã đổi là **`.env`**: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` được
-điền giá trị thật (mục treo #0 của `STATE.md`).
+**mà không dòng code nào đổi**. Thứ đã đổi là `.env`:
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` được điền giá trị thật (mục treo
+#0 của `STATE.md`). Xác minh không phải do Phase 12c: `git stash` rồi chạy
+bộ đầy đủ ở HEAD sạch — vẫn 2 đỏ.
 
 ### Nguyên nhân
 
-`monitoring/forward_watchdog.py:565` gọi `load_dotenv()` với đường dẫn
-MẶC ĐỊNH — `.env` thật của dự án — và hàm đó ghi thẳng vào `os.environ`.
+`monitoring/forward_watchdog.py::run_watchdog()` gọi `load_dotenv()` cứng,
+đường dẫn MẶC ĐỊNH = `.env` thật, và hàm đó ghi thẳng vào `os.environ`.
 `monkeypatch` không hoàn tác được thứ nó không đặt, nên biến rò rỉ sang
-mọi test chạy sau trong cùng phiên. `AlertManager(telegram_bot_token=None)`
-nghĩa là "đọc từ env", nó thấy token thật, và gọi `requests.post`.
+mọi test chạy sau trong cùng phiên.
 
-### Vì sao đây là bug nặng hơn một test đỏ
+### KHẲNG ĐỊNH BAN ĐẦU LÀ SUY LUẬN — đây là phép ĐO
 
-1. **Bộ test cho kết quả khác nhau trên hai máy** tuỳ máy đó có credential
-   hay không. Đúng lớp "lỗi xác minh" mà `CLAUDE.md` #16 gọi là chế độ
+Bản ghi đầu của mục này viết *"một test không patch `requests.post` sẽ gửi
+tin nhắn Telegram THẬT"*. Đó là **suy luận**. Đo lại
+(`grep -rln "AlertManager|send_alert" tests/` rồi đọc từng chỗ):
+
+| File | Dựng gì | Có chặn mạng? |
+|---|---|---|
+| `test_main_loop.py` | `_SpyAlertManager(AlertManager)`, **~20 chỗ** | `send()` gọi `super().send()` — **KHÔNG chặn** |
+| `test_alert_channel_health.py:283` | `AlertManager` thật rồi `.send()` | **KHÔNG chặn** |
+| `test_exception_classification.py` | `_SpyAlertManager` (import từ trên) | **KHÔNG chặn** |
+| `test_monitoring_alerts.py` | `AlertManager` thật | có `patch("...requests.post")` |
+| `test_daily_digest.py`, `test_watchdog.py`, `test_data_harness.py`, `test_health.py` | `_FakeAlertManager` thuần | không chạm mạng |
+
+`_SpyAlertManager` tắt console (`console_enabled=False`) nhưng Telegram
+đọc từ `os.environ` — nên nó đi trọn đường gửi thật. Chạy thử với token
+giả lập và một `requests.post` đếm được:
+
+```
+số lời gọi requests.post: 1
+  -> https://api.telegram.org/bot<TOKEN>/...
+```
+
+**Kết luận đúng, và nặng hơn bản suy luận:** không phải "một test *sẽ*"
+gửi — mà **~20 chỗ gọi ĐÃ POST thật tới `api.telegram.org` ở MỖI lần chạy
+bộ test**, kể từ ngày `.env` có token cho tới bản sửa này.
+`test_spy_alert_manager_di_qua_duong_gui_that` giữ phép đo đó.
+
+### Vì sao nặng hơn một test đỏ
+
+1. Bộ test cho **kết quả khác nhau trên hai máy** tuỳ máy đó có credential
+   hay không — đúng lớp "lỗi xác minh" mà `CLAUDE.md` #16 gọi là chế độ
    hỏng chủ đạo của dự án.
-2. Hai test đó chỉ **không gửi thật** vì chúng patch `requests.post`. Một
-   test không patch nó sẽ **gửi tin nhắn Telegram THẬT** từ bộ test.
-3. Nó ẩn được nhiều tháng vì cho tới hôm nay `.env` toàn giá trị rỗng.
+2. Bộ test **gửi ra ngoài thật**, không phải "có nguy cơ gửi".
+3. Ẩn được nhiều tháng vì tới hôm đó `.env` toàn giá trị rỗng.
 
-### Sửa
+### Sửa — HAI lớp, lớp đầu mới là lớp thật
 
-`tests/conftest.py` — fixture `autouse=True` xoá 12 biến credential khỏi
-`os.environ` trước MỖI test. `autouse` chứ không phải khai báo tay: một
-fixture phải nhớ khai báo sẽ bị quên ở đúng file quên nó.
+**Lớp 1 — vá ĐƯỜNG RÒ RỈ.** `tests/conftest.py` thay
+`monitoring.forward_watchdog.load_dotenv` bằng bản NÉM LỖI khi gọi với
+đường dẫn mặc định. Đóng cho **MỌI biến**, có tên hay chưa — mạnh hơn hẳn
+một danh sách. Gọi với đường dẫn tường minh vẫn chạy (đó là cách
+`test_load_dotenv_*` kiểm chính hàm đó). Dưới launchd `load_dotenv()` hoạt
+động đầy đủ: tiến trình khác, không có conftest.
 
-Đột biến xác nhận: đổi `autouse=True` → `False`, hai test kia đỏ lại.
+Chặn này lập tức lộ ra **4 test nữa** cũng đang đọc `.env` thật qua
+`run_watchdog`. Sửa bằng cách thêm tham số `env_path` cho `run_watchdog`
+(mặc định `None` = `.env` thật, chỉ test truyền đường dẫn tạm) — một phụ
+thuộc ngầm vào trạng thái máy phải làm cho TƯỜNG MINH, không phải để test
+đi vòng.
+
+**Lớp 2 — danh sách credential**, chỉ còn nhiệm vụ chặn biến đã `export`
+sẵn trong shell (đường lớp 1 không với tới).
+
+### Danh sách 12 tên là PHÁN ĐOÁN, không phải phép đo
+
+Đo lại: code không phải test đọc **19** biến môi trường, không phải 12.
+Bảy biến ngoài danh sách là đường dẫn/tham số vận hành (`CONFIG_PATH`,
+`LOG_DIR`, `MODEL_PATH`, `REQUIRE_HMM_MODEL`, `STATE_DIR`,
+`WATCHDOG_POLL_SEC`, `WATCHDOG_STALE_SEC`).
+
+`tests/test_env_isolation.py::test_khong_bien_moi_truong_nao_bi_bo_quen`
+đối chiếu mã nguồn với HAI danh sách (`CREDENTIAL_ENV`, `NON_SECRET_ENV`)
+mỗi lần chạy: biến thứ 20 xuất hiện buộc một quyết định — bí mật hay
+không — và không thể im lặng ở lại ngoài cả hai. Cộng phép kiểm chiều
+ngược (tên trong danh sách mà code không còn đọc) và phép kiểm hai danh
+sách không giao nhau.
 
 ### Điều KHÔNG sửa, và vì sao
 
-`load_dotenv()` ở `forward_watchdog.py` giữ nguyên. Nó cần đọc `.env`
-thật khi chạy dưới launchd (launchd không có env của shell). Vấn đề không
-nằm ở nó mà ở việc **bộ test chạy chung không gian tiến trình với nó** —
-nên cách ly thuộc về `conftest.py`, không thuộc về module đang làm đúng
-việc của mình.
+`load_dotenv()` giữ nguyên hành vi production: nó cần đọc `.env` thật khi
+chạy dưới launchd (launchd không có env của shell). Vấn đề không nằm ở nó
+mà ở việc **bộ test chạy chung không gian tiến trình** — nên cách ly thuộc
+về `conftest.py`, không thuộc về module đang làm đúng việc của mình.

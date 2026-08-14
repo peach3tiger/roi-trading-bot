@@ -86,13 +86,20 @@ def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
 
 
 # ----------------------------------------------------------------------
-# Cách ly credential — bộ test KHÔNG được đọc `.env` thật
+# Cách ly môi trường — bộ test KHÔNG được đọc `.env` thật
 # ----------------------------------------------------------------------
 
-# Mọi biến môi trường mang credential hoặc điều khiển đích gửi ra ngoài.
-# Gom ở một chỗ: thêm một kênh gửi mới mà quên thêm biến của nó vào đây sẽ
-# làm bộ test lặng lẽ dùng lại cấu hình thật của máy dev.
-_CREDENTIAL_ENV = (
+# Biến môi trường mang CREDENTIAL hoặc điều khiển đích gửi ra ngoài.
+#
+# ĐÂY LÀ DANH SÁCH ĐEN, và danh sách đen có khuyết tật cố hữu: biến thứ
+# N+1 thêm sau này sẽ không được xoá và không ai biết. Nó KHÔNG phải lớp
+# phòng thủ chính — lớp chính là `_chan_doc_env_that()` bên dưới, vá
+# ĐƯỜNG RÒ RỈ nên đóng cho MỌI biến, có tên hay chưa.
+#
+# Danh sách này chỉ còn một việc: chặn biến người dùng đã `export` sẵn
+# trong shell (đường mà việc vá `load_dotenv` không với tới).
+# `tests/test_env_isolation.py` ghim nó không tụt lại sau code.
+CREDENTIAL_ENV = (
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "EXCHANGE_API_KEY",
@@ -107,31 +114,71 @@ _CREDENTIAL_ENV = (
     "MONITORING_EMAIL_TO",
 )
 
+# Biến môi trường ĐƯỢC PHÉP không nằm trong `CREDENTIAL_ENV`: đường dẫn và
+# tham số vận hành, không phải bí mật, và nhiều test cố tình đặt chúng.
+# Mỗi tên ở đây là một quyết định "cái này KHÔNG phải credential" — biến
+# thứ 20 xuất hiện sẽ phải vào một trong hai danh sách, không thể im lặng.
+NON_SECRET_ENV = (
+    "CONFIG_PATH",
+    "LOG_DIR",
+    "MODEL_PATH",
+    "REQUIRE_HMM_MODEL",
+    "STATE_DIR",
+    "WATCHDOG_POLL_SEC",
+    "WATCHDOG_STALE_SEC",
+)
+
 
 @pytest.fixture(autouse=True)
-def _cach_ly_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Xoá mọi credential khỏi `os.environ` TRƯỚC MỖI test.
+def _cach_ly_moi_truong(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hai lớp, lớp đầu mới là lớp thật.
 
-    ## Bug thật đã gặp (2026-08-14), không phải phòng xa
+    ## Bug đã gặp (2026-08-14), không phải phòng xa
 
-    `monitoring/forward_watchdog.py:565` gọi `load_dotenv()` với đường dẫn
-    MẶC ĐỊNH — tức là `.env` thật của dự án — và hàm đó ghi thẳng vào
-    `os.environ`. `monkeypatch` không hoàn tác được thứ nó không đặt, nên
-    biến rò rỉ sang mọi test chạy sau trong cùng phiên.
+    `monitoring/forward_watchdog.py::load_dotenv()` gọi với đường dẫn MẶC
+    ĐỊNH đọc `.env` THẬT của dự án và ghi thẳng vào `os.environ`.
+    `monkeypatch` không hoàn tác được thứ nó không đặt, nên biến rò rỉ
+    sang mọi test chạy sau trong cùng phiên.
 
-    Hậu quả ĐO ĐƯỢC: ngày `.env` được điền `TELEGRAM_BOT_TOKEN` thật,
-    `tests/test_monitoring_alerts.py::test_telegram_not_called_when_not_configured`
-    chuyển từ xanh sang đỏ mà KHÔNG dòng code nào đổi —
-    `AlertManager(telegram_bot_token=None)` đọc env, thấy token thật, rồi
-    gọi `requests.post`. Test đó chỉ không gửi thật vì `requests.post` bị
-    patch; **một test không patch nó sẽ gửi tin nhắn Telegram THẬT.**
+    Hậu quả ĐO ĐƯỢC: ngày `.env` được điền `TELEGRAM_BOT_TOKEN` thật, hai
+    test trong `test_monitoring_alerts.py` chuyển từ xanh sang đỏ mà KHÔNG
+    dòng code nào đổi. Chúng chỉ không gửi thật vì đã patch
+    `requests.post`.
 
-    Cùng lỗi làm bộ test cho kết quả KHÁC NHAU trên hai máy tuỳ máy đó có
-    credential hay không — đúng lớp "lỗi xác minh" mà `CLAUDE.md` #16 gọi
-    là chế độ hỏng chủ đạo của dự án này.
+    ## Lớp 1 — chặn ĐƯỜNG RÒ RỈ (đóng cho MỌI biến)
 
-    `autouse=True`: một fixture phải nhớ khai báo là một fixture sẽ bị
-    quên ở đúng file quên nó.
+    Vá `load_dotenv` để lời gọi với đường dẫn mặc định NÉM LỖI. Đây là
+    lớp mạnh hơn hẳn một danh sách tên biến: nó không cần biết biến tên gì,
+    nên biến thứ 20 thêm vào `.env` cũng bị chặn.
+
+    Ném lỗi chứ không trả `[]` im lặng: một lời gọi mặc định trong test là
+    một lỗi lập trình cần thấy ngay, không phải một no-op cần bỏ qua.
+
+    Gọi với đường dẫn TƯỜNG MINH vẫn chạy bình thường — đó là cách
+    `test_load_dotenv_khong_ghi_de_moi_truong_that` kiểm chính hàm này.
+
+    Dưới launchd, `load_dotenv()` vẫn hoạt động đầy đủ: đó là tiến trình
+    khác, không có conftest nào.
+
+    ## Lớp 2 — xoá credential đã `export` sẵn trong shell
+
+    Đường mà lớp 1 không với tới. Danh sách đen, và
+    `tests/test_env_isolation.py` ghim nó không tụt lại sau code.
     """
-    for ten in _CREDENTIAL_ENV:
+    import monitoring.forward_watchdog as fw
+
+    that = fw.load_dotenv
+
+    def _chan_doc_env_that(path: "object | None" = None) -> "list[str]":
+        if path is None:
+            raise AssertionError(
+                "load_dotenv() với đường dẫn MẶC ĐỊNH bị chặn trong test — nó đọc "
+                "`.env` THẬT và ghi vào os.environ, rò rỉ sang mọi test chạy sau. "
+                "Truyền đường dẫn tường minh (tmp_path) nếu đang kiểm chính hàm này."
+            )
+        return that(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fw, "load_dotenv", _chan_doc_env_that)
+
+    for ten in CREDENTIAL_ENV:
         monkeypatch.delenv(ten, raising=False)

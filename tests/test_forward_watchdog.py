@@ -193,7 +193,7 @@ def test_run_watchdog_khong_gui_khi_log_khoe(tmp_path: Path) -> None:
     ngày), nhưng `.send()` không bao giờ được gọi khi không có sự cố.
     """
     p = _with_last_bar(tmp_path / "log.csv", _TODAY - timedelta(days=1))
-    res = run_watchdog(p, today_utc=_TODAY, send=True)
+    res = run_watchdog(p, today_utc=_TODAY, send=True, env_path=tmp_path / ".env")
 
     assert res["stale"] is False
     assert res["alert_sent"] is False
@@ -215,7 +215,7 @@ def test_bao_cao_trang_thai_kenh_ke_ca_khi_log_khoe(
     lag = 10 if stale else 1
     p = _with_last_bar(tmp_path / "log.csv", _TODAY - timedelta(days=lag))
 
-    res = run_watchdog(p, today_utc=_TODAY, send=False)
+    res = run_watchdog(p, today_utc=_TODAY, send=False, env_path=tmp_path / ".env")
 
     assert res["stale"] is stale
     assert res["telegram_configured"] is True
@@ -233,7 +233,9 @@ def test_bao_cao_kenh_chua_cau_hinh(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "")
     p = _with_last_bar(tmp_path / "log.csv", _TODAY - timedelta(days=1))
 
-    assert run_watchdog(p, today_utc=_TODAY, send=False)["telegram_configured"] is False
+    ket_qua = run_watchdog(p, today_utc=_TODAY, send=False, env_path=tmp_path / ".env")
+
+    assert ket_qua["telegram_configured"] is False
 
 
 def test_load_dotenv_khong_ghi_de_moi_truong_that(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
