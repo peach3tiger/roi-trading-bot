@@ -2200,3 +2200,44 @@ tháng. Đó là giới hạn THẬT của đại lượng được đo, không 
 hình — một cửa sổ ngắn hơn không cho phát hiện sớm hơn, nó cho *không phát
 hiện gì cả*. Forward test bắt đầu 2026-08-06 nên chỉ số này chỉ có dữ liệu
 đầy đủ từ 2027-08-06, trùng mốc 12 tháng.
+
+
+## Quy tắc đã học, không lặp lại (chuyển từ STATE.md 2026-08-14)
+
+Chuyển về đây theo quy tắc mới ở đầu `STATE.md`: mỗi mục dưới đây kể
+một chuyện ĐÃ XẢY RA để giải thích vì sao quy tắc tồn tại, nên chỗ của
+chúng là file này. `STATE.md` chỉ giữ một dòng trỏ tới đây.
+
+- Mọi số đo thị trường lấy từ **testnet không dùng để hiệu chỉnh tham số**.
+  Thanh khoản testnet là nhân tạo.
+- Không bao giờ log giá trị key/secret, kể cả một phần.
+- Không bao giờ hai tiến trình cùng khả năng đặt lệnh trên một tài khoản.
+- Khả năng truy cập theo khu vực/tài khoản có thể chặn bất kỳ lớp nào
+  (sàn — Bybit; hạ tầng — GitHub) bất kỳ lúc nào, không cảnh báo trước.
+  Khi bị chặn, xác định ĐÚNG lớp bị chặn trước khi debug — chuyển sang
+  việc không phụ thuộc lớp đó, quay lại khi hết chặn.
+- Trước khi "xây lại" một file bị báo là thiếu/chưa có: kiểm tra thật
+  (file tồn tại? đã commit? có trên remote? test pass?) rồi mới tin.
+- Thư viện ngoài có thể đổi hành vi giữa các phiên bản theo cách âm thầm
+  đúng-ngữ-pháp-sai-ngữ-nghĩa (hmmlearn's `covars_` luôn trả full matrix
+  bất kể `covariance_type`) — viết test đọc lại GIÁ TRỊ THẬT từ một lần
+  fit/gọi thật, không chỉ test "không crash", là cách duy nhất bắt được.
+- Với file **append-only**, đổi schema không phải thay đổi tương thích
+  ngược — nó là thay đổi **phá vỡ**, và nó phá ở lần **ĐỌC** tiếp theo,
+  không phải lần ghi. Thêm cột vào một log đã bắt đầu thì file cũ không
+  bao giờ học được header mới. Cuộn sang file mới, đừng sửa file cũ.
+- Một job đã lên lịch **chạy đều** không có nghĩa là nó **chạy được**.
+  `launchctl print` có `runs`/`last exit code`; đọc chúng và đọc file
+  stderr trước khi kết luận job "chưa được nạp". Job không có
+  `StandardErrorPath` thì lỗi không để lại dấu vết nào — đó là cách sự cố
+  này ẩn được 3 ngày.
+- "Parse không ném lỗi" ≠ "parse đúng". pandas im lặng lấy cột đầu làm
+  index khi mọi dòng dư đúng một trường so với header — mọi tín hiệu
+  (số dòng, kiểu dữ liệu, không NaN bất thường) đều trông lành lặn trong
+  khi dữ liệu đã lệch ô. Ghim danh sách CỘT, không chỉ bọc try/except.
+- Restart tiến trình là nơi bất biến dễ vỡ nhất trong im lặng nhất
+  (`modify_stop()` sau restart không biết stop cũ nếu không nạp lại tường
+  minh — CLAUDE.md #5 có thể bị vi phạm mà không có exception nào báo).
+  Mọi trạng thái trong bộ nhớ ảnh hưởng tới một bất biến an toàn PHẢI có
+  đường khôi phục tường minh sau restart, không được ngầm định "restart =
+  trạng thái sạch".
