@@ -2058,12 +2058,14 @@ def run_live_loop(
     # Phase 12b §B.1/§B.3 — ảnh chụp sức khoẻ. `api_ok` bắt đầu bằng True:
     # `check_exchange_reachable` ở bước 1-2 đã chạy và đã thoát nếu FAIL,
     # nên tới được đây nghĩa là lần gọi sàn gần nhất đã thành công.
+    from monitoring.data_harness import LOCK_FILENAME as DATA_QUALITY_LOCK_FILENAME
     from monitoring.health import HealthThresholds, assert_healthy_or_alert, evaluate, write_health
     from monitoring.watchdog import HEARTBEAT_FILENAME, write_heartbeat
 
     health_thresholds = HealthThresholds.from_settings(settings)
     health_path = state_dir / "health.json"
     heartbeat_file = state_dir / HEARTBEAT_FILENAME
+    data_quality_lock = state_dir / DATA_QUALITY_LOCK_FILENAME
     api_ok = True
 
     def _snapshot_health() -> Any:
@@ -2205,6 +2207,26 @@ def run_live_loop(
                 _alert_programming_error(alert_manager=alert_manager, exc=exc, where="retrain HMM")
             except Exception:
                 logger.error("Lỗi retrain HMM — GIỮ NGUYÊN model cũ, không dừng vòng lặp.", exc_info=True)
+
+            # Phase 12d §B — `data_quality.lock` do `monitoring/data_harness.py`
+            # ghi khi dữ liệu sai. DỪNG SINH SIGNAL MỚI, GIỮ NGUYÊN vị thế
+            # và stop.
+            #
+            # Bỏ qua TOÀN BỘ việc xử lý bar, kể cả nhánh enforce stop-loss:
+            # nhánh đó so giá bar với stop, và giá bar chính là thứ vừa bị
+            # tuyên bố là không tin được. Đóng vị thế theo một mức giá sai
+            # là hiện thực hoá một khoản lỗ chưa từng xảy ra. Vị thế và
+            # stop giữ nguyên trong `state`; khi lock được xoá THỦ CÔNG,
+            # các bar bị bỏ qua vẫn nằm trong `pending` của vòng sau.
+            if data_quality_lock.exists():
+                logger.error(
+                    "%s tồn tại — DỪNG sinh signal, giữ nguyên vị thế/stop. "
+                    "Điều tra rồi xoá thủ công (ops/RUNBOOK.md mục DATA_QUALITY).",
+                    data_quality_lock,
+                )
+                write_state_snapshot(snapshot_path, state)
+                time.sleep(poll_interval)
+                continue
 
             for bar_index, pending_bar in enumerate(pending):
                 # CHỈ bar cuối cùng được đặt lệnh. Signal của bar D-3 tính
