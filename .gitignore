@@ -6,6 +6,10 @@ config/credentials.yaml
 data/cache/
 *.pkl
 *.parquet
+# NGOẠI LỆ: fixture cho test tất định. Nó LÀ mã nguồn của phép kiểm, không
+# phải dữ liệu cache — không commit thì `tests/test_determinism.py` không
+# chạy được ở bất kỳ máy nào khác, và đó chính là lý do nó từng gọi mạng.
+!tests/fixtures/*.parquet
 feature_ablation.csv
 
 # Trạng thái runtime

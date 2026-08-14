@@ -72,6 +72,7 @@ from typing import Any
 import pytest
 
 import main as main_mod
+from tests.fixtures import load_fixture
 
 _SNAPSHOT = Path(__file__).resolve().parent / "snapshots" / "smoke_7d.json"
 
@@ -87,11 +88,13 @@ def smoke_result() -> Any:
     """Chạy backtest MỘT LẦN cho cả file — ~8s là chi phí một lần, không
     phải mỗi assert."""
     from backtest.backtester import WalkForwardBacktester
-    from data.history_loader import HistoryLoader
 
     settings = main_mod.load_settings()
     wf = main_mod.build_walk_forward_config(settings)
-    ohlcv = HistoryLoader().load(_CCXT_SYMBOL, "1D", _DATA_START, _END)
+    # FIXTURE ĐÃ COMMIT, không gọi mạng — xem `tests/fixtures/__init__.py`.
+    # Bản cũ gọi `HistoryLoader()`, nghĩa là một canary chạy MỖI COMMIT
+    # phụ thuộc vào việc Binance có trả lời hay không.
+    ohlcv = load_fixture(_END)
     backtester = WalkForwardBacktester(
         hmm_engine=main_mod.build_hmm_engine(settings, min_train_bars=wf.is_bars),
         strategy_orchestrator=main_mod.build_orchestrator(settings),

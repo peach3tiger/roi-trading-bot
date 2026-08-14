@@ -1,13 +1,40 @@
 # Không có trong spec gốc — công cụ phát triển, không cần ở production.
 # pip install -r requirements.txt -r requirements-dev.txt
 
-pytest
+# ======================================================================
+# GHIM CHÍNH XÁC (==), KHÔNG PHẢI >=. CLAUDE.md #19.
+# ======================================================================
+# "mypy sạch" không phải một khẳng định cho tới khi nói rõ SẠCH THEO
+# PHIÊN BẢN NÀO. Không ghim thì CI cài bản mới nhất còn máy dev giữ bản
+# cũ, và hai bên bất đồng về việc một `# type: ignore` có cần thiết hay
+# không — chính xác chuyện đã xảy ra ở lần CI chạy đầu tiên (2026-08-14):
+# 10 lỗi mypy trên CI, 0 lỗi ở local, 6 trong số đó là "Unused type:
+# ignore" tức là CI có stub MỚI HƠN.
+#
+# Chọn phiên bản: pandas-stubs 2.2.2.240807 có `requires-python >= 3.9`,
+# cài được trên CẢ Python 3.9 (máy dev hiện tại) lẫn 3.11 (CI). Ghim TIẾN
+# tới bản mới nhất-cho-3.11 sẽ làm máy dev KHÔNG cài được, và lúc đó
+# "mypy xanh ở local" thành một câu không kiểm chứng được.
+#
+# Hệ quả quan trọng: ghim ở bản này nghĩa là KHÔNG phải sửa
+# `forward/logger.py` — file ĐÓNG BĂNG (tests/golden/frozen_hashes.json).
+# Sáu "unused ignore" mà CI báo nằm ở đó; dưới stub đã ghim chúng VẪN CẦN
+# THIẾT. Nếu ghim tiến, ta sẽ phải sửa một file đóng băng, cập nhật hash,
+# và kết thúc/tái lập thí nghiệm forward 12 tháng — cho một thay đổi chú
+# thích kiểu không đổi một hành vi nào. Xem docs/DECISIONS.md.
+#
+# Đổi bất kỳ dòng nào dưới đây: chạy `mypy .` ở local TRƯỚC, và đọc lại
+# `forward/logger.py` có bị kéo theo không.
+mypy==1.19.1
+pandas-stubs==2.2.2.240807
+types-PyYAML==6.0.12.20250915
+types-requests==2.32.4.20260107
+
+pytest==8.4.2
+# pytest-cov: KHÔNG ghim — chưa cài ở local nên không có số thật để ghim,
+# và ghim một số chưa từng chạy là ghim một lời đoán.
 pytest-cov
 # Property-based testing (Phase 12b §A.2). Profile cấu hình ở
 # tests/conftest.py — deadline=None + derandomize=True, xem lý do ở đó.
-hypothesis
-ruff
-mypy
-pandas-stubs
-types-PyYAML
-types-requests
+hypothesis==6.141.1
+ruff==0.16.1

@@ -127,5 +127,28 @@ def test_no_look_ahead_different_end_dates_identical_overlap() -> None:
 
 
 def test_final_allocation_never_exceeds_trend_gate_cap(small_result: BacktestResult) -> None:
+    """So từng phần tử bằng `Decimal`, KHÔNG qua số học của `Series`.
+
+    `Series + Decimal` không có kiểu hợp lệ (mypy: `Value of type variable
+    "S2" of "__add__" of "Series" cannot be "Decimal"`) — pandas không hứa
+    gì về việc cộng một `Decimal` vào một Series `object`. Nó CHẠY được ở
+    runtime, nhưng nó chạy qua đường `object` mà stub không mô tả, và đúng
+    ở đây là chỗ CLAUDE.md bất biến #3 quan tâm nhất: ép sang `float` để
+    làm vừa lòng kiểu sẽ chấp nhận đúng loại sai lệch mà `Decimal` sinh ra
+    để loại bỏ.
+
+    Đổi lại còn được một thứ bản cũ không có: khi đỏ, nó chỉ ra ĐÚNG bar
+    nào vi phạm thay vì chỉ nói "có gì đó sai".
+    """
     rh = small_result.regime_history
-    assert (rh["final_allocation_pct"] <= rh["trend_gate_cap"] + Decimal("1e-9")).all()
+    dung_sai = Decimal("1e-9")
+
+    vi_pham = [
+        (ts, cuoi, tran)
+        for ts, cuoi, tran in zip(
+            rh.index, rh["final_allocation_pct"], rh["trend_gate_cap"]
+        )
+        if Decimal(str(cuoi)) > Decimal(str(tran)) + dung_sai
+    ]
+
+    assert not vi_pham, f"{len(vi_pham)} bar vượt trần trend gate, đầu tiên: {vi_pham[0]}"

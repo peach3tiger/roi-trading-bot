@@ -131,12 +131,19 @@ def _ohlcv(draw: Any) -> pd.DataFrame:
     )
     close = pd.Series(closes)
     idx = pd.date_range("2020-01-01", periods=n, freq="D", tz="UTC")
+    # `.to_numpy(dtype=float)` chứ không `.values`: `.values` trả
+    # `ndarray | ExtensionArray`, và nhân `ExtensionArray` với một `float`
+    # không có kiểu hợp lệ (mypy: `Unsupported operand types for *`). Ở
+    # đây là dữ liệu GIÁ dùng để sinh feature — `float` là đúng (CLAUDE.md
+    # bất biến #3 cho phép float cho feature/thống kê), nên nói tường minh
+    # ra thay vì để nó phụ thuộc vào dtype mà pandas tình cờ chọn.
+    gia = close.to_numpy(dtype=float)
     return pd.DataFrame(
         {
-            "open": close.values,
-            "high": close.values * 1.01,
-            "low": close.values * 0.99,
-            "close": close.values,
+            "open": gia,
+            "high": gia * 1.01,
+            "low": gia * 0.99,
+            "close": gia,
             "volume": 1.0,
             "trade_count": 1000.0,
         },

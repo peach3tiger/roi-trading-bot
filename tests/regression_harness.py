@@ -62,6 +62,7 @@ import pandas as pd
 import pytest
 
 import main as main_mod
+from tests.fixtures import load_fixture
 
 _SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots" / "phase7_baseline"
 
@@ -267,7 +268,6 @@ def format_report(comparisons: list[Comparison], divergence: Optional[Divergence
 
 def run_pinned_backtest() -> Any:
     from backtest.backtester import WalkForwardBacktester
-    from data.history_loader import HistoryLoader
 
     settings = main_mod.load_settings()
     wf = replace(
@@ -277,7 +277,10 @@ def run_pinned_backtest() -> Any:
         step_bars=_STEP_BARS,
     )
     # `data_start = start` — không truyền `--data-start` ở lần chạy gốc.
-    ohlcv = HistoryLoader().load(_CCXT_SYMBOL, "1D", _START, _END, bar_offset_hours=0)
+    # FIXTURE ĐÃ COMMIT. `bar_offset_hours=0` của bản cũ trùng đúng mặc
+    # định của `HistoryLoader` (đã kiểm bằng đo), nên fixture tái tạo
+    # nguyên vẹn đầu vào baseline Phase 7.
+    ohlcv = load_fixture(_END)
     backtester = WalkForwardBacktester(
         hmm_engine=main_mod.build_hmm_engine(settings, min_train_bars=_IS_BARS),
         strategy_orchestrator=main_mod.build_orchestrator(settings),

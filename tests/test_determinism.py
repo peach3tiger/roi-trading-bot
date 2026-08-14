@@ -55,6 +55,7 @@ import pandas as pd
 import pytest
 
 import main as main_mod
+from tests.fixtures import load_fixture
 
 _SYMBOL = "BTCUSDT"
 _CCXT_SYMBOL = "BTC/USDT"
@@ -110,10 +111,16 @@ _RUNS: dict[str, tuple[Any, Any]] = {}
 
 
 def _ohlcv(scenario: _Scenario) -> pd.DataFrame:
-    if scenario.label not in _OHLCV:
-        from data.history_loader import HistoryLoader
+    """Đọc FIXTURE ĐÃ COMMIT, KHÔNG gọi `HistoryLoader()`.
 
-        _OHLCV[scenario.label] = HistoryLoader().load(_CCXT_SYMBOL, "1D", _DATA_START, scenario.end)
+    Trước 2026-08-14 hàm này gọi mạng. Một test khẳng định "hai lần chạy
+    giống bit-for-bit" mà lấy đầu vào qua một API sống thì tiền đề của
+    chính nó đã sai — Binance có thể sửa lại bar lịch sử, cache có thể
+    trống, mạng có thể chậm. CI chỉ làm điều đó lộ ra ồn ào hơn (Binance
+    trả 451 cho IP runner GitHub); khiếm khuyết thì đã có sẵn.
+    """
+    if scenario.label not in _OHLCV:
+        _OHLCV[scenario.label] = load_fixture(scenario.end)
     return _OHLCV[scenario.label]
 
 

@@ -2241,3 +2241,127 @@ chúng là file này. `STATE.md` chỉ giữ một dòng trỏ tới đây.
   Mọi trạng thái trong bộ nhớ ảnh hưởng tới một bất biến an toàn PHẢI có
   đường khôi phục tường minh sau restart, không được ngầm định "restart =
   trạng thái sạch".
+
+
+## CI đỏ lần chạy đầu tiên — hai lỗi, hai nguyên nhân khác hẳn (2026-08-14)
+
+`.github/workflows/ci.yml` chạy lần đầu trên `57d97f5` và đỏ ở cả hai job.
+
+### LỖI 1 — `mypy .` đỏ trên CI, xanh ở local
+
+**Đo trước, sửa sau.**
+
+| | local | CI |
+|---|---|---|
+| Python | **3.9.6** | **3.11** |
+| mypy | 1.19.1 | (không ghim → bản mới nhất) |
+| pandas-stubs | **2.2.2.240807** | (không ghim → bản mới nhất cho 3.11) |
+| số file mypy kiểm | 96 (tại HEAD) | 87 (tại `57d97f5`) |
+
+**Số file 87 vs 96 KHÔNG phải lỗi:** CI chạy `57d97f5` (Phase 12d §A),
+local đã ở `59305a7` (thêm §B–§E). Cùng commit thì cùng số. Ghi ra vì
+"phạm vi khác nhau" là thứ #19 bắt phải kiểm, và ở đây câu trả lời là
+"khác commit", không phải "khác cách đếm".
+
+**Nguyên nhân thật:** không ghim phiên bản. Trên Python 3.9, pip chỉ thấy
+tới `pandas-stubs==2.2.2.240807`; trên 3.11 nó cài bản mới hơn. 6 trong 10
+lỗi là `Unused "type: ignore"` — tức là CI có stub MỚI HƠN, đã sửa những
+thứ mà `# type: ignore` ở local đang vá.
+
+### Quyết định: ghim LÙI về bản local đang có, không ghim TIẾN
+
+`pandas-stubs==2.2.2.240807` có `requires-python >= 3.9` → cài được trên
+CẢ 3.9 lẫn 3.11. Ghim nó làm hai bên chạy đúng cùng stub.
+
+Ghim TIẾN (bản mới nhất cho 3.11) bị loại vì hai lý do, lý do thứ hai
+nặng hơn:
+
+1. Máy dev chạy 3.9 nên **không cài được** bản đó — "mypy xanh ở local"
+   thành một câu không kiểm chứng được.
+2. **6 "unused ignore" nằm trong `forward/logger.py` — FILE ĐÓNG BĂNG**
+   (`tests/golden/frozen_hashes.json`). Ghim tiến buộc phải sửa nó, cập
+   nhật hash, và theo `CLAUDE.md` #15 thì đó là **kết thúc thí nghiệm
+   forward 12 tháng** — cho một thay đổi chú thích kiểu không đổi một
+   hành vi nào. Ghim lùi giữ file đó **không bị chạm**.
+
+### Bốn lỗi còn lại: sửa thật, không thêm ignore
+
+- `tests/test_backtester.py:131` — `Series + Decimal` không có kiểu hợp lệ.
+  Sửa bằng so từng phần tử với `Decimal`, KHÔNG ép `float`: ép float ở đây
+  sẽ chấp nhận đúng loại sai lệch mà `Decimal` sinh ra để loại bỏ
+  (`CLAUDE.md` #3). Phụ phẩm: khi đỏ nó chỉ ra ĐÚNG bar nào vi phạm.
+- `tests/test_properties.py:137–138` — `.values` trả
+  `ndarray | ExtensionArray`; nhân `ExtensionArray` với `float` không có
+  kiểu. Sửa bằng `.to_numpy(dtype=float)`. Đây là dữ liệu giá dùng để sinh
+  feature, nên `float` là đúng (`CLAUDE.md` #3 cho phép float cho feature).
+
+Cả hai lỗi này **thật** dù stub cũ không thấy — sửa để chúng đúng dưới mọi
+bộ stub.
+
+### Hạn chế còn lại, không giấu
+
+Máy dev chạy **Python 3.9.6** trong khi `pyproject.toml` khai
+`python_version = "3.11"` và `CLAUDE.md` nói "Python 3.11+". Hôm nay bản
+ghim che được khoảng cách đó vì nó hỗ trợ cả hai. **Ngày một dependency bỏ
+3.9, chuyện này tái diễn.** Cách sửa gốc là cài Python 3.11 ở local;
+chưa làm được trong phiên này.
+
+---
+
+## Test tất định gọi MẠNG — khiếm khuyết có sẵn, CI chỉ làm nó lộ ra (2026-08-14)
+
+### Triệu chứng
+
+`pytest -m slow` đỏ 6 test. `tests/test_determinism.py` → `HistoryLoader()`
+→ `ccxt.ExchangeNotAvailable: 451 Service unavailable from a restricted
+location` (Binance chặn IP runner GitHub).
+
+### Vấn đề thật KHÔNG phải "CI không vào được Binance"
+
+Test này tồn tại để khẳng định hai lần chạy giống nhau **bit-for-bit**.
+Đầu vào đến từ một API sống thì **tiền đề của chính nó đã sai ngay trên
+máy dev**: Binance có thể sửa lại bar lịch sử, cache có thể trống, mạng có
+thể chậm. CI chỉ làm điều đó lộ ra ồn ào hơn.
+
+Rà `grep -rn "HistoryLoader|ccxt\.|publicGet|fetch_ohlcv" tests/` tìm
+thấy **ba** file gọi mạng thật, không phải một:
+
+| File | Chạy khi | Hậu quả |
+|---|---|---|
+| `test_determinism.py` | mặc định + slow | cổng chặn của regression harness |
+| `test_snapshot.py` | **mỗi commit** | canary phụ thuộc Binance có trả lời không |
+| `regression_harness.py` | slow | so với baseline Phase 7 |
+
+`test_snapshot.py` chạy ở bộ MẶC ĐỊNH. Job `fast` của CI không đỏ vì nó
+dừng ở bước `mypy` trước khi tới `pytest` — nghĩa là lỗi này còn một lần
+nữa đang chờ, và nó chỉ lộ ra sau khi lỗi 1 được sửa.
+
+### Quyết định: MỘT fixture đã commit cho cả ba
+
+`tests/fixtures/btcusdt_1d_2018_2026.parquet` — BTC/USDT 1D, 2018-01-01 →
+2026-08-04, **3138 bar, 7 cột, 171 KB**, ghim SHA256 trong
+`frozen_hashes.json`, sinh lại bằng `scripts/build_test_fixture.py`.
+
+- **Một** file, không phải ba: ba fixture nghĩa là ba lần phải nhớ sinh
+  lại, và lần quên đầu tiên sẽ im lặng.
+- Dải lấy theo test cần rộng nhất (`regression_harness`, tới 2026-08-04).
+- Bỏ `quote_volume`/`taker_buy_quote_volume` (không hàm nào đọc) đưa
+  228 KB → 171 KB, dưới trần 200 KB. Giữ `taker_buy_base_volume` cho
+  `taker_buy_ratio` (Tier 2, hiện tắt).
+- `bar_offset_hours` mặc định **đã kiểm bằng đo** là trùng
+  `bar_offset_hours=0` mà `regression_harness` truyền tường minh — nên một
+  fixture phục vụ được cả hai đường gọi.
+
+**Bằng chứng fixture tái tạo đúng dữ liệu mạng:** `regression_harness`
+vẫn PASS so với baseline Phase 7 (ngưỡng Sharpe 0.001) sau khi đổi nguồn.
+Nếu fixture lệch dù một bar, phép so đó đỏ.
+
+### Thiếu fixture → FAIL, TUYỆT ĐỐI KHÔNG skip
+
+`tests/fixtures/__init__.py::load_fixture()` ném `AssertionError` kèm lệnh
+sinh lại. Một test bị skip lặng lẽ chính là cách "878 passed" trở thành
+lời nói dối — đúng thứ `ops/verify_scope.py` (`CLAUDE.md` #19) tồn tại để
+chặn.
+
+Sau thay đổi này **không còn file test nào gọi mạng**, nên không cần
+`@pytest.mark.network` và không có test nào bị loại khỏi CI.

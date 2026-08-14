@@ -4,11 +4,14 @@
     "experiment_started": "2026-08-06",
     "pinned_at": "2026-08-07",
     "closed_log_pinned_at": "2026-08-08",
-    "closed_log_note": "forward/log.csv là FILE DỮ LIỆU đã đóng (schema v1, 1 bar 2026-08-05), không phải code. Ghim vì schema đã cuộn sang forward/log_v2.csv ngày 2026-08-08 và không đường nào được ghi vào v1 nữa. Hash này KHÔNG BAO GIỜ đổi — kể cả khi bắt đầu thí nghiệm mới, vì bar đã ghi là bằng chứng đã xảy ra. Xem forward/SCHEMA.md."
+    "closed_log_note": "forward/log.csv là FILE DỮ LIỆU đã đóng (schema v1, 1 bar 2026-08-05), không phải code. Ghim vì schema đã cuộn sang forward/log_v2.csv ngày 2026-08-08 và không đường nào được ghi vào v1 nữa. Hash này KHÔNG BAO GIỜ đổi — kể cả khi bắt đầu thí nghiệm mới, vì bar đã ghi là bằng chứng đã xảy ra. Xem forward/SCHEMA.md.",
+    "fixture_pinned_at": "2026-08-14",
+    "fixture_note": "tests/fixtures/btcusdt_1d_2018_2026.parquet là ĐẦU VÀO của test_determinism.py, test_snapshot.py và regression_harness.py. Ghim vì một test tất định phải có đầu vào tất định — trước 2026-08-14 cả ba gọi HistoryLoader() qua MẠNG, nên tiền đề của chúng sai kể cả trên máy dev (Binance sửa lại bar lịch sử, cache trống, mạng chậm); CI chỉ làm nó lộ ra ồn ào hơn (Binance trả 451 cho IP runner GitHub). Sinh lại bằng scripts/build_test_fixture.py; sinh lại làm MỌI baseline đo trên nó hết hiệu lực (snapshot Phase 7, smoke_7d.json), ghi docs/DECISIONS.md TRƯỚC."
   },
   "files": {
     "forward/logger.py": "20a9474d3357cdd9ca2463910c07b9d50c66cfc4ef78e7b9e7d60106742e0ff9",
     "forward/config_frozen.yaml": "be741c659bc5a11d607955e64ec27cb0b194c1b6c368ca09704b8d056a1ec15c",
-    "forward/log.csv": "31e4f63e9600ed71ce9c6882309c6c337d790255a6bda1b77f03150cc39ec0d4"
+    "forward/log.csv": "31e4f63e9600ed71ce9c6882309c6c337d790255a6bda1b77f03150cc39ec0d4",
+    "tests/fixtures/btcusdt_1d_2018_2026.parquet": "f6e8663d4613a8cf161fe0f88673860320374d6556c3b1b3d06b00d1224af9da"
   }
 }

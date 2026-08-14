@@ -24,12 +24,51 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # Phiên bản công cụ ĐƯỢC GHIM (requirements-dev.txt, `==`). In ra
+      # TRƯỚC khi chạy gì: lần CI đầu tiên (2026-08-14) đỏ 10 lỗi mypy mà
+      # local xanh, vì hai bên cài stub khác nhau. "mypy sạch" không phải
+      # khẳng định cho tới khi nói rõ sạch THEO PHIÊN BẢN NÀO.
+      - name: Phiên bản công cụ
+        run: |
+          python -V
+          mypy --version
+          python -c "import importlib.metadata as m; [print(f'{p}=={m.version(p)}') for p in ('pandas-stubs','types-PyYAML','types-requests','pytest','hypothesis','ruff')]"
+
       - name: ruff
         run: ruff check .
       - name: mypy
         run: mypy .
       - name: pytest (mặc định, -m 'not slow')
         run: pytest -q
+
+      # CLAUDE.md #19 — "CI xanh" mà không nói đã kiểm những gì thì không
+      # phải bằng chứng. Bước này chạy SAU cùng và không được phép im lặng
+      # bỏ qua: `verify_scope` thoát khác 0 nếu một đường dẫn nghiệm thu
+      # không tồn tại (grep trên thư mục không có trả rỗng và trông như
+      # "sạch").
+      - name: PHẠM VI ĐÃ KIỂM
+        run: |
+          echo "── test đã collect ──────────────────────────────────"
+          echo "mặc định (addopts = -m 'not slow'):"
+          pytest --collect-only -q 2>/dev/null | tail -1
+          echo "không lọc marker (TỔNG THẬT):"
+          pytest --collect-only -q -m "" 2>/dev/null | tail -1
+          echo
+          echo "── lý do deselect ───────────────────────────────────"
+          # `grep` chứ không `tomllib`: tomllib là 3.11+, và máy dev của
+          # dự án đang chạy 3.9 — một dòng chỉ chạy được trên CI là một
+          # dòng không ai kiểm được trước khi push.
+          echo "pyproject.toml addopts:"
+          grep -n "^addopts" pyproject.toml
+          echo "  -> test mang marker \`slow\` bị loại khỏi lệnh mặc định;"
+          echo "     chúng chạy ở job slow-gate bên dưới, KHÔNG bị bỏ."
+          echo
+          echo "── skip / xfail (phải là 0) ─────────────────────────"
+          pytest -q -rs 2>/dev/null | grep -cE "^SKIPPED|^XFAIL" || echo "  0"
+          echo
+          echo "── phạm vi ruff / mypy / đường dẫn nghiệm thu ───────"
+          python ops/verify_scope.py
 
   slow-gate:
     name: Cổng §E — test chậm khi chạm tầng quyết định
@@ -47,6 +86,12 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Phiên bản công cụ
+        run: |
+          python -V
+          mypy --version
+          python -c "import importlib.metadata as m; [print(f'{p}=={m.version(p)}') for p in ('pandas-stubs','pytest','hypothesis','ruff')]"
 
       - name: Xác định mốc so sánh
         id: base
@@ -72,7 +117,10 @@ jobs:
 
       - name: pytest -m slow (BẮT BUỘC khi diff chạm tầng quyết định)
         if: steps.scope.outputs.n != '0'
-        run: pytest -m slow -q
+        run: |
+          echo "── test slow sẽ chạy ────────────────────────────────"
+          pytest --collect-only -q -m slow 2>/dev/null | tail -1
+          pytest -m slow -q
 
       - name: Cổng §E
         if: steps.scope.outputs.n != '0'
