@@ -205,6 +205,24 @@ Kịch bản đột biến bắt buộc có đủ ba thứ:
 Đánh dấu mọi chỗ chèn bằng một chuỗi cố định (`# MUTANT`) để `grep` sau
 khi chạy là phép kiểm rẻ và chắc chắn.
 
+#### Đột biến cần COMMIT (cổng so sánh hai ref): thêm hai điều kiện
+
+`ops/compare_versions.py` cần HAI git ref đã commit thì mới checkout
+worktree được, nên kịch bản nghiệm thu của nó BẮT BUỘC tạo một commit đột
+biến. Ba điều kiện ở trên không đủ cho trường hợp này — chúng chống mất
+việc, không chống commit đột biến thoát ra remote.
+
+Đã xảy ra 2026-08-14: commit `c7fb25b` ("TẠM — đột biến nghiệm thu #2")
+lên tới `origin/main` mang theo `_EMA_PERIOD = 40  # MUTANT`. Cây làm việc
+sạch, `grep MUTANT` trên cây sạch, mọi test xanh — và logic giao dịch bị
+đột biến vẫn nằm trên nhánh chính.
+
+4. **Commit đột biến phải ở NHÁNH TẠM**, không phải nhánh chính. Xoá nhánh
+   sau khi chạy xong.
+5. **Kiểm `git log origin/<nhánh chính>` không chứa dấu vết đột biến** —
+   không chỉ kiểm cây làm việc. Cây sạch không nói gì về thứ đã được đẩy
+   đi.
+
 ### 17. Không bao giờ đọc exit code sau pipe
 
 `cmd | tail; echo $?` trả về exit code của tail. Dùng `PIPESTATUS`, hoặc bỏ pipe khi cần exit code.
