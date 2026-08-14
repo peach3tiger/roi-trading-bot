@@ -747,6 +747,32 @@ Lưu ý về `ok = ???` trong báo cáo: đó là **không xác định được
 phải "đạt". Ví dụ không hỏi được sàn về lệnh mở. Cổng chỉ xanh khi mọi
 điều kiện `ĐẠT`.
 
+**Phải chờ tối đa bao lâu?** Đo trên 3137 bar: các ngày bị E.1 chặn đến
+thành 456 chuỗi liên tiếp, chuỗi **dài nhất 6 ngày**, p95 = 3 ngày, trung
+vị 1 ngày. Ba chuỗi 6 ngày đều rơi vào đợt sập lớn (2021-01-10,
+2020-03-12, 2019-06-25) — cổng chặn đúng lúc, không chặn ngẫu nhiên.
+
+Vì chuỗi dài nhất là 6 ngày (dưới ngưỡng cân nhắc 14), **KHÔNG có lối
+thoát ghi đè** cho E.1. Cần can thiệp gấp trong lúc bị chặn thì đó là sự
+cố, không phải deploy — dùng `scripts/emergency_kill.py`. Nếu sau này phép
+đo cho chuỗi > 14 ngày,
+`tests/test_deploy_conditions.py::test_chuoi_chan_lien_tiep_dai_nhat_la_6_ngay`
+sẽ đỏ và yêu cầu dựng lối thoát CÓ KIỂM SOÁT — người vận hành sẽ tự chế ra
+một cái lúc 2 giờ sáng nếu không có.
+
+### Cổng DEPLOY khác cổng MERGE
+
+```bash
+python ops/readiness_gate.py --base origin/main                 # MERGE (CI dùng)
+python ops/readiness_gate.py --base origin/main --scope deploy  # DEPLOY
+```
+
+`--scope deploy` cộng thêm mọi **mục nghiệm thu chưa xác nhận được** và ĐỎ
+nếu còn mục nào. Hiện có 1: Phase 12c #4 (shadow 24h thật) — chờ testnet
+Binance hoạt động lại. Tách hai cổng là có chủ ý: gộp lại sẽ làm CI đỏ vì
+một lý do không liên quan tới diff đang xét, và một CI đỏ vì lý do không
+liên quan sẽ bị bỏ qua.
+
 ---
 
 ## Kiểm tra nhanh (không có sự cố cụ thể)

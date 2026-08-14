@@ -828,8 +828,9 @@ loop phụ thuộc ngược vào `forward/` — dù chỉ một hàm thuần 4 d
 phá vỡ tính đối xứng của ranh giới đó. Trùng lặp rẻ hơn.
 
 **Xác nhận bằng chạy thật, không chỉ unit test** (dù testnet bị chặn ở
-tầng tài khoản GitHub, xem mục "Testnet đang bị chặn" — `exchange_reachable`
-KHÔNG bị chặn, chỉ các endpoint cần key mới bị):
+tầng tài khoản BINANCE — `-2015`; xem mục sửa attribution 2026-08-14 ở
+cuối file. `exchange_reachable` KHÔNG bị chặn, chỉ các endpoint cần key
+mới bị):
 - `python main.py --dry-run` chạy thật tới `testnet.binance.vision`:
   `exchange_reachable` OK 178ms, `InstrumentRules(BTCUSDT)` đúng, vào tới
   bước train HMM thật (dừng có chủ đích, train đầy đủ tốn nhiều phút).
@@ -2565,3 +2566,64 @@ halt lock). Trộn nó vào:
 "không deploy tối Thứ Sáu" — luật của thị trường có giờ đóng cửa, tồn tại
 vì cuối tuần không ai trực. `deploy_conditions.py` in câu hỏi đó ở MỌI lần
 chạy, kể cả khi mọi điều kiện khác đều ĐẠT: đó là lúc dễ bỏ qua nhất.
+
+
+## SỬA ATTRIBUTION: testnet bị chặn ở tầng BINANCE, không phải GitHub (2026-08-14)
+
+`docs/STATE.md` và mục Phase 10 của file này từng ghi *"testnet chặn ở
+tầng tài khoản GitHub"*. **Sai.**
+
+| | Thực tế |
+|---|---|
+| **Chặn testnet** | Tầng tài khoản **Binance** — lỗi `-2015` trên endpoint cần API key. `exchange_reachable` (endpoint công khai) vẫn OK 155–178ms. |
+| **Chặn GitHub** | GitHub chặn OAuth sang `testnet.binance.vision`. **Chuyện KHÁC**, đã xử lý xong bằng tài khoản `peach3tiger`. |
+
+Hai sự cố khác nhau, ở hai lớp khác nhau, xảy ra gần nhau về thời gian và
+bị gộp làm một trong ghi chép.
+
+**Vì sao đáng sửa dù cả hai đều "đang bị chặn":** ghi sai nguyên nhân thì
+ba tháng nữa có người đi sửa nhầm lớp — kiểm tra quyền GitHub, đổi token
+OAuth, xem lại workflow — trong khi thứ cần làm là xử lý tài khoản
+Binance. Đây đúng là điều `docs/STATE.md` đã tự dặn ("xác định ĐÚNG lớp bị
+chặn trước khi debug"), và bản ghi chép vi phạm chính lời dặn đó.
+
+Commit `f838cc0` ("docs/STATE.md: ghi nhận testnet bị chặn ở tầng tài
+khoản GitHub") mang tên sai. Không viết lại lịch sử đã push; ghi ở đây để
+ai đọc log không bị dẫn sai.
+
+
+## Chuỗi chặn deploy liên tiếp — đo HỆ QUẢ VẬN HÀNH, không chỉ phân phối (2026-08-14)
+
+"20% số ngày bị chặn" chưa trả lời được câu hỏi thật: **cổng này có sống
+được không?** Biến động có tính CỤM, nên 627 ngày bị chặn đến thành chuỗi
+chứ không rải đều. Một cổng chặn 30 ngày liền sẽ bị bỏ qua ngay lần đầu nó
+chặn một bản vá cần gấp — và cổng đã bị bỏ qua một lần thì không còn là
+cổng.
+
+Nhóm ngày bị chặn (`|log return| > p80 = 3.561%`) thành chuỗi liên tiếp
+trên 3137 bar:
+
+| | |
+|---|---|
+| số chuỗi | 456 |
+| dài nhất | **6 ngày** |
+| p95 | 3 ngày |
+| trung vị | 1 ngày |
+| trung bình | 1.38 ngày |
+
+Phân bố độ dài: 1 ngày × 335, 2 × 90, 3 × 22, 4 × 3, 5 × 2, 6 × 4.
+
+**Ba chuỗi dài nhất, đều 6 ngày:** 2021-01-10, 2020-03-12, 2019-06-25 —
+tức là các đợt sập lớn đã biết. Cổng chặn ĐÚNG LÚC chứ không chặn ngẫu
+nhiên.
+
+### Kết luận: KHÔNG cần lối thoát ghi đè
+
+Ngưỡng cân nhắc là **14 ngày**. Chuỗi dài nhất đo được là 6, nên chờ tối
+đa một tuần — chấp nhận được cho một bản vá không phải sự cố đang cháy, và
+sự cố đang cháy thì dùng `scripts/emergency_kill.py` chứ không deploy.
+
+`tests/test_deploy_conditions.py::test_chuoi_chan_lien_tiep_dai_nhat_la_6_ngay`
+ghim con số này VÀ ghim luôn quyết định: nếu fixture đổi và chuỗi dài nhất
+vượt 14, test đỏ kèm thông điệp yêu cầu dựng lối thoát có kiểm soát —
+người vận hành sẽ tự chế ra một cái lúc 2 giờ sáng nếu không có.

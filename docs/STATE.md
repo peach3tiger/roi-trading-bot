@@ -42,10 +42,17 @@ alert), `health.json`, `drift.json`, `heartbeat.json`, `watchdog_kill.json`.
 
 ## Bị chặn
 
-**Testnet chặn ở tầng tài khoản GitHub** — không phải lỗi Binance, không
-phải lỗi code (`exchange_reachable` OK, 155–178ms). Khi bị chặn, xác định
-ĐÚNG lớp bị chặn trước khi debug; đừng sửa `CCXTClient`/`health_check`/
-`main.py` cho việc này.
+**Testnet chặn ở tầng tài khoản BINANCE** — lỗi `-2015` trên các endpoint
+cần API key. KHÔNG phải lỗi code: `exchange_reachable` (endpoint công
+khai) vẫn OK 155–178ms, chỉ endpoint đã ký mới bị từ chối.
+
+> **Sửa attribution 2026-08-14.** Trước đó file này ghi "chặn ở tầng tài
+> khoản GitHub" — SAI. GitHub từng chặn OAuth sang `testnet.binance.vision`,
+> đó là chuyện KHÁC và đã xử lý xong bằng tài khoản `peach3tiger`. Ghi sai
+> nguyên nhân thì ba tháng nữa có người đi sửa nhầm lớp.
+
+Khi bị chặn, xác định ĐÚNG lớp bị chặn trước khi debug; đừng sửa
+`CCXTClient`/`health_check`/`main.py` cho việc này.
 
 Chặn các nghiệm thu cần mạng thật: `CCXTClient` submit/cancel/idempotency,
 kill+restart thật, `--dry-run` 24h, dashboard/Telegram thật.

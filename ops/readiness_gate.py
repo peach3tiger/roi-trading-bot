@@ -60,10 +60,66 @@ GATED_PREFIXES: tuple[str, ...] = ("core/", "backtest/")
 
 RECEIPT_PATH = _REPO_ROOT / ".slow_receipt.json"
 
+# ----------------------------------------------------------------------
+# Mục nghiệm thu CHƯA XÁC NHẬN ĐƯỢC — chặn DEPLOY, không chặn MERGE
+# ----------------------------------------------------------------------
+#
+# Một mục vắng mặt trông giống một mục đã qua. Nên mục nào chưa xác minh
+# được phải nằm ở đây, hiện trong báo cáo, và làm cổng DEPLOY đỏ.
+#
+# HAI CỔNG KHÁC NHAU, cố ý tách:
+#   --scope merge  (mặc định, CI dùng)  -> chỉ hỏi "diff này có được merge
+#                                          không" = §E, test chậm đã chạy
+#   --scope deploy                      -> hỏi "phiên bản này có được đưa
+#                                          lên production không" = mọi mục
+#                                          nghiệm thu, gồm cả mục dưới đây
+#
+# Gộp hai câu hỏi làm một sẽ làm CI đỏ vì một lý do KHÔNG liên quan tới
+# diff đang xét — và một CI đỏ vì lý do không liên quan sẽ bị bỏ qua.
+@dataclass(frozen=True)
+class UnverifiedItem:
+    phase: str
+    item: str
+    reason: str
+    unblock: str
+
+
+UNVERIFIED_ACCEPTANCE: tuple[UnverifiedItem, ...] = (
+    UnverifiedItem(
+        phase="12c",
+        item="#4 — chạy shadow 24h song song với --dry-run, shadow_diff khớp 100%",
+        reason=(
+            "Cần testnet THẬT chạy liên tục 24-48 giờ. Testnet đang bị chặn ở tầng "
+            "tài khoản BINANCE (-2015 trên endpoint cần API key); endpoint công khai "
+            "vẫn OK nên đây KHÔNG phải lỗi mạng hay lỗi code."
+        ),
+        unblock=(
+            "Khi tài khoản Binance testnet hoạt động lại: chạy `python -m ops.shadow_runner` "
+            "song song `python main.py --live-loop --dry-run` >= 24h, rồi "
+            "`python -m ops.shadow_diff` phải khớp 100% bốn trường chính VÀ đủ >= 24h bar "
+            "chung. Xoá mục này khỏi UNVERIFIED_ACCEPTANCE sau khi có kết quả."
+        ),
+    ),
+)
+
 # Phiên bản schema biên lai. Đổi cấu trúc mà giữ nguyên số này sẽ làm cổng
 # đọc một biên lai cũ theo cách mới và kết luận sai — an toàn hơn là coi
 # mọi biên lai khác phiên bản là KHÔNG có biên lai.
 RECEIPT_VERSION = 1
+
+
+def unverified_report() -> str:
+    if not UNVERIFIED_ACCEPTANCE:
+        return "Không còn mục nghiệm thu nào chưa xác nhận."
+    dong = [f"{len(UNVERIFIED_ACCEPTANCE)} MỤC NGHIỆM THU CHƯA XÁC NHẬN ĐƯỢC:", ""]
+    for m in UNVERIFIED_ACCEPTANCE:
+        dong += [
+            f"  [CHƯA XÁC NHẬN] Phase {m.phase} {m.item}",
+            f"      vì sao : {m.reason}",
+            f"      gỡ khi : {m.unblock}",
+            "",
+        ]
+    return "\n".join(dong)
 
 
 @dataclass(frozen=True)
@@ -244,10 +300,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default="origin/main",
         help="Mốc so sánh cho `git diff --name-only <base>..HEAD` (mặc định origin/main).",
     )
+    parser.add_argument(
+        "--scope",
+        choices=("merge", "deploy"),
+        default="merge",
+        help=(
+            "merge (mặc định, CI dùng): chỉ cổng §E test chậm. "
+            "deploy: cộng mọi mục nghiệm thu chưa xác nhận — dùng TRƯỚC KHI đưa lên production."
+        ),
+    )
     args = parser.parse_args(argv)
 
     result = check(args.base)
     print(result.report())
+
+    if args.scope == "merge":
+        # Vẫn IN ra các mục chưa xác nhận, kể cả ở scope merge: một mục
+        # vắng mặt trông giống một mục đã qua. Nhưng KHÔNG để nó quyết
+        # định mã thoát ở đây — nó không liên quan tới diff đang xét.
+        if UNVERIFIED_ACCEPTANCE:
+            print("\n" + "-" * 70)
+            print(unverified_report())
+            print("(scope=merge nên các mục trên KHÔNG ảnh hưởng mã thoát;")
+            print(" chạy `--scope deploy` trước khi đưa lên production.)")
+        return 0 if result.ok else 1
+
+    print("\n" + "=" * 70)
+    print(unverified_report())
+    if UNVERIFIED_ACCEPTANCE:
+        print("=" * 70)
+        print("CỔNG DEPLOY: ĐỎ — không được đưa phiên bản này lên production.")
+        return 1
     return 0 if result.ok else 1
 
 

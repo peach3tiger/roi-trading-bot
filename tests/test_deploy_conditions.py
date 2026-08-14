@@ -423,3 +423,72 @@ def test_claude_md_co_bat_bien_20() -> None:
 
     assert "20. Không bao giờ hai tiến trình cùng khả năng đặt lệnh" in noi_dung
     assert "vị thế nhân đôi" in noi_dung, "thiếu HẬU QUẢ — lý do bất biến này tồn tại"
+
+
+# ----------------------------------------------------------------------
+# HỆ QUẢ VẬN HÀNH: chuỗi chặn liên tiếp (CLAUDE.md #18)
+# ----------------------------------------------------------------------
+
+
+def _blocking_streaks() -> list[tuple[int, Any]]:
+    """Nhóm các ngày bị chặn thành chuỗi LIÊN TIẾP.
+
+    "20% số ngày bị chặn" chưa nói được cổng có sống được không: biến động
+    có tính CỤM, nên 627 ngày bị chặn đến thành chuỗi chứ không rải đều.
+    Một cổng chặn 30 ngày liền sẽ bị bỏ qua ngay lần đầu nó chặn một bản
+    vá cần gấp — và cổng đã bị bỏ qua một lần thì không còn là cổng.
+    """
+    import pandas as pd
+
+    bars = pd.read_parquet(_FIXTURE)
+    ls = vol_history(list(bars["close"]))
+    ngay = bars.index[1:]
+    nguong = sorted(ls)[int(len(ls) * 0.80)]
+
+    chuoi: list[tuple[int, Any]] = []
+    dau: int | None = None
+    for i, v in enumerate(ls):
+        if v > nguong:
+            if dau is None:
+                dau = i
+        elif dau is not None:
+            chuoi.append((i - dau, ngay[dau].date()))
+            dau = None
+    if dau is not None:
+        chuoi.append((len(ls) - dau, ngay[dau].date()))
+    return chuoi
+
+
+def test_chuoi_chan_lien_tiep_dai_nhat_la_6_ngay() -> None:
+    """ĐO ĐƯỢC 2026-08-14 trên 3137 bar: chuỗi dài nhất **6 ngày**, p95 =
+    3 ngày, trung vị 1 ngày, 456 chuỗi.
+
+    Ba chuỗi dài nhất đều 6 ngày: 2021-01-10, 2020-03-12, 2019-06-25 —
+    tức là các đợt sập lớn, đúng lúc KHÔNG nên deploy.
+
+    Ghim con số này vì nó quyết định một câu hỏi thiết kế: 6 ngày thì
+    KHÔNG cần lối thoát ghi đè trong RUNBOOK (ngưỡng cân nhắc là 14 ngày).
+    Nếu fixture đổi và chuỗi dài nhất vượt 14, test này đỏ và phải dựng
+    lối thoát có kiểm soát — vì người vận hành sẽ tự chế ra một cái lúc 2
+    giờ sáng nếu không có.
+    """
+    import numpy as np
+
+    chuoi = _blocking_streaks()
+    do_dai = np.array([c[0] for c in chuoi])
+
+    assert do_dai.max() == 6
+    assert do_dai.max() < 14, (
+        f"chuỗi chặn dài nhất {do_dai.max()} ngày >= 14 — PHẢI thêm lối thoát ghi đè "
+        "có kiểm soát vào ops/RUNBOOK.md (ai được ghi đè, để lại dấu vết gì)"
+    )
+    assert np.percentile(do_dai, 95) == 3
+    assert len(chuoi) == 456
+
+
+def test_ba_chuoi_dai_nhat_roi_vao_dot_sap_lon() -> None:
+    """Bằng chứng cổng chặn ĐÚNG LÚC chứ không chặn ngẫu nhiên: cả ba
+    chuỗi 6 ngày đều là đợt biến động lớn đã biết."""
+    ba = sorted(_blocking_streaks(), reverse=True)[:3]
+
+    assert [str(ngay) for _dai, ngay in ba] == ["2021-01-10", "2020-03-12", "2019-06-25"]

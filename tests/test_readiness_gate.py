@@ -416,3 +416,60 @@ def test_co_test_fail_thi_khong_cap_du_exitstatus_bao_thanh_cong() -> None:
     một mình `exitstatus` đã đủ làm nó đỏ.
     """
     assert not should_write_receipt(exitstatus=0, tests_failed=3, slow_tests=6)
+
+
+# ----------------------------------------------------------------------
+# Mục nghiệm thu CHƯA XÁC NHẬN — chặn DEPLOY, không chặn MERGE
+# ----------------------------------------------------------------------
+
+
+def test_muc_chua_xac_nhan_luon_hien_trong_bao_cao() -> None:
+    """"Một mục vắng mặt trông giống một mục đã qua." Nên mục chưa xác
+    minh được phải HIỆN, kể cả ở scope merge nơi nó không đổi mã thoát."""
+    from ops.readiness_gate import UNVERIFIED_ACCEPTANCE, unverified_report
+
+    ra = unverified_report()
+
+    for m in UNVERIFIED_ACCEPTANCE:
+        assert m.item in ra
+        assert m.reason in ra
+        assert m.unblock in ra, "thiếu ĐIỀU KIỆN GỠ — một mục chặn mãi mãi là một mục bị xoá"
+
+
+def test_scope_deploy_DO_khi_con_muc_chua_xac_nhan() -> None:
+    """Phase 12c mục #4 (shadow 24h thật) chưa xác nhận được vì testnet bị
+    chặn ở tầng tài khoản BINANCE. Cổng deploy PHẢI đỏ — bỏ qua nó là tự
+    cho phép deploy một phiên bản chưa kiểm đủ."""
+    import ops.readiness_gate as rg
+
+    assert rg.UNVERIFIED_ACCEPTANCE, "không còn mục nào -> test này mất ý nghĩa, xoá nó"
+    assert rg.main(["--base", "HEAD", "--scope", "deploy"]) == 1
+
+
+def test_scope_merge_KHONG_bi_anh_huong() -> None:
+    """Hai cổng khác nhau, cố ý tách. Gộp lại sẽ làm CI đỏ vì một lý do
+    KHÔNG liên quan tới diff đang xét — và một CI đỏ vì lý do không liên
+    quan sẽ bị bỏ qua, rồi cả cổng mất tác dụng."""
+    import ops.readiness_gate as rg
+
+    assert rg.main(["--base", "HEAD", "--scope", "merge"]) == 0
+
+
+def test_ly_do_chan_ghi_dung_TANG_bi_chan() -> None:
+    """Ghi sai nguyên nhân thì ba tháng nữa có người đi sửa nhầm lớp.
+    Testnet bị chặn ở tầng tài khoản BINANCE (-2015), KHÔNG phải GitHub —
+    GitHub chặn OAuth là chuyện khác và đã xử lý xong."""
+    from ops.readiness_gate import UNVERIFIED_ACCEPTANCE
+
+    ly_do = " ".join(m.reason for m in UNVERIFIED_ACCEPTANCE)
+
+    assert "BINANCE" in ly_do
+    assert "GitHub" not in ly_do
+
+
+def test_ci_dung_scope_merge() -> None:
+    """CI phải hỏi câu hỏi về MERGE. Nếu nó gọi `--scope deploy`, mọi PR
+    sẽ đỏ cho tới ngày testnet hoạt động lại."""
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "--scope deploy" not in ci

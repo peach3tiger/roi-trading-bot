@@ -202,7 +202,11 @@ Implement §E.1 và §E.2 thành hàm kiểm tra tự động; §E.3 là câu h�
 
 - [ ] `python -m ops.compare_versions --ref-a HEAD --ref-b HEAD` → khớp 100% (sanity: so với chính nó)
 - [ ] Sửa một hằng số trong `core/regime_strategies.py`, commit tạm → `compare_versions` FAIL và in đúng bar đầu tiên lệch. Revert sau khi thử.
-- [ ] `grep -rn "order_executor\|submit_order" ops/shadow_runner.py` → không có kết quả
+- [ ] `python config/validate.py` → `check_shadow_runner_no_executor` không báo lỗi (kiểm bằng **AST**)
+      *Sửa 2026-08-14: bản gốc dùng `grep -rn "order_executor|submit_order" ops/shadow_runner.py`.*
+      *Grep đó SAI — nó bắt nhầm docstring đang GIẢI THÍCH lệnh cấm, đúng tình huống §C.2 của*
+      *chính prompt này mô tả ("công cụ sai bắt code phải chiều nó"). Không viết lại docstring*
+      *cho vừa công cụ; đổi công cụ. Xem `tests/test_shadow.py::test_khong_co_duong_nao_toi_tang_dat_lenh`.*
 - [ ] Chạy shadow 24h song song với `--dry-run`, `shadow_diff` khớp 100% bốn trường chính
 - [ ] Grep một `trace_id` bất kỳ trong log → tái dựng đủ chuỗi 6 dòng từ `features` tới `rebalance`
 - [ ] `capped_by` xuất hiện đúng: dựng ca test mà trend gate là tầng giới hạn, và ca mà risk manager là tầng giới hạn
