@@ -130,6 +130,24 @@ def gated_source_digest(*, repo_root: Path = _REPO_ROOT) -> str:
     return h.hexdigest()
 
 
+def should_write_receipt(*, exitstatus: int, tests_failed: int, slow_tests: int) -> bool:
+    """Chính sách cấp biên lai, tách khỏi `tests/conftest.py`.
+
+    Ở trong conftest thì logic này KHÔNG test được: conftest là hạ tầng của
+    chính pytest, nên một `if` sai ở đó sống sót qua mọi phép đột biến —
+    đo được, và đã đo (2/11 đột biến lọt lưới ở bản đầu). Đưa ra đây để nó
+    nằm trong tầm với của test thường.
+
+    Ba điều kiện, tất cả đều cần:
+      - phiên CÓ chạy test `slow`; một phiên mặc định (`-m 'not slow'`)
+        không được phép sinh biên lai;
+      - `exitstatus == 0`;
+      - không test nào fail — một phiên slow ĐỎ mà vẫn cấp biên lai thì
+        cổng chỉ kiểm "đã chạy", không kiểm "đã qua".
+    """
+    return exitstatus == 0 and tests_failed == 0 and slow_tests > 0
+
+
 def write_receipt(
     *, repo_root: Path = _REPO_ROOT, path: Optional[Path] = None, slow_tests: int
 ) -> Path:

@@ -25,6 +25,7 @@ from ops.readiness_gate import (
     check,
     gated_source_digest,
     read_receipt,
+    should_write_receipt,
     slow_required,
     write_receipt,
 )
@@ -305,23 +306,56 @@ def test_report_in_ra_ten_file(repo: Path) -> None:
 _ROOT = Path(__file__).resolve().parent.parent
 
 
+def _ci_workflow() -> dict:
+    """PARSE YAML, không đọc file như chuỗi.
+
+    Bản đầu của các test này so chuỗi (`"fetch-depth: 0" in ci`) và một
+    đột biến đổi `fetch-depth: 0` thành `1` vẫn XANH — vì chuỗi đó cũng
+    nằm trong COMMENT giải thích ngay phía trên. Phép kiểm khớp tài liệu
+    chứ không khớp cấu hình. Đo được bằng đột biến, và đã đo.
+    """
+    import yaml
+
+    return yaml.safe_load((_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+
+
+def _slow_gate_steps() -> list[dict]:
+    return _ci_workflow()["jobs"]["slow-gate"]["steps"]
+
+
 def test_ci_dung_dung_bieu_thuc_grep() -> None:
     """CI và `GATED_PREFIXES` phải mô tả CÙNG một phạm vi. Hai nguồn sự
     thật cho một quy tắc sẽ lệch nhau, và bên lỏng hơn âm thầm quyết định
     mức bảo vệ thật."""
-    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lenh = " ".join(s.get("run", "") for s in _slow_gate_steps())
 
-    assert "^(core|backtest)/" in ci
-    assert "pytest -m slow" in ci
-    assert "ops/readiness_gate.py" in ci
+    assert "^(core|backtest)/" in lenh
+    assert "pytest -m slow" in lenh
+    assert "ops/readiness_gate.py" in lenh
 
 
 def test_ci_checkout_day_du_lich_su() -> None:
     """`git diff <base>..HEAD` cần `base` có trong repo. Một checkout nông
-    làm cổng hỏng theo kiểu "không kiểm được" — và job vẫn xanh."""
-    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    làm cổng hỏng theo kiểu "không kiểm được" — và job vẫn xanh.
 
-    assert "fetch-depth: 0" in ci
+    Đọc GIÁ TRỊ đã parse, không phải chuỗi trong file (xem `_ci_workflow`).
+    """
+    checkout = [s for s in _slow_gate_steps() if "checkout" in str(s.get("uses", ""))]
+
+    assert checkout, "job slow-gate không có bước checkout"
+    assert checkout[0]["with"]["fetch-depth"] == 0
+
+
+def test_ci_chay_slow_va_cong_khi_co_file_trong_pham_vi() -> None:
+    """Hai bước phải cùng ĐIỀU KIỆN `if`: chạy slow mà không chạy cổng thì
+    không ai kiểm kết quả; chạy cổng mà không chạy slow thì cổng chắc chắn
+    FAIL trên CI sạch (không có biên lai)."""
+    buoc = {s.get("name", ""): s for s in _slow_gate_steps()}
+    slow = next(s for n, s in buoc.items() if "pytest -m slow" in n)
+    cong = next(s for n, s in buoc.items() if n.startswith("Cổng §E"))
+
+    assert slow["if"] == cong["if"]
+    assert "!= '0'" in slow["if"]
 
 
 def test_readiness_gate_co_trong_tai_lieu() -> None:
@@ -329,3 +363,56 @@ def test_readiness_gate_co_trong_tai_lieu() -> None:
 
     assert "ops/readiness_gate.py" in doc
     assert "pytest -m slow" in doc
+
+
+# ----------------------------------------------------------------------
+# Chính sách cấp biên lai — tách khỏi conftest để test được
+# ----------------------------------------------------------------------
+
+
+def test_phien_slow_xanh_thi_cap_bien_lai() -> None:
+    assert should_write_receipt(exitstatus=0, tests_failed=0, slow_tests=6)
+
+
+def test_phien_slow_DO_thi_KHONG_cap_bien_lai() -> None:
+    """Cấp biên lai cho một phiên slow đỏ nghĩa là cổng chỉ kiểm "đã chạy",
+    không kiểm "đã qua" — tức là nó không kiểm gì cả."""
+    assert not should_write_receipt(exitstatus=1, tests_failed=2, slow_tests=6)
+
+
+def test_exitstatus_khac_khong_thi_khong_cap_du_khong_test_nao_fail() -> None:
+    """Phiên bị ngắt giữa chừng (Ctrl-C, lỗi thu thập) có `testsfailed == 0`
+    nhưng `exitstatus != 0`. Chỉ kiểm `testsfailed` là bỏ lọt ca này."""
+    assert not should_write_receipt(exitstatus=2, tests_failed=0, slow_tests=6)
+
+
+def test_phien_mac_dinh_KHONG_cap_bien_lai() -> None:
+    """`pytest` trần (`-m 'not slow'`) chạy xong sạch sẽ, nhưng nó KHÔNG
+    chạy test chậm nào. Cấp biên lai ở đây làm cổng luôn PASS — biến nó
+    thành một hàm hằng."""
+    assert not should_write_receipt(exitstatus=0, tests_failed=0, slow_tests=0)
+
+
+def test_conftest_uy_quyen_chinh_sach_khong_tu_viet_lai() -> None:
+    """Chính sách phải nằm ở `readiness_gate.py` (test được), không ở
+    conftest (hạ tầng pytest — một `if` sai ở đó sống sót qua mọi đột biến;
+    đo được, và đã đo: 2 đột biến lọt lưới ở bản đầu)."""
+    src = (_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+
+    assert "should_write_receipt" in src
+    assert "exitstatus != 0" not in src, "conftest đang tự viết lại điều kiện thay vì uỷ quyền"
+
+
+def test_co_test_fail_thi_khong_cap_du_exitstatus_bao_thanh_cong() -> None:
+    """`exitstatus == 0` KÈM `tests_failed > 0` là trạng thái pytest thường
+    không tự sinh ra — hai điều kiện được kiểm RIÊNG vì chúng đến từ hai
+    nguồn khác nhau: `exitstatus` do pytest (và mọi plugin/hook có quyền
+    sửa nó) quyết định, `testsfailed` do bộ đếm phiên.
+
+    Test này khoá phần phòng thủ đó. Không có nó, bỏ `tests_failed == 0`
+    khỏi điều kiện vẫn xanh — đo được bằng đột biến, và đã đo: đó là đột
+    biến duy nhất sống sót ở vòng thứ hai, vì
+    `test_phien_slow_DO_thi_KHONG_cap_bien_lai` đặt CẢ HAI cờ cùng lúc nên
+    một mình `exitstatus` đã đủ làm nó đỏ.
+    """
+    assert not should_write_receipt(exitstatus=0, tests_failed=3, slow_tests=6)

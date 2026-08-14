@@ -66,22 +66,20 @@ def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
     tay một con dấu "tôi đã chạy rồi" — một lời khai không ai kiểm chứng
     thì không phải bằng chứng.
 
-    Ba điều kiện, tất cả đều cần:
-      - phiên này CÓ chạy test `slow` (`-m slow`); một phiên mặc định
-        (`-m 'not slow'`) không được phép sinh biên lai;
-      - `exitstatus == 0` — một phiên slow ĐỎ mà vẫn cấp biên lai thì cổng
-        chỉ kiểm "đã chạy", không kiểm "đã qua";
-      - không có test nào bị bỏ dở (`session.testsfailed == 0`).
+    Chính sách "khi nào được cấp biên lai" nằm ở
+    `ops/readiness_gate.py::should_write_receipt`, KHÔNG ở đây: conftest là
+    hạ tầng của chính pytest nên một `if` sai trong file này sống sót qua
+    mọi phép đột biến. Đo được, và đã đo — hai đột biến lọt lưới ở bản đầu.
+    File này chỉ còn phần không thể tách: đếm test `slow` từ `session`.
     """
-    if exitstatus != 0 or session.testsfailed:
-        return
+    from ops.readiness_gate import should_write_receipt, write_receipt
 
     slow_count = sum(
         1 for item in getattr(session, "items", []) if item.get_closest_marker("slow") is not None
     )
-    if slow_count == 0:
+    if not should_write_receipt(
+        exitstatus=exitstatus, tests_failed=session.testsfailed, slow_tests=slow_count
+    ):
         return
-
-    from ops.readiness_gate import write_receipt
 
     write_receipt(slow_tests=slow_count)
