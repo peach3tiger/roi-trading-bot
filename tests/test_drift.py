@@ -281,7 +281,7 @@ def test_warning_count_KHONG_bi_tat_boi_cua_so(
         baseline,
         baseline,
         DriftThresholds.from_settings(settings),
-        warning_counts=[10, 20, 30],
+        warning_counts=list(range(10, 10 + WARNING_TREND_LEN * 10, 10)),
         window_complete=False,
     )
 
@@ -302,12 +302,20 @@ def test_recent_window_cat_theo_SO_BAR(settings: dict[str, Any]) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_ba_lan_tang_lien_tiep_thi_dung() -> None:
-    assert monotonic_increasing_tail([5, 1, 2, 3])
+def test_du_so_lan_tang_lien_tiep_thi_dung() -> None:
+    """Dùng `WARNING_TREND_LEN` chứ không viết cứng số 3: giá trị đó được
+    HIỆU CHỈNH bằng đo (3 -> 4 ngày 2026-08-14, docs/DECISIONS.md "ĐO #2"),
+    và một test viết cứng sẽ biến mỗi lần hiệu chỉnh thành một lần sửa
+    test — tức là test đang ghim con số thay vì ghim HÀNH VI."""
+    du = [0] + list(range(1, WARNING_TREND_LEN + 1))
+
+    assert monotonic_increasing_tail(du)
 
 
-def test_hai_lan_tang_thi_chua_du() -> None:
-    assert not monotonic_increasing_tail([1, 2])
+def test_thieu_mot_lan_thi_chua_du() -> None:
+    thieu = list(range(1, WARNING_TREND_LEN))
+
+    assert not monotonic_increasing_tail(thieu)
 
 
 def test_bang_nhau_khong_phai_tang() -> None:
@@ -316,15 +324,18 @@ def test_bang_nhau_khong_phai_tang() -> None:
 
 
 def test_chi_xet_duoi_cuoi() -> None:
-    """Tăng rồi giảm rồi tăng lại: chỉ ba giá trị CUỐI mới tính."""
-    assert not monotonic_increasing_tail([1, 2, 3, 99, 4])
-    assert monotonic_increasing_tail([99, 1, 2, 3])
+    """Tăng rồi giảm rồi tăng lại: chỉ `WARNING_TREND_LEN` giá trị CUỐI
+    mới tính."""
+    tang = list(range(1, WARNING_TREND_LEN + 1))
+
+    assert not monotonic_increasing_tail([*tang, 99, 0])
+    assert monotonic_increasing_tail([99, *tang])
 
 
 def test_chua_du_du_lieu_thi_khong_bao() -> None:
     """"Chưa đủ bằng chứng" -> im lặng, KHÔNG phải "cứ cảnh báo cho chắc".
     Một cảnh báo phát khi chưa đủ bằng chứng dạy người đọc bỏ qua nó."""
-    assert not monotonic_increasing_tail([1, 2])
+    assert not monotonic_increasing_tail(list(range(1, WARNING_TREND_LEN)))
     assert not monotonic_increasing_tail([])
 
 
@@ -508,7 +519,6 @@ def test_so_chi_so_dung_sau_nhu_bang_C1(settings: dict[str, Any], baseline: Beha
     ket_qua = compare(baseline, baseline, DriftThresholds.from_settings(settings))
 
     assert len(ket_qua) == 6
-    assert WARNING_TREND_LEN == 3
 
 
 # ----------------------------------------------------------------------
@@ -646,3 +656,137 @@ def test_trend_gate_bang_nhau_KHONG_tinh_la_chan(settings: dict[str, Any]) -> No
     )
 
     assert measure(bars, edges=edges).trend_gate_block_pct == 50.0
+
+
+# ----------------------------------------------------------------------
+# Ngưỡng đã hiệu chỉnh bằng ĐO (CLAUDE.md #18) — ghim giá trị + tỷ lệ FP
+# ----------------------------------------------------------------------
+
+
+def test_warning_trend_len_da_hieu_chinh() -> None:
+    """3 -> 4 (docs/DECISIONS.md "ĐO #2"). Dưới giả thuyết không (iid),
+    P(L giá trị liên tiếp tăng đơn điệu) = 1/L!:
+
+        L=3 -> 1/6   -> 1 báo động giả mỗi  6.0 tuần
+        L=4 -> 1/24  -> 1 báo động giả mỗi 24.0 tuần
+
+    Forward test 12 tháng ~ 52 lần retrain: L=3 cho ~8.7 báo động giả
+    trong MỘT thí nghiệm, nhiều hơn số sự kiện thật nó quan sát được.
+    """
+    assert WARNING_TREND_LEN == 4
+
+
+def test_ty_le_bao_dong_gia_cua_warning_trend_khop_1_tren_L_giai_thua() -> None:
+    """Đo lại chính con số đã dùng để chọn ngưỡng, bằng mô phỏng.
+
+    Không tin bảng trong DECISIONS.md: nếu ai đó đổi
+    `monotonic_increasing_tail` thành "không ngặt" (`<=`), tỷ lệ báo động
+    giả nhảy vọt trong khi mọi test hành vi khác vẫn xanh.
+    """
+    import math
+
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    L = WARNING_TREND_LEN
+    x = rng.random((20_000, L))
+    ty_le = float(np.mean([monotonic_increasing_tail(list(hang)) for hang in x]))
+
+    assert ty_le == pytest.approx(1 / math.factorial(L), abs=0.01)
+
+
+def test_large_pnl_alert_pct_da_hieu_chinh() -> None:
+    """2.0 -> 2.93 = p90 của |daily drawdown| trên bar lỗ
+    (docs/DECISIONS.md "ĐO #1"). 2.0 nằm ở p82.4 và phát 32 lần/năm — gấp
+    3.5 lần chính circuit breaker mà nó cảnh báo trước."""
+    assert main_mod.load_settings()["monitoring"]["large_pnl_alert_pct"] == 2.93
+
+
+def test_large_pnl_van_som_hon_circuit_breaker() -> None:
+    """Bất biến của thiết kế, không phải của con số: cảnh báo "chú ý" phải
+    kích hoạt TRƯỚC khi breaker can thiệp vào allocation. Một lần hiệu
+    chỉnh đẩy nó vượt 3.85 sẽ làm nó vô dụng."""
+    cfg = main_mod.load_settings()
+
+    assert (
+        cfg["monitoring"]["large_pnl_alert_pct"]
+        < cfg["risk"]["circuit_breaker"]["daily_dd_reduce_pct"]
+    )
+
+
+def test_cua_so_allocation_dai_hon_cua_so_chung() -> None:
+    """365 vs 30 (docs/DECISIONS.md "ĐO #3"). Ở cửa sổ 30–182 bar, chỉ số
+    phân bố allocation KHÔNG phân biệt được bot hỏng hoàn toàn với hoạt
+    động bình thường — đo trực tiếp, không suy từ bề rộng dải."""
+    from monitoring.drift import ALLOCATION_WINDOW_DAYS
+
+    assert ALLOCATION_WINDOW_DAYS == 365
+    assert ALLOCATION_WINDOW_DAYS > WINDOW_DAYS
+
+
+def test_cua_so_365_bat_duoc_bot_ket_mot_ro(settings: dict[str, Any], baseline: Behaviour) -> None:
+    """SỨC PHÁT HIỆN — thứ mục DECISIONS đầu tiên đã bỏ sót không đo.
+
+    Một bot kẹt hoàn toàn ở rổ allocation thấp nhất là hỏng rõ ràng. Ở cửa
+    sổ 30 bar nó KHÔNG bị bắt (test dưới); ở 365 bar thì bị.
+    """
+    from dataclasses import replace
+
+    bands = load_baseline_bands(settings, baseline_dir=_BASELINE_DIR, window_days=365)
+    ket = replace(baseline, allocation_mix_pct=(100.0, 0.0, 0.0, 0.0))
+
+    assert _bao_dong(
+        compare(ket, baseline, DriftThresholds.from_settings(settings), bands=bands), "allocation"
+    )
+
+
+def test_cua_so_30_KHONG_bat_duoc_bot_ket_mot_ro(
+    settings: dict[str, Any], baseline: Behaviour, bands: Any
+) -> None:
+    """Mặt kia của phép đo, giữ làm bằng chứng: ở cửa sổ 30 bar cùng một
+    hỏng hóc KHÔNG bị bắt — vì "100 % số bar ở mức thấp nhất trong 30
+    ngày" đúng là chuyện thường của chiến lược này (một đoạn bear 30 ngày
+    cho hệt như vậy).
+
+    Đây là lý do cửa sổ phải dài, và là thứ khiến câu "chỉ số này bắt đầu
+    có nghĩa từ ~180 bar" trong bản DECISIONS đầu tiên là SAI.
+    """
+    from dataclasses import replace
+
+    ket = replace(baseline, allocation_mix_pct=(100.0, 0.0, 0.0, 0.0))
+
+    assert not _bao_dong(
+        compare(ket, baseline, DriftThresholds.from_settings(settings), bands=bands), "allocation"
+    )
+
+
+def test_cua_so_allocation_co_co_du_mau_RIENG(
+    settings: dict[str, Any], baseline: Behaviour
+) -> None:
+    """Dùng chung cờ "đủ mẫu" với năm chỉ số kia sẽ bật cảnh báo phân bố
+    allocation từ ngày thứ 30 — 335 ngày trước khi nó có đủ dữ liệu."""
+    from dataclasses import replace
+
+    lech = replace(baseline, allocation_mix_pct=(100.0, 0.0, 0.0, 0.0))
+
+    ket_qua = compare(
+        lech,
+        baseline,
+        DriftThresholds.from_settings(settings),
+        window_complete=True,  # 30 bar ĐÃ đủ cho năm chỉ số kia
+        allocation_window_complete=False,  # nhưng 365 bar thì chưa
+    )
+
+    assert not _bao_dong(ket_qua, "allocation")
+
+
+def test_run_dung_hai_cua_so(settings: dict[str, Any], tmp_path: Path) -> None:
+    payload = run(
+        settings,
+        bars=pd.read_csv(_BASELINE_DIR / "regime_history.csv"),
+        path=tmp_path / "drift.json",
+        baseline_dir=_BASELINE_DIR,
+    )
+
+    assert payload["window_days"] == WINDOW_DAYS
+    assert payload["allocation_window_days"] == 365

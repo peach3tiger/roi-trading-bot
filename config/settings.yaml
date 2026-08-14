@@ -144,7 +144,14 @@ monitoring:
   # allocation. CHỈ phát hiện chiều LỖ (đọc từ CircuitBreaker.check().daily_dd,
   # vốn chỉ đo drawdown) — chưa có theo dõi equity tăng bar-over-bar để phát
   # hiện P&L DƯƠNG lớn, xem docs/STATE.md mục Phase 11 cho khoảng trống này.
-  large_pnl_alert_pct: 2.0
+  # HIỆU CHỈNH BẰNG PHÂN VỊ 2026-08-14 (CLAUDE.md #18): 2.0 -> 2.93.
+  # 2.0 là số tròn đặt bằng trực giác; đo trên 1135 bar LỖ của
+  # tests/snapshots/phase7_baseline/equity_curve.csv thì nó nằm ở phân vị
+  # 82.4 và phát 32.0 lần/năm — gấp 3.5 lần chính circuit breaker mà nó
+  # cảnh báo trước (3.85, 9.2 lần/năm). 2.93 = p90 -> 18.2 lần/năm = 2.0x
+  # breaker: đủ dày để có ích, đủ thưa để mỗi lần phát còn nghĩa lý.
+  # Toàn bộ bảng phân vị ở docs/DECISIONS.md mục "ĐO #1".
+  large_pnl_alert_pct: 2.93
   # Lệch đồng hồ (monitoring/clock.py::measure_clock_drift(), hiệu chỉnh
   # round-trip — KHÔNG dùng công thức ngây thơ, xem docstring module đó).
   # 1000ms: cảnh báo (rate limit chung 15 phút như mọi AlertType khác).

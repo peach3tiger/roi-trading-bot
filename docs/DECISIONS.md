@@ -2025,8 +2025,12 @@ Bề rộng dải p1–p99 của phân bố allocation theo kích thước cửa
 ```
 
 Ba trong bốn rổ phủ trọn 0–100 % ở cửa sổ 30 bar: chỉ số này gần như
-KHÔNG mang thông tin ở kích thước cửa sổ mà §C.1 quy định. Nó bắt đầu có
-nghĩa từ khoảng 180 bar.
+KHÔNG mang thông tin ở kích thước cửa sổ mà §C.1 quy định.
+
+> **SỬA 2026-08-14:** câu gốc ở đây viết *"Nó bắt đầu có nghĩa từ khoảng
+> 180 bar."* — **SAI**, suy ra từ bề rộng dải chứ không đo trực tiếp. Đo
+> trực tiếp thì ở 182 bar chỉ số này vẫn KHÔNG phát hiện được một bot hỏng
+> hoàn toàn; mốc thật là 365 bar. Xem mục "ĐO #3" ở cuối file.
 
 ### Quyết định
 
@@ -2055,3 +2059,144 @@ trường hợp rất cực đoan. Đừng đọc "drift im lặng" thành "hàn
 baseline" — nó chỉ nghĩa là chưa có gì đủ cực đoan để phân biệt được với
 nhiễu. `tests/test_drift.py::test_dai_allocation_gan_nhu_phu_tron_o_cua_so_30_bar`
 giữ bằng chứng cho điều này và sẽ đỏ nếu ai đó lặng lẽ đổi cách tính dải.
+
+
+## Phân loại 8 ngưỡng còn lại chưa có bằng chứng phân phối (2026-08-14)
+
+Bổ sung cho bảng ở mục "Ngưỡng drift §C.1..." phía trên và cho `CLAUDE.md`
+#18. `CLAUDE.md` #18 liệt kê 8 ngưỡng trong `config/settings.yaml` và mã
+`monitoring/` vẫn là **số tròn chưa được chứng minh**. Không phải cả 8 đều
+cần đo — phân loại trước, rồi mới đo phần đáng đo.
+
+### Nhóm 1 — CÓ CĂN CỨ, chỉ thiếu ghi nguồn gốc
+
+| Ngưỡng | Giá trị | Căn cứ |
+|---|---|---|
+| `clock_drift_halt_ms` | 2500 | Nửa `recvWindow` mặc định 5000ms của Binance. Vượt quá nửa cửa sổ đó thì request ký bắt đầu bị từ chối `-1021`. **Ràng buộc của sàn, không phải phân phối** — không có gì để đo. |
+| `clock_drift_alert_ms` | 1000 | Cảnh báo sớm trước ngưỡng halt, cùng ràng buộc. |
+
+Việc phải làm: ghi nguồn gốc vào docstring/comment. Đã có trong
+`config/settings.yaml`; không cần đo.
+
+### Nhóm 2 — CẦN ĐO, nghi ngờ sai. Đã đo, xem ba mục dưới.
+
+`large_pnl_alert_pct` 2.0, `WARNING_TREND_LEN` 3, `WINDOW_DAYS` 30.
+
+### Nhóm 3 — CHƯA CÓ BASELINE, hoãn
+
+| Ngưỡng | Giá trị | Vì sao hoãn |
+|---|---|---|
+| `unfilled_order_degraded_seconds` | 300 | Cần phân phối thời gian chờ khớp của lệnh THẬT. Backtest không mô phỏng độ trễ khớp, nên không có dữ liệu để trượt cửa sổ. Đo sau khi testnet tích được vài chục lệnh. |
+
+### Nhóm 4 — LỰA CHỌN VẬN HÀNH, không có sự thật nền, giữ nguyên
+
+| Ngưỡng | Giá trị | Vì sao không đo được |
+|---|---|---|
+| `alert_rate_limit_seconds` | 900 | "Bao lâu thì một người chịu được một cảnh báo lặp lại" là sở thích, không phải tính chất của dữ liệu. |
+| `_DEFAULT_DEGRADED_AFTER` | 3 | Đánh đổi giữa nhạy và ồn của kênh gửi; phụ thuộc độ tin cậy hạ tầng cụ thể, không phải chuỗi giá. |
+
+---
+
+## ĐO #1 — `large_pnl_alert_pct` (2026-08-14)
+
+**Quy trình #18.** Nguồn: `tests/snapshots/phase7_baseline/equity_curve.csv`,
+2290 bar daily return. Chỉ lấy chiều LỖ (1135 bar) vì cảnh báo này đọc từ
+`CircuitBreaker.check().daily_dd`, vốn chỉ đo drawdown.
+
+**Phân phối |daily drawdown| trên bar lỗ:**
+
+| p50 | p70 | p80 | p85 | p90 | p95 | p97.5 | p99 |
+|---|---|---|---|---|---|---|---|
+| 0.695 | 1.230 | 1.799 | 2.261 | 2.931 | 3.884 | 4.914 | 6.351 |
+
+**Ngưỡng cũ 2.0% = phân vị 82.4** (dự đoán ban đầu là p60–70 — đo được là
+p82, tức là bảo thủ hơn dự đoán nhưng vẫn quá ồn).
+
+| Ngưỡng | Phân vị | Lần/năm | So với breaker (3.85, 9.2 lần/năm) |
+|---|---|---|---|
+| **2.00 (cũ)** | p82.4 | **32.0** | 3.5× |
+| 2.26 | p85 | 27.3 | 3.0× |
+| **2.93 (mới)** | **p90** | **18.2** | **2.0×** |
+| 3.36 | p92.5 | 13.7 | 1.5× |
+
+**Quyết định: 2.0 → 2.93 (p90).** Tiêu chí chọn: cảnh báo này là tín hiệu
+"chú ý" trước khi circuit breaker can thiệp thật, nên nó PHẢI phát thường
+hơn breaker — nhưng 3.5× là 2.7 lần/tháng, đủ để người ta ngừng đọc. 2.0×
+là tỷ lệ hợp lý cho một cảnh báo tiền đề: đủ dày để có ích, đủ thưa để
+mỗi lần phát còn nghĩa lý.
+
+**Báo động giả đo được: 32.0 → 18.2 lần/năm (−43%).**
+
+---
+
+## ĐO #2 — `WARNING_TREND_LEN` (2026-08-14)
+
+**Giả thuyết không:** `warning_count` giữa các lần retrain là iid (không
+có xu hướng). Dưới giả thuyết đó, xác suất `L` giá trị liên tiếp tăng đơn
+điệu ngặt là **1/L!** — mọi thứ tự của L giá trị liên tục đều đồng khả
+năng. Xác nhận bằng mô phỏng 200 000 chuỗi:
+
+| L | P(báo động mỗi lần kiểm) | Lý thuyết 1/L! | Retrain 7 ngày/lần → 1 báo động giả mỗi |
+|---|---|---|---|
+| **3 (cũ)** | 0.1666 | 1/6 | **6.0 tuần** |
+| **4 (mới)** | **0.0417** | 1/24 | **24 tuần (5.5 tháng)** |
+| 5 | 0.0084 | 1/120 | 119 tuần (27.5 tháng) |
+
+**Quyết định: 3 → 4.** Forward test 12 tháng ≈ 52 lần retrain. Ở L=3 điều
+đó là **~8.7 báo động giả trong một thí nghiệm** — nhiều hơn số sự kiện
+thật mà thí nghiệm có thể quan sát. Ở L=4 là ~2.2. L=5 (~0.4) thưa hơn
+nữa nhưng cần 5 lần retrain = 35 ngày mới kích hoạt được lần đầu, và bỏ
+lỡ một xu hướng thật kéo dài 4 lần.
+
+**Báo động giả đo được: 1 lần mỗi 6.0 tuần → 1 lần mỗi 24 tuần (−75%).**
+
+---
+
+## ĐO #3 — `WINDOW_DAYS` — và SỬA một kết luận sai của chính tôi (2026-08-14)
+
+Mục "Ngưỡng drift §C.1 quá chặt..." phía trên viết: *"Nó bắt đầu có nghĩa
+từ khoảng 180 bar."* **Câu đó SAI.** Suy ra từ bề rộng dải chứ không đo
+trực tiếp. Đo trực tiếp:
+
+**FP của ngưỡng §C.1 MỘT MÌNH (không dải), trượt qua chính baseline:**
+
+| W (bar) | 30 | 60 | 90 | 120 | 182 | 270 | 365 |
+|---|---|---|---|---|---|---|---|
+| FP | 99.7% | 98.4% | 96.3% | 95.0% | **91.9%** | 84.2% | **79.0%** |
+
+**Kéo dài cửa sổ KHÔNG cứu được ngưỡng.** Ngay cả một năm tròn vẫn 79%.
+Thứ cứu được là **dải phân vị**, không phải kích thước cửa sổ — đúng như
+mục trước đã kết luận, nhưng lý do thì tôi đã ghi sai.
+
+**Đo tiếp SỨC PHÁT HIỆN (ngưỡng + dải), thứ mục trước chưa hề đo:**
+
+| W | FP | Bot kẹt hoàn toàn ở 1 rổ | Lệch 25 điểm % |
+|---|---|---|---|
+| 30 | 1.02% | **KHÔNG BẮT** | KHÔNG BẮT |
+| 60 | 2.37% | **KHÔNG BẮT** | KHÔNG BẮT |
+| 90 | 2.45% | **KHÔNG BẮT** | KHÔNG BẮT |
+| 182 | 2.13% | **KHÔNG BẮT** | KHÔNG BẮT |
+| 365 | 3.22% | **BẮT** | **BẮT** |
+
+Ở cửa sổ 30–182 bar, chỉ số phân bố allocation **không phân biệt được một
+bot hỏng hoàn toàn với hoạt động bình thường**. Đó không phải lỗi cài đặt:
+"100% số bar ở mức allocation thấp nhất trong 30 ngày" là chuyện BÌNH
+THƯỜNG của chiến lược này (một đoạn bear 30 ngày cho đúng như vậy). Ở cửa
+sổ 365 bar thì không còn bình thường nữa, nên nó bắt được.
+
+**Quyết định: cửa sổ theo TỪNG CHỈ SỐ, không phải một con số chung.**
+
+- `WINDOW_DAYS = 30` — GIỮ NGUYÊN cho flicker, phí, rebalance, trend gate.
+  Đây là các chỉ số phản ứng nhanh và cửa sổ dài chỉ làm chậm phát hiện.
+- `ALLOCATION_WINDOW_DAYS = 365` — MỚI, chỉ cho phân bố allocation. Đây là
+  kích thước cửa sổ NHỎ NHẤT đo được có sức phát hiện khác 0.
+
+**Báo động giả đo được cho phân bố allocation: 99.7% (ngưỡng đơn thuần,
+W=30) → 3.22% (ngưỡng + dải, W=365), và từ KHÔNG PHÁT HIỆN ĐƯỢC GÌ sang
+bắt được cả hỏng toàn phần lẫn lệch 25 điểm.**
+
+Đánh đổi phải biết: chỉ số này giờ phản ứng trong một năm, không phải một
+tháng. Đó là giới hạn THẬT của đại lượng được đo, không phải lựa chọn cấu
+hình — một cửa sổ ngắn hơn không cho phát hiện sớm hơn, nó cho *không phát
+hiện gì cả*. Forward test bắt đầu 2026-08-06 nên chỉ số này chỉ có dữ liệu
+đầy đủ từ 2027-08-06, trùng mốc 12 tháng.

@@ -54,7 +54,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -67,14 +67,48 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_BASELINE_DIR = _REPO_ROOT / "tests" / "snapshots" / "phase7_baseline"
 _DEFAULT_STATE_DIR = "state"
 
-# Cửa sổ trượt §C.1. Bar 1D nên 30 ngày = 30 bar.
+# Cửa sổ trượt §C.1. Bar 1D nên 30 ngày = 30 bar. Dùng cho flicker, phí,
+# rebalance, trend gate — các chỉ số phản ứng nhanh, cửa sổ dài chỉ làm
+# chậm phát hiện.
 WINDOW_DAYS = 30
 
+# Phân bố allocation dùng cửa sổ RIÊNG, dài hơn 12 lần. ĐO ĐƯỢC, không
+# phải chọn cho đẹp (CLAUDE.md #18, docs/DECISIONS.md mục "ĐO #3"):
+#
+#   W (bar)   FP    bot kẹt hoàn toàn ở 1 rổ   lệch 25 điểm %
+#      30    1.02%       KHÔNG BẮT               KHÔNG BẮT
+#      90    2.45%       KHÔNG BẮT               KHÔNG BẮT
+#     182    2.13%       KHÔNG BẮT               KHÔNG BẮT
+#     365    3.22%          BẮT                     BẮT
+#
+# Ở cửa sổ 30–182 bar chỉ số này KHÔNG phân biệt được một bot hỏng hoàn
+# toàn với hoạt động bình thường — "100% số bar ở mức thấp nhất trong 30
+# ngày" đúng là chuyện thường của chiến lược này (một đoạn bear 30 ngày
+# cho hệt như vậy). 365 là kích thước NHỎ NHẤT đo được có sức phát hiện
+# khác 0.
+#
+# Đánh đổi phải biết: chỉ số này phản ứng trong một NĂM. Đó là giới hạn
+# thật của đại lượng, không phải lựa chọn cấu hình — cửa sổ ngắn hơn không
+# cho phát hiện sớm hơn, nó cho KHÔNG PHÁT HIỆN GÌ CẢ.
+ALLOCATION_WINDOW_DAYS = 365
+
 # Số lần train liên tiếp phải TĂNG ĐƠN ĐIỆU mới kích hoạt cảnh báo
-# `warning_count`. 3 chứ không phải 2: hai lần tăng liên tiếp xảy ra
-# thường xuyên do ngẫu nhiên trong khởi tạo EM, và một chỉ báo lúc nào
-# cũng đỏ thì không ai đọc.
-WARNING_TREND_LEN = 3
+# `warning_count`.
+#
+# HIỆU CHỈNH 2026-08-14: 3 -> 4 (CLAUDE.md #18). Dưới giả thuyết không
+# (`warning_count` iid, không xu hướng), xác suất L giá trị liên tiếp tăng
+# đơn điệu ngặt là 1/L! — mọi thứ tự của L giá trị liên tục đều đồng khả
+# năng. Xác nhận bằng mô phỏng 200 000 chuỗi:
+#
+#   L=3 -> 1/6   -> retrain 7 ngày/lần = 1 báo động giả mỗi  6.0 tuần
+#   L=4 -> 1/24  ->                      1 báo động giả mỗi 24.0 tuần
+#   L=5 -> 1/120 ->                      1 báo động giả mỗi  119 tuần
+#
+# Forward test 12 tháng ~ 52 lần retrain: L=3 cho ~8.7 báo động giả TRONG
+# MỘT THÍ NGHIỆM — nhiều hơn số sự kiện thật nó có thể quan sát. L=4 cho
+# ~2.2. L=5 thưa hơn nhưng cần 35 ngày mới kích hoạt được lần đầu và bỏ
+# lỡ xu hướng thật dài đúng 4 lần.
+WARNING_TREND_LEN = 4
 
 
 def default_drift_path() -> Path:
@@ -428,6 +462,8 @@ def compare(
     warning_counts: Sequence[float] = (),
     window_complete: bool = True,
     bands: Optional[Bands] = None,
+    allocation_window_complete: Optional[bool] = None,
+    allocation_window_note: str = "",
 ) -> list[MetricResult]:
     """Sáu chỉ số §C.1, theo đúng thứ tự bảng trong prompt.
 
@@ -451,18 +487,23 @@ def compare(
     results: list[MetricResult] = []
     thieu_mau = f" (cửa sổ {current.n_bars}/{WINDOW_DAYS} bar — chưa đủ mẫu)"
     hau_to = "" if window_complete else thieu_mau
+    # Phân bố allocation đo trên cửa sổ RIÊNG (365 bar), nên nó có cờ "đủ
+    # mẫu" riêng — dùng chung cờ với năm chỉ số kia sẽ bật cảnh báo cho nó
+    # từ ngày thứ 30, tức 335 ngày trước khi nó có đủ dữ liệu.
+    alloc_du_mau = window_complete if allocation_window_complete is None else allocation_window_complete
+    alloc_hau_to = "" if alloc_du_mau else (allocation_window_note or thieu_mau)
 
     lech_alloc = [abs(c - b) for c, b in zip(current.allocation_mix_pct, baseline.allocation_mix_pct)]
     results.append(
         MetricResult(
             name="Phân bố allocation (4 mức)",
-            current=_fmt_mix(current.allocation_mix_pct) + hau_to,
+            current=_fmt_mix(current.allocation_mix_pct) + alloc_hau_to,
             baseline=_fmt_mix(baseline.allocation_mix_pct),
             # BẤT KỲ mức nào lệch quá ngưỡng, không phải tổng hay trung
             # bình: một mức tăng 16 điểm và một mức giảm 16 điểm sẽ triệt
             # tiêu nhau ở tổng, trong khi đó chính là thay đổi hành vi.
             alert=(
-                window_complete
+                alloc_du_mau
                 and max(lech_alloc, default=0.0) > thresholds.allocation_pts
                 # VÀ nằm ngoài dải bình thường của cửa sổ cùng kích thước.
                 # Xem docstring `Bands`: thiếu điều kiện này, 99.0% cửa sổ
@@ -606,15 +647,27 @@ def run(
     rebalance_rate_pct: Optional[float] = None,
     fee_pct_of_gross: Optional[float] = None,
     window_days: int = WINDOW_DAYS,
+    allocation_window_days: Optional[int] = None,
 ) -> dict[str, Any]:
     """Đo cửa sổ hiện tại, so với baseline, ghi `drift.json`, trả payload.
 
     `bars=None` -> đọc log forward (chỉ đọc). Truyền tường minh khi muốn đo
     một tập bar khác — đó là cách `tests/` kiểm sanity "baseline so với
     chính nó không được cảnh báo gì".
+
+    HAI cửa sổ: `window_days` (30) cho năm chỉ số phản ứng nhanh, và
+    `allocation_window_days` (365) cho phân bố allocation. Xem
+    `ALLOCATION_WINDOW_DAYS` — ở cửa sổ ngắn chỉ số đó không phân biệt
+    được bot hỏng hoàn toàn với hoạt động bình thường.
+
+    Truyền `allocation_window_days=window_days` để ép hai cửa sổ bằng nhau
+    (test sanity "baseline so với chính nó" cần điều đó).
     """
+    alloc_w = ALLOCATION_WINDOW_DAYS if allocation_window_days is None else allocation_window_days
     baseline = load_baseline(settings, baseline_dir=baseline_dir)
-    bands = load_baseline_bands(settings, baseline_dir=baseline_dir, window_days=window_days)
+    # Dải cho phân bố allocation phải đo trên CÙNG kích thước cửa sổ với
+    # thứ nó sẽ so — đó là toàn bộ lý do `Bands` tồn tại.
+    bands = load_baseline_bands(settings, baseline_dir=baseline_dir, window_days=alloc_w)
     forward_bars = bars if bars is not None else _load_forward_bars()
 
     if forward_bars is None or forward_bars.empty:
@@ -627,13 +680,22 @@ def run(
             trend_gate_block_pct=0.0,
         )
         warning_counts: list[float] = []
+        n_bar_alloc = 0
     else:
-        cua_so = recent_window(forward_bars, window_days=window_days)
+        edges = allocation_bin_edges(nominal_allocation_levels(settings))
         current = measure(
-            cua_so,
-            edges=allocation_bin_edges(nominal_allocation_levels(settings)),
+            recent_window(forward_bars, window_days=window_days),
+            edges=edges,
             rebalance_rate_pct=rebalance_rate_pct,
             fee_pct_of_gross=fee_pct_of_gross,
+        )
+        # Phân bố allocation đo LẠI trên cửa sổ dài của riêng nó, rồi ghi
+        # đè vào `current` — năm chỉ số kia giữ nguyên cửa sổ ngắn.
+        cua_so_alloc = recent_window(forward_bars, window_days=alloc_w)
+        n_bar_alloc = len(cua_so_alloc)
+        current = replace(
+            current,
+            allocation_mix_pct=measure(cua_so_alloc, edges=edges).allocation_mix_pct,
         )
         # Xu hướng `warning_count` đọc trên TOÀN BỘ lịch sử, không cắt cửa
         # sổ 30 ngày: retrain 7 ngày một lần nên 30 ngày chỉ chứa ~4 lần —
@@ -648,8 +710,11 @@ def run(
         warning_counts=warning_counts,
         window_complete=current.n_bars >= window_days,
         bands=bands,
+        allocation_window_complete=n_bar_alloc >= alloc_w,
+        allocation_window_note=f" (cửa sổ {n_bar_alloc}/{alloc_w} bar — chưa đủ mẫu)",
     )
     payload = build_payload(metrics, window_days=window_days)
+    payload["allocation_window_days"] = alloc_w
     write_drift(payload, path)
     return payload
 
