@@ -790,3 +790,114 @@ def test_run_dung_hai_cua_so(settings: dict[str, Any], tmp_path: Path) -> None:
 
     assert payload["window_days"] == WINDOW_DAYS
     assert payload["allocation_window_days"] == 365
+
+
+# ----------------------------------------------------------------------
+# HỆ QUẢ VẬN HÀNH của WINDOW_DAYS (CLAUDE.md #18 — đo cả CHUỖI, không chỉ
+# TỶ LỆ)
+# ----------------------------------------------------------------------
+
+
+def _drift_alert_streaks(settings: dict[str, Any], window: int) -> list[int]:
+    """Độ dài các chuỗi cửa sổ LIÊN TIẾP có ít nhất một cảnh báo drift."""
+    bands = load_baseline_bands(settings, baseline_dir=_BASELINE_DIR, window_days=window)
+    baseline = load_baseline(settings, baseline_dir=_BASELINE_DIR)
+    regime = normalize_bars(pd.read_csv(_BASELINE_DIR / "regime_history.csv"))
+    edges = allocation_bin_edges(nominal_allocation_levels(settings))
+    th = DriftThresholds.from_settings(settings)
+
+    co_bao: list[bool] = []
+    for i in range(window, len(regime) + 1):
+        cur = measure(regime.iloc[i - window : i], edges=edges)
+        co_bao.append(any(m.alert for m in compare(cur, baseline, th, bands=bands)))
+
+    chuoi: list[int] = []
+    dau: int | None = None
+    for i, c in enumerate(co_bao):
+        if c and dau is None:
+            dau = i
+        elif not c and dau is not None:
+            chuoi.append(i - dau)
+            dau = None
+    if dau is not None:
+        chuoi.append(len(co_bao) - dau)
+    return chuoi
+
+
+def test_window_30_kich_hoat_it_nhung_GOM_CUM_manh(settings: dict[str, Any]) -> None:
+    """ĐO ĐƯỢC 2026-08-15: W=30 kích hoạt 1.02% số cửa sổ, nhưng gom vào
+    ĐÚNG 2 chuỗi, dài nhất **20 cửa sổ liên tiếp** = 20 ngày cảnh báo liền.
+
+    "1.02%" nghe vô hại; "2 chuỗi, dài nhất 20" thì không. Đây là bước mà
+    `CLAUDE.md` #18 gọi là hệ quả vận hành, và nó là lý do §E.1 phải đo
+    chuỗi chặn deploy chứ không chỉ tỷ lệ.
+
+    VẪN GIỮ W=30 vì drift là cảnh báo QUAN SÁT, không phải cổng CHẶN — một
+    chuỗi 20 ngày nghĩa là hành vi thật sự lệch suốt 20 ngày, và đó chính
+    là thứ cần biết. Xem `docs/DECISIONS.md`.
+    """
+    chuoi = _drift_alert_streaks(settings, WINDOW_DAYS)
+
+    assert len(chuoi) == 2
+    assert max(chuoi) == 20
+
+
+def test_keo_dai_cua_so_khong_mua_duoc_gi(settings: dict[str, Any]) -> None:
+    """W=60 làm tỷ lệ kích hoạt TĂNG (1.02% -> 2.37%) mà chuỗi dài nhất
+    gần như không đổi. Ghim để không ai "sửa" bằng cách kéo dài cửa sổ."""
+    w30 = _drift_alert_streaks(settings, 30)
+    w60 = _drift_alert_streaks(settings, 60)
+
+    assert sum(w60) > sum(w30), "W=60 phải kích hoạt NHIỀU hơn, không ít hơn"
+    assert abs(max(w60) - max(w30)) <= 5, "chuỗi dài nhất gần như không đổi"
+
+
+def test_mot_dot_drift_dai_la_MOT_su_kien() -> None:
+    """Không có assertion về số — đây là ghi chú thực thi được.
+
+    `AlertManager` rate-limit theo LOẠI sự kiện, nên một đợt drift 20 ngày
+    KHÔNG thành 20 lần báo động dồn dập. Đọc `drift.json` đỏ ba tuần liền
+    mà tưởng ba tuần sự cố riêng biệt sẽ cho kết luận sai về tần suất.
+    """
+    import main as main_mod
+
+    assert main_mod.load_settings()["monitoring"]["alert_rate_limit_seconds"] > 0
+
+
+def test_warning_trend_len_4_chuoi_p95_la_3_lan() -> None:
+    """Hệ quả vận hành của `WARNING_TREND_LEN = 4`, đo bằng MÔ PHỎNG.
+
+    Nguồn là mô phỏng giả thuyết không, KHÔNG phải `forward/log_v2.csv`:
+    log forward hiện có 9 bar / 2 lần retrain — không đủ dựng phân phối,
+    và dùng nó sẽ cho một con số trông có thẩm quyền mà không có.
+
+    ĐO 2026-08-15 (20 000 chuỗi × 60 lần retrain):
+        L=3: kích hoạt 16.70%/lần kiểm, chuỗi p95 = 4
+        L=4: kích hoạt  4.14%/lần kiểm, chuỗi p95 = 3   <- đang dùng
+        L=5: kích hoạt  0.84%/lần kiểm, chuỗi p95 = 2
+
+    Retrain 7 ngày/lần nên p95 = 3 nghĩa là tối đa ~3 tuần cảnh báo lặp
+    trong trường hợp xấu điển hình. Test dùng ít mẫu hơn để chạy nhanh,
+    nên chỉ khẳng định THỨ TỰ — thứ không đổi theo cỡ mẫu.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n, t = 3000, 60
+
+    def _p95_chuoi(L: int) -> float:
+        x = rng.random((n, t))
+        dai_nhat = []
+        for hang in x:
+            ban = [bool(np.all(np.diff(hang[i - L + 1 : i + 1]) > 0)) for i in range(L - 1, t)]
+            cur = best = 0
+            for c in ban:
+                cur = cur + 1 if c else 0
+                best = max(best, cur)
+            dai_nhat.append(best)
+        return float(np.percentile(dai_nhat, 95))
+
+    p95_3, p95_4, p95_5 = _p95_chuoi(3), _p95_chuoi(4), _p95_chuoi(5)
+
+    assert p95_3 > p95_4 > p95_5, f"thứ tự sai: {p95_3}, {p95_4}, {p95_5}"
+    assert p95_4 <= 4, "chuỗi lặp của L=4 dài hơn dự kiến — đọc lại DECISIONS"

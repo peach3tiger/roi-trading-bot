@@ -262,21 +262,44 @@ Bước 1 là bước hay bị bỏ nhất và là bước quan trọng nhất: 
 bar với con số trung bình toàn kỳ là so hai thứ có phương sai khác nhau
 hàng chục lần, và mọi ngưỡng đặt trên phép so đó đều vô nghĩa.
 
-**Bằng chứng đã ghi trong `docs/DECISIONS.md`:**
+**Trạng thái MỌI ngưỡng trong hệ thống — 0 ngưỡng "chưa phân loại":**
 
-| Ngưỡng | Số tròn ban đầu | Sau khi đo | Ghi ở |
+*Đã ĐO bằng phân phối:*
+
+| Ngưỡng | Số tròn ban đầu | Sau khi đo | Tỷ lệ kích hoạt đo được |
 |---|---|---|---|
-| `circuit_breaker` daily/weekly reduce+halt | 4.0 / 6.0 / 10.0 / 14.0 | 3.85 / 6.34 / 9.48 / 13.72 (p2.5, p0.5) | "Phase 8 — hiệu chỉnh ngưỡng circuit breaker" |
-| Drift §C.1 (allocation 15 điểm %, trend gate 20 điểm %) | 15 / 10 / 20 | giữ ngưỡng, **thêm** dải p1–p99 vì FP đo được là **99.7%** | "Ngưỡng drift §C.1 quá chặt so với nhiễu cửa sổ 30 bar" |
+| `circuit_breaker` daily/weekly reduce+halt | 4.0 / 6.0 / 10.0 / 14.0 | 3.85 / 6.34 / 9.48 / 13.72 (p2.5, p0.5) | theo định nghĩa phân vị |
+| Drift §C.1 allocation / trend gate | 15 / 20 điểm % | giữ ngưỡng, **thêm** dải p1–p99 | 99.7% → **1.02%** |
+| `large_pnl_alert_pct` | 2.0 (= p82.4) | **2.93** (p90) | 32.0 → **18.2 lần/năm** |
+| `WARNING_TREND_LEN` | 3 (1/6) | **4** (1/24) | 16.7% → **4.14%**/lần kiểm |
+| `WINDOW_DAYS` drift | 30 cho mọi chỉ số | giữ 30, **thêm** `ALLOCATION_WINDOW_DAYS` = 365 | **1.02%** số cửa sổ |
+| §E.1 biến động deploy | — | **p80 = 3.561%** | **20.0%** số ngày |
 
-*Hai dòng trên là những lần đã ĐO và ghi lại. Còn một loạt ngưỡng khác
-trong `config/settings.yaml` vẫn là số tròn chưa có bằng chứng phân phối
-— `clock_drift_alert_ms` 1000, `clock_drift_halt_ms` 2500,
-`large_pnl_alert_pct` 2.0, `unfilled_order_degraded_seconds` 300,
-`alert_rate_limit_seconds` 900, `_DEFAULT_DEGRADED_AFTER` 3,
-`WARNING_TREND_LEN` 3, `WINDOW_DAYS` 30. Chúng chưa sai theo cách đo được,
-nhưng cũng chưa được chứng minh là đúng. Quy tắc này áp dụng cho ngưỡng
-MỚI; ngưỡng cũ nào được đụng tới thì phải đo lúc đó.*
+*Có CĂN CỨ từ ràng buộc bên ngoài, không có phân phối để đo:*
+
+| Ngưỡng | Căn cứ |
+|---|---|
+| `clock_drift_halt_ms` 2500 | nửa `recvWindow` 5000ms của Binance — vượt là bị từ chối `-1021` |
+| `clock_drift_alert_ms` 1000 | cảnh báo sớm trước ngưỡng halt, cùng ràng buộc |
+
+*HOÃN có lý do — chưa có baseline để dựng phân phối:*
+
+| Ngưỡng | Vì sao hoãn | Gỡ khi |
+|---|---|---|
+| `unfilled_order_degraded_seconds` 300 | backtest KHÔNG mô phỏng độ trễ khớp, nên không có gì để trượt cửa sổ | testnet tích đủ vài chục lệnh thật |
+
+*LỰA CHỌN VẬN HÀNH — không có sự thật nền để đo:*
+
+| Ngưỡng | Vì sao không đo được |
+|---|---|
+| `alert_rate_limit_seconds` 900 | "bao lâu thì một người chịu được cảnh báo lặp" là sở thích, không phải tính chất dữ liệu |
+| `_DEFAULT_DEGRADED_AFTER` 3 | đánh đổi nhạy/ồn của kênh gửi, phụ thuộc độ tin cậy hạ tầng cụ thể |
+
+**Đo TỶ LỆ chưa đủ — phải đo cả CHUỖI KÍCH HOẠT LIÊN TIẾP.** Một ngưỡng
+kích hoạt 1% nghe vô hại, nhưng nếu 1% đó gom vào hai chuỗi dài 20 lần
+liên tiếp thì người vận hành sẽ tắt cảnh báo. Đã đo cho ba ngưỡng có tính
+cụm: §E.1 (dài nhất 6 ngày), `WINDOW_DAYS` (dài nhất 20 cửa sổ),
+`WARNING_TREND_LEN` (p95 = 3 lần). Xem `docs/DECISIONS.md`.
 
 ### 19. Mọi khẳng định "sạch" phải kèm PHẠM VI đã kiểm
 

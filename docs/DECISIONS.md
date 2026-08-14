@@ -2867,3 +2867,67 @@ nếu không in ra chúng chạy Python nào. Tên job cũng mang `py${{ matrix.
 Đó là **lỗi thật đã tồn tại từ lâu**, không phải lỗi mới do matrix tạo ra
 — và nó nằm trên đúng interpreter đang chạy thí nghiệm. Sửa thật, KHÔNG
 loại 3.9 khỏi matrix cho xanh.
+
+
+## Chuỗi kích hoạt liên tiếp của `WARNING_TREND_LEN` và `WINDOW_DAYS` (2026-08-15)
+
+Bù nốt bước còn thiếu của `CLAUDE.md` #18: ba ngưỡng đã đo TỶ LỆ ở ĐO
+#1/#2/#3 (2026-08-14), nhưng **chưa đo HỆ QUẢ VẬN HÀNH** — tỷ lệ thấp mà
+gom cụm vẫn làm người vận hành tắt cảnh báo.
+
+### `WARNING_TREND_LEN`
+
+**Nguồn: mô phỏng giả thuyết không**, không phải `forward/log_v2.csv`.
+Log forward hiện có 9 bar / 2 lần retrain — không đủ dựng phân phối, và
+dùng nó sẽ cho một con số trông có thẩm quyền mà không có. Mô phỏng 20 000
+chuỗi × 60 lần retrain (~14 tháng):
+
+| L | Kích hoạt / lần kiểm | Chuỗi dài nhất (TB) | p95 | Tuyệt đối |
+|---|---|---|---|---|
+| 3 | 16.70% | 2.29 | 4 | 7 |
+| **4 (đang dùng)** | **4.14%** | **1.28** | **3** | 7 |
+| 5 | 0.84% | 0.41 | 2 | 5 |
+
+Retrain 7 ngày/lần, nên p95 = 3 nghĩa là **tối đa ~3 tuần** cảnh báo lặp
+trong trường hợp xấu điển hình. Chấp nhận được. Ở L=3 con số là 4 tuần với
+tần suất kích hoạt gấp 4 lần — thêm một lý do nữa cho việc đã đổi sang 4.
+
+### `WINDOW_DAYS` — tỷ lệ thấp nhưng GOM CỤM MẠNH
+
+Trượt cửa sổ qua baseline Phase 7, đếm cửa sổ có ít nhất một cảnh báo
+drift (ngưỡng §C.1 + dải p1–p99):
+
+| W | Kích hoạt | Số chuỗi | Chuỗi dài nhất | p95 |
+|---|---|---|---|---|
+| **30 (đang dùng)** | **1.02%** | **2** | **20** | 19 |
+| 60 | 2.37% | 6 | 17 | 17 |
+| 90 | 2.45% | 5 | 19 | 19 |
+
+**1.02% nghe vô hại; "2 chuỗi, dài nhất 20 cửa sổ" thì không.** Với bar
+1D, 20 cửa sổ liên tiếp = **20 ngày cảnh báo drift liền**.
+
+**Vẫn giữ W = 30. Ba lý do, theo thứ tự quan trọng:**
+
+1. **Drift là cảnh báo QUAN SÁT, không phải cổng CHẶN.** Khác §E.1 — nơi
+   một chuỗi dài chặn deploy và sẽ bị người ta đi vòng. Ở đây chuỗi dài
+   nghĩa là hành vi thật sự đã lệch suốt 20 ngày, và đó chính là thứ cần
+   biết.
+2. `AlertManager` đã rate-limit theo loại sự kiện
+   (`alert_rate_limit_seconds` = 900), nên 20 ngày KHÔNG thành 20 lần báo
+   động dồn dập.
+3. Kéo W lên 60/90 làm tỷ lệ kích hoạt TĂNG (1.02% → 2.37%) mà chuỗi dài
+   nhất gần như không đổi (20 → 17 → 19). Không mua được gì.
+
+**Điều PHẢI ghi lại để không đọc nhầm:** một đợt drift kéo 20 ngày là
+**MỘT sự kiện**, không phải 20 sự kiện. Đọc `drift.json` đỏ ba tuần liền
+mà tưởng là ba tuần sự cố riêng biệt sẽ dẫn tới kết luận sai về tần suất.
+
+### Kết quả: bảng phân loại còn 0 ngưỡng "chưa đo"
+
+`CLAUDE.md` #18 cập nhật thành bốn nhóm, mỗi ngưỡng thuộc đúng một nhóm:
+6 đã đo bằng phân phối, 2 có căn cứ từ ràng buộc sàn, 1 hoãn có lý do và
+điều kiện gỡ, 2 là lựa chọn vận hành không có sự thật nền.
+
+`unfilled_order_degraded_seconds` là mục HOÃN chứ không phải "chưa đo":
+backtest không mô phỏng độ trễ khớp nên không tồn tại phân phối để trượt
+cửa sổ. Gỡ khi testnet tích đủ vài chục lệnh thật.
