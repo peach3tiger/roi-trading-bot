@@ -222,6 +222,20 @@ sạch, `grep MUTANT` trên cây sạch, mọi test xanh — và logic giao dị
 5. **Kiểm `git log origin/<nhánh chính>` không chứa dấu vết đột biến** —
    không chỉ kiểm cây làm việc. Cây sạch không nói gì về thứ đã được đẩy
    đi.
+6. **Trong lúc chu trình đột biến đang chạy, KHÔNG ai được push.** Đây là
+   lỗi ĐIỀU PHỐI giữa hai tác nhân trên cùng một repo, không phải lỗi của
+   chu trình đột biến — chu trình làm đúng mọi bước nó được thiết kế để
+   làm, và không bước nào trong đó biết được có người khác đang gõ
+   `git push` ở cửa sổ bên cạnh.
+
+   Nếu cần hướng dẫn người dùng push, **kiểm `git log --oneline -3` tìm
+   commit tên `TẠM`/`MUTANT` TRƯỚC**. Nếu có, nói rõ đang ở giữa chu trình
+   đột biến và chờ.
+
+   Đã xảy ra 2026-08-14: `git push origin main` thủ công đẩy 3 commit
+   (`a488ccd…c7fb25b`) trong đó có commit đột biến, rơi vào cửa sổ đúng
+   MỘT PHÚT giữa lúc commit tạm tồn tại và `git reset --hard`. Xem
+   `docs/DECISIONS.md`.
 
 ### 17. Không bao giờ đọc exit code sau pipe
 

@@ -280,7 +280,10 @@ def run_pinned_backtest() -> Any:
     # FIXTURE ĐÃ COMMIT. `bar_offset_hours=0` của bản cũ trùng đúng mặc
     # định của `HistoryLoader` (đã kiểm bằng đo), nên fixture tái tạo
     # nguyên vẹn đầu vào baseline Phase 7.
-    ohlcv = load_fixture(_END)
+    # `start=_START` BẮT BUỘC — bản gốc gọi
+    # `HistoryLoader().load(..., _START, _END, bar_offset_hours=0)`, và
+    # fixture bắt đầu từ 2018-01-01 nên thiếu mốc này là dư 39 bar warmup.
+    ohlcv = load_fixture(_END, start=_START)
     backtester = WalkForwardBacktester(
         hmm_engine=main_mod.build_hmm_engine(settings, min_train_bars=_IS_BARS),
         strategy_orchestrator=main_mod.build_orchestrator(settings),

@@ -2,6 +2,20 @@
 minversion = "7.0"
 pythonpath = ["."]
 testpaths = ["tests"]
+# MẶC ĐỊNH của pytest là `test_*.py` — và `tests/regression_harness.py`
+# KHÔNG khớp, nên nó CHƯA TỪNG được thu thập kể từ khi được viết
+# (phát hiện 2026-08-14, xem docs/DECISIONS.md).
+#
+# Hệ quả: `pytest -m slow` — chính lệnh mà cổng §E
+# (`ops/readiness_gate.py`) bắt buộc chạy trước khi merge thay đổi chạm
+# `core/` — thu 8 test và KHÔNG có test hồi quy mạnh nhất trong số đó.
+# Cổng đã thi hành một lệnh không chứa thứ nó sinh ra để bảo vệ.
+#
+# Thêm pattern thay vì đổi tên file: tên `regression_harness.py` được
+# nhắc ở docs/, ops/verify_scope.py và nhiều chỗ khác; đổi tên là sửa một
+# tá chỗ để chiều một pattern, còn thêm pattern là nói đúng ý định.
+# `tests/test_collection_scope.py` ghim để lỗ này không mở lại.
+python_files = ["test_*.py", "regression_harness.py"]
 # `-m 'not slow'` MẶC ĐỊNH loại test chậm khỏi mọi lần chạy thường. Chạy
 # chúng bằng `pytest -m slow`.
 #

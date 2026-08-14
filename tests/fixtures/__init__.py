@@ -22,9 +22,23 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "btcusdt_1d_2018_2026.parquet"
 
 
 def load_fixture(
-    end: Optional[Union[str, datetime, pd.Timestamp]] = None, *, path: Optional[Path] = None
+    end: Optional[Union[str, datetime, pd.Timestamp]] = None,
+    *,
+    start: Optional[Union[str, datetime, pd.Timestamp]] = None,
+    path: Optional[Path] = None,
 ) -> pd.DataFrame:
-    """Đọc fixture, cắt tới `end` (bao gồm). KHÔNG gọi mạng.
+    """Đọc fixture, cắt về `[start, end]` (bao gồm hai đầu). KHÔNG gọi mạng.
+
+    `start` BẮT BUỘC với caller nào trước đây truyền mốc bắt đầu cho
+    `HistoryLoader().load(symbol, tf, start, end)`. Bỏ nó đi là đổi ĐẦU
+    VÀO chứ không phải đổi nguồn: fixture bắt đầu từ 2018-01-01, nên một
+    caller từng bắt đầu ở 2018-02-09 sẽ nhận thêm 39 bar warmup, z-score
+    đổi, HMM đổi, và MỌI chỉ số đổi theo.
+
+    Đã xảy ra 2026-08-14: `regression_harness.py` mất mốc `_START` khi
+    chuyển sang fixture — Sharpe 0.941 -> 1.078, n_trades 739 -> 822. Lỗi
+    ẩn được vì chính test đó chưa từng được thu thập (xem
+    `tests/test_collection_scope.py`).
 
     Thiếu file -> `AssertionError` kèm hướng dẫn, **TUYỆT ĐỐI KHÔNG
     `pytest.skip`**. Một test bị skip lặng lẽ chính là cách "878 passed"
@@ -39,6 +53,8 @@ def load_fixture(
             "KHÔNG skip — các test đọc file này là cổng chặn hồi quy."
         )
     bars = pd.read_parquet(target)
-    if end is None:
-        return bars
-    return bars.loc[bars.index <= pd.Timestamp(end)]
+    if start is not None:
+        bars = bars.loc[bars.index >= pd.Timestamp(start)]
+    if end is not None:
+        bars = bars.loc[bars.index <= pd.Timestamp(end)]
+    return bars

@@ -2627,3 +2627,113 @@ sự cố đang cháy thì dùng `scripts/emergency_kill.py` chứ không deploy
 ghim con số này VÀ ghim luôn quyết định: nếu fixture đổi và chuỗi dài nhất
 vượt 14, test đỏ kèm thông điệp yêu cầu dựng lối thoát có kiểm soát —
 người vận hành sẽ tự chế ra một cái lúc 2 giờ sáng nếu không có.
+
+
+## Commit đột biến lên `origin/main` — nguyên nhân thật + lỗ hổng nó lộ ra (2026-08-14)
+
+### Nguyên nhân: push thủ công của người dùng, KHÔNG phải "không xác định được"
+
+Bản ghi đầu của tôi trong commit `c7dbfca` viết *"tôi KHÔNG xác định được
+đường nào đã đẩy nó lên"*. Đã tìm ra. GitHub Activity:
+
+    "TẠM — đột biến nghiệm thu #2 — peach3tiger pushed 3 commits to main
+     a488ccd…c7fb25b"
+
+**Ba commit trong MỘT lần push, kết thúc ở `c7fb25b`.** Đó là lệnh
+`git push origin main` người dùng chạy thủ công trong Terminal, rơi đúng
+vào khoảng giữa chu trình đột biến — commit tạm đã tồn tại, `git reset
+--hard` chưa kịp chạy. Reflog của tôi cho thấy khoảng đó dài đúng **một
+phút** (commit 23:22:40, reset 23:23:55).
+
+Đây là **lỗi ĐIỀU PHỐI giữa hai tác nhân trên cùng một repo**, không phải
+lỗi của chu trình đột biến. Chu trình làm đúng mọi bước nó được thiết kế
+để làm: commit trước, chạy, reset, `grep MUTANT` xác nhận sạch. Không bước
+nào trong đó biết được có người khác đang gõ `git push` ở cửa sổ bên cạnh.
+
+### Lỗ hổng THẬT mà sự cố này lộ ra
+
+Câu hỏi tiếp theo là đúng câu cần hỏi: **CI có bắt được không?** Đo bằng
+cách chạy bộ test tại chính `c7fb25b`:
+
+| Phép kiểm | Chạy ở | Kết quả tại `_EMA_PERIOD = 40` |
+|---|---|---|
+| `test_forward_golden` | mặc định, <1s | **ĐỎ** |
+| `test_snapshot` | mặc định, ~11s | xanh — không bắt (đã biết từ 12b) |
+| `test_properties` | mặc định | xanh |
+| `test_wiring_equivalence` | mặc định | xanh |
+| `regression_harness` (gọi TƯỜNG MINH) | — | **ĐỎ** |
+| **`pytest -m slow`** | cổng §E | **XANH — 8 passed** |
+
+Dòng cuối là lỗ hổng. `pytest -m slow` chạy nhanh hơn (67s) so với gọi
+riêng harness (125s), và đó là dấu hiệu: **harness không hề chạy.**
+
+**`tests/regression_harness.py` CHƯA TỪNG được thu thập lần nào** kể từ khi
+được viết ở Phase 12b. Pattern mặc định của pytest là `python_files =
+test_*.py`; tên file không khớp.
+
+Hệ quả không phải "thiếu một test":
+
+- Cổng §E (`ops/readiness_gate.py`) **bắt buộc** chạy `pytest -m slow`
+  trước khi merge thay đổi chạm `core/`. Lệnh đó thu 8 test và **không có**
+  test hồi quy mạnh nhất. Cổng đã thi hành một lệnh không chứa thứ nó sinh
+  ra để bảo vệ.
+- CI job `slow-gate` cũng chạy `pytest -m slow -q` — cùng lỗ.
+- Mọi lần tôi "xác minh harness bắt được `_EMA_PERIOD`" đều gọi TƯỜNG MINH
+  `pytest tests/regression_harness.py`, và cách gọi đó bỏ qua pattern. Phép
+  xác minh đúng, nhưng nó xác minh một đường mà cổng không đi.
+
+Đây đúng chế độ hỏng `CLAUDE.md` #19: một công cụ báo "sạch" mà không nói
+nó đã nhìn vào đâu.
+
+### Sửa
+
+`pyproject.toml`: `python_files = ["test_*.py", "regression_harness.py"]`.
+Thêm pattern thay vì đổi tên file — tên `regression_harness.py` được nhắc
+ở `docs/`, `ops/verify_scope.py` và nhiều chỗ; đổi tên là sửa một tá chỗ
+để chiều một pattern.
+
+Đo lại tại `c7fb25b` SAU khi sửa: `pytest -m slow` → **1 failed, 8 passed**
+(`regression_harness::test_regression_vs_phase7_baseline`). Cổng §E giờ
+thật sự bắt được.
+
+### Lỗ hổng đó đã che một BUG THẬT tôi gây ra
+
+Ngay khi harness chạy lần đầu, nó ĐỎ ở HEAD sạch:
+
+    sharpe        0.9411 -> 1.0776   (trần 0.001)
+    n_trades      739    -> 822      (trần 1%)
+    total_fee     4445   -> 3784     (trần 0.5%)
+    bar đầu lệch: 2020-04-28, tức bar THỨ HAI
+
+Lệch từ bar thứ hai nghĩa là **đầu vào** khác, không phải logic. Nguyên
+nhân: khi chuyển harness sang fixture (commit `35eb833`), tôi thay
+`HistoryLoader().load(_CCXT_SYMBOL, "1D", _START, _END, bar_offset_hours=0)`
+bằng `load_fixture(_END)` — **mất mốc `_START = 2018-02-09`**. Fixture bắt
+đầu từ 2018-01-01, nên harness nhận thêm 39 bar warmup; z-score đổi, HMM
+đổi, mọi chỉ số đổi theo.
+
+**Và câu tôi viết trong commit đó — "regression_harness vẫn PASS so với
+baseline Phase 7 sau khi đổi nguồn" — là SAI.** Nó dựa trên một lần chạy
+`pytest -m slow` không hề chứa harness. Tôi đã báo cáo một bằng chứng
+không tồn tại.
+
+Sửa: `load_fixture(end, *, start=None)` và harness gọi
+`load_fixture(_END, start=_START)`. Sau đó harness **PASS** (82s) — nên
+fixture THẬT SỰ tái tạo đúng dữ liệu mạng; chỉ phần nối dây của tôi sai.
+
+`test_determinism` và `test_snapshot` không bị: cả hai vốn dùng
+`_DATA_START = 2018-01-01`, trùng mốc bắt đầu của fixture.
+
+`tests/test_collection_scope.py` (3 test) ghim để lỗ này không mở lại:
+harness phải có trong `-m slow`; mọi file `.py` trong `tests/` phải góp ít
+nhất một test; và `slow ∪ not-slow == tất cả` — một chênh lệch ở đó nghĩa
+là có test rơi ra ngoài CẢ HAI nhóm, tức không bao giờ chạy ở lệnh nào.
+
+### Một phát hiện phụ: `test_watchdog` FLAKE
+
+Lần chạy đầy đủ tại `c7fb25b` còn đỏ
+`test_watchdog::test_bot_treo_that_bi_phat_hien_va_bi_KILL`. Chạy riêng 3
+lần tại `c7fb25b` **và** 3 lần tại HEAD sạch: xanh 6/6. Nó là test dựng
+tiến trình con thật + `SIGSTOP` + ngưỡng thời gian 1.0s — nhạy với tải máy
+khi chạy cùng ~1000 test khác. KHÔNG do đột biến. Chưa sửa; ghi lại vì một
+test lúc xanh lúc đỏ dạy người đọc bỏ qua màu đỏ.
