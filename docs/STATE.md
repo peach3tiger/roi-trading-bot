@@ -74,8 +74,10 @@ kill+restart thật, `--dry-run` 24h, dashboard/Telegram thật.
 4b. Nạp launchd job cho `monitoring.watchdog` và `monitoring.data_harness`
    — code xong, **chưa job nào được nạp**. Khuôn plist ở `ops/RUNBOOK.md`
    mục "Chạy watchdog và data harness".
-5. `.github/workflows/ci.yml` **chưa từng chạy trên GitHub thật**. Lần
-   push tới là lần đầu — đọc kết quả trước khi tin nó.
+5. **Đọc log CI #8 (`c7fb25b`), job "Cổng §E", xem bước nào đỏ.** Hai khả
+   năng có ý nghĩa khác hẳn nhau: một test slow hỏng riêng trên CI, hay cơ
+   chế biên lai `.slow_receipt.json` không hoạt động trên runner sạch. Xem
+   `docs/DECISIONS.md` mục "CI xác nhận trên GitHub Actions".
 
 ## Cạm bẫy đang mở
 

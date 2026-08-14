@@ -2737,3 +2737,74 @@ lần tại `c7fb25b` **và** 3 lần tại HEAD sạch: xanh 6/6. Nó là test 
 tiến trình con thật + `SIGSTOP` + ngưỡng thời gian 1.0s — nhạy với tải máy
 khi chạy cùng ~1000 test khác. KHÔNG do đột biến. Chưa sửa; ghi lại vì một
 test lúc xanh lúc đỏ dạy người đọc bỏ qua màu đỏ.
+
+
+## CI xác nhận trên GitHub Actions: bộ test KHÔNG mù trước đột biến (2026-08-15)
+
+Kiểm chứng độc lập cho sự cố `c7fb25b`, đọc từ GitHub Actions chứ không
+suy từ máy dev.
+
+| Lần chạy | Commit | Kết quả |
+|---|---|---|
+| CI **#8** | `c7fb25b` (có `_EMA_PERIOD = 40`) | **ĐỎ** ở CẢ HAI job: "Bộ mặc định + lint" và "Cổng §E — test chậm khi chạm tầng quyết định" |
+| CI **#9** | `a378168` (sau revert) | **XANH** — main sạch, xác nhận độc lập |
+
+Trong toàn bộ lịch sử repo chỉ có **hai** lần chạy đỏ: CI #1 và CI #8.
+
+### 1. Bộ test KHÔNG mù — và `compare_versions` vẫn không thừa
+
+CI #8 đỏ ở bước `pytest -m 'not slow'`. Khớp với phép đo tại máy: bộ mặc
+định bắt được đột biến qua `tests/test_forward_golden.py` (<1s).
+
+**Điều này trả lời một câu hỏi thật: `ops/compare_versions.py` có thừa
+không?** Không thừa — nhưng lý do KHÔNG phải "vì nó là thứ duy nhất bắt
+được". Hai công cụ trả lời hai câu khác nhau:
+
+| | `pytest` | `ops/compare_versions.py` |
+|---|---|---|
+| Trả lời | "có gì đó vỡ" | "vỡ Ở ĐÂU" |
+| Đầu ra | một dòng đỏ | bar ĐẦU TIÊN lệch + bốn trường quyết định + 10 bar bối cảnh |
+| Ví dụ thật | `test_forward_golden` FAILED | `2024-06-11`, `hmm_allocation` 0.948956 vs 0.6, `regime_id` không đổi, `trend_gate_cap` không đổi |
+
+Dòng cuối là giá trị thật của `compare_versions`: nó chỉ ra `regime_id` và
+`trend_gate_cap` KHÔNG đổi ở bar lệch, nên nguyên nhân nằm ở tầng
+strategy — không phải HMM, không phải trend gate. `pytest` báo đỏ và người
+đọc phải tự tìm.
+
+Ghi lại vì bản ghi trước của tôi ngụ ý bộ test mù trước đột biến này. Nó
+không mù; chỉ có `test_snapshot` (~11s canary) là không bắt được, và điều
+đó đã đo và ghi từ Phase 12b.
+
+### 2. Bước "PHẠM VI ĐÃ KIỂM" bị bỏ qua — ĐÚNG THIẾT KẾ, lần đầu chạy thật
+
+Bước đó nằm CUỐI job "Bộ mặc định + lint", sau `pytest`. CI #8 đỏ ở
+`pytest` nên job dừng và bước phạm vi **không chạy**.
+
+Đó là lựa chọn có chủ ý khi viết `ci.yml`: đặt ở cuối để **một báo cáo
+phạm vi VẮNG MẶT chính là tín hiệu "chưa kiểm hết"**, đọc được ngay từ
+danh sách bước mà không cần mở log. Đây là lần đầu cơ chế đó hoạt động
+trong tình huống thật, và nó hoạt động đúng như mô tả.
+
+Hệ quả cần nhớ: **không dùng `continue-on-error`** để "thấy hết lỗi một
+lượt". Nó biến một job đỏ thành job xanh-có-chú-thích, và chú thích thì
+không ai đọc. Xem mục "Mẫu LẶP LẠI: lỗi bị che bởi lỗi đứng trước".
+
+### 3. Cổng §E đỏ ở commit chạm tầng quyết định — CHƯA XÁC ĐỊNH ĐƯỢC bước nào
+
+`c7fb25b` sửa `core/regime_strategies.py`, nên job "Cổng §E" chạy đúng vai
+và nó ĐỎ. Nhưng **tôi chưa xác định được nó đỏ ở BƯỚC nào**, và hai khả
+năng có ý nghĩa rất khác nhau:
+
+- **Bước `pytest -m slow`** — nhưng tại `c7fb25b`, `regression_harness`
+  chưa được thu thập (xem mục trên), nên bộ slow chỉ có 8 test và đo tại
+  máy cho 8 passed. Nếu bước này đỏ trên CI thì có một test slow hỏng
+  RIÊNG trên CI (ứng viên: `test_dau_cuoi_HEAD_so_voi_chinh_no`, vốn cần
+  `git worktree`).
+- **Bước `Cổng §E`** (`ops/readiness_gate.py`) — biên lai `.slow_receipt.json`
+  do bước `pytest -m slow` ngay trước đó sinh ra trong CÙNG job, cùng
+  commit, nên băm phải khớp và cổng phải PASS. Nếu bước này đỏ thì cơ chế
+  biên lai KHÔNG hoạt động trên runner sạch — một lỗ hổng khác hẳn.
+
+**Chưa kiểm được vì máy này không có `gh` và tôi không đọc được log CI.**
+Ghi ra thay vì đoán. Việc cần làm: mở log CI #8, xem bước nào đỏ trong job
+"Cổng §E", rồi ghi tiếp vào mục này.
