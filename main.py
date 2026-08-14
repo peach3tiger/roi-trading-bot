@@ -1151,6 +1151,64 @@ def _fire_bar_alerts(
 _PROGRAMMING_ERRORS: tuple[type[BaseException], ...] = (TypeError, AttributeError, KeyError)
 
 
+def _log_trace_layers(
+    logger_: Any,
+    *,
+    result: Any,
+    n_features: int,
+    trend_state: str,
+    breaker: str,
+    current_allocation: Decimal,
+    rebalance_threshold_pct: Decimal,
+) -> None:
+    """Sáu dòng §C.3: features -> hmm -> trend_gate -> risk -> compose ->
+    rebalance. Một `grep trace=<id>` dựng lại đủ chuỗi quyết định của bar.
+
+    Dùng CHUNG định dạng với `ops/shadow_runner.py` (`monitoring/trace.py::
+    log_layer`) — đó là điều kiện để `ops/shadow_diff.py` không cần parser
+    riêng cho từng nguồn.
+
+    `forward/logger.py` KHÔNG phát trace: file đó đóng băng (CLAUDE.md
+    #15), và §C.4 của prompt tự viết "thí nghiệm quan trọng hơn tiện lợi
+    khi debug". `trace_id` tất định nên vẫn so chéo được theo bar.
+    """
+    from monitoring import trace as t
+
+    t.log_layer(logger_, t.LAYER_FEATURES, n_features=n_features)
+    t.log_layer(
+        logger_,
+        t.LAYER_HMM,
+        regime=result.regime_state.label,
+        conf=round(float(result.regime_state.probability), 4),
+        is_flickering=result.is_flickering,
+        alloc_out=str(result.hmm_allocation),
+    )
+    t.log_layer(logger_, t.LAYER_TREND_GATE, state=trend_state, cap=str(result.trend_gate_cap))
+    t.log_layer(logger_, t.LAYER_RISK, cap=str(result.risk_manager_cap), breaker=breaker)
+    t.log_layer(
+        logger_,
+        t.LAYER_COMPOSE,
+        final=str(result.final_allocation),
+        # Trường có giá trị nhất trong toàn bộ thiết kế: kiến trúc là
+        # `min()` ba tầng, nên câu hỏi đầu tiên khi bất thường luôn là
+        # TẦNG NÀO đang giới hạn. Tính ở đây, đừng bắt người đọc log suy.
+        capped_by=t.capped_by(
+            result.hmm_allocation, result.trend_gate_cap, result.risk_manager_cap
+        ),
+    )
+
+    delta = abs(result.final_allocation - current_allocation)
+    nguong = current_allocation * rebalance_threshold_pct / Decimal("100")
+    duoi_nguong = delta <= nguong
+    t.log_layer(
+        logger_,
+        t.LAYER_REBALANCE,
+        skipped=duoi_nguong,
+        reason="below_threshold" if duoi_nguong else "above_threshold",
+        delta=str(delta),
+    )
+
+
 def _alert_programming_error(
     *, alert_manager: Any, exc: BaseException, where: str, symbol: str | None = None
 ) -> None:
@@ -1532,6 +1590,14 @@ def process_one_bar(
     KHÔNG được enforce cho tới khi đồng hồ đồng bộ lại — ghi lại rõ ràng ở
     đây vì đây là hạn chế thật của thiết kế, không phải sơ suất.
     """
+    # Phase 12c §C.2 — `trace_id` sinh ở ĐẦU chu kỳ bar, TRƯỚC cả khi tính
+    # feature. Khác `trade_id` (chỉ tồn tại khi có lệnh): thứ khó truy nhất
+    # là những gì KHÔNG thành lệnh — signal bị risk manager từ chối, bar bị
+    # trend gate chặn, bar không làm gì.
+    from monitoring import trace as trace_mod
+
+    trace_mod.set_bar_trace(bar_ts.to_pydatetime(), symbol)
+
     risk_manager = signal_generator.risk_manager
     risk_manager.reset_daily()
     if bar_ts.weekday() == 0:  # Thứ Hai — CLAUDE.md bất biến #10
@@ -1694,6 +1760,17 @@ def process_one_bar(
     regime_id = result.regime_state.state_id
     regime_label = result.regime_state.label
     new_trend_structure = signal_generator.trend_gate.get_structure_state(bars_window).value
+
+    if regime_state_logger is not None:
+        _log_trace_layers(
+            regime_state_logger,
+            result=result,
+            n_features=len(features_so_far.columns),
+            trend_state=new_trend_structure,
+            breaker=read_breaker_level(risk_manager),
+            current_allocation=current_allocation,
+            rebalance_threshold_pct=signal_generator.strategy_orchestrator.rebalance_threshold_pct,
+        )
 
     if alert_manager is not None and execute:
         _fire_bar_alerts(
@@ -2003,7 +2080,11 @@ def run_live_loop(
     from monitoring.logger import get_logger
 
     log_dir = settings["monitoring"]["log_dir"]
-    regime_state_logger = get_logger("regime", log_dir)
+    # `TraceFilter` chèn `trace` vào MỌI bản ghi của logger này — không
+    # module nào phải tự nhớ ghi nó (Phase 12c §C.1). Idempotent.
+    from monitoring.trace import install as install_trace
+
+    regime_state_logger = install_trace(get_logger("regime", log_dir))
     alert_manager = build_alert_manager(settings)
     large_pnl_alert_pct = Decimal(str(settings["monitoring"]["large_pnl_alert_pct"]))
 

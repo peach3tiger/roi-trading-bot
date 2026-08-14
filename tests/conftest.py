@@ -83,3 +83,55 @@ def pytest_sessionfinish(session: "pytest.Session", exitstatus: int) -> None:
         return
 
     write_receipt(slow_tests=slow_count)
+
+
+# ----------------------------------------------------------------------
+# Cách ly credential — bộ test KHÔNG được đọc `.env` thật
+# ----------------------------------------------------------------------
+
+# Mọi biến môi trường mang credential hoặc điều khiển đích gửi ra ngoài.
+# Gom ở một chỗ: thêm một kênh gửi mới mà quên thêm biến của nó vào đây sẽ
+# làm bộ test lặng lẽ dùng lại cấu hình thật của máy dev.
+_CREDENTIAL_ENV = (
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "EXCHANGE_API_KEY",
+    "EXCHANGE_API_SECRET",
+    "EXCHANGE_TESTNET",
+    "MONITORING_WEBHOOK_URL",
+    "MONITORING_SMTP_HOST",
+    "MONITORING_SMTP_PORT",
+    "MONITORING_SMTP_USERNAME",
+    "MONITORING_SMTP_PASSWORD",
+    "MONITORING_EMAIL_FROM",
+    "MONITORING_EMAIL_TO",
+)
+
+
+@pytest.fixture(autouse=True)
+def _cach_ly_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Xoá mọi credential khỏi `os.environ` TRƯỚC MỖI test.
+
+    ## Bug thật đã gặp (2026-08-14), không phải phòng xa
+
+    `monitoring/forward_watchdog.py:565` gọi `load_dotenv()` với đường dẫn
+    MẶC ĐỊNH — tức là `.env` thật của dự án — và hàm đó ghi thẳng vào
+    `os.environ`. `monkeypatch` không hoàn tác được thứ nó không đặt, nên
+    biến rò rỉ sang mọi test chạy sau trong cùng phiên.
+
+    Hậu quả ĐO ĐƯỢC: ngày `.env` được điền `TELEGRAM_BOT_TOKEN` thật,
+    `tests/test_monitoring_alerts.py::test_telegram_not_called_when_not_configured`
+    chuyển từ xanh sang đỏ mà KHÔNG dòng code nào đổi —
+    `AlertManager(telegram_bot_token=None)` đọc env, thấy token thật, rồi
+    gọi `requests.post`. Test đó chỉ không gửi thật vì `requests.post` bị
+    patch; **một test không patch nó sẽ gửi tin nhắn Telegram THẬT.**
+
+    Cùng lỗi làm bộ test cho kết quả KHÁC NHAU trên hai máy tuỳ máy đó có
+    credential hay không — đúng lớp "lỗi xác minh" mà `CLAUDE.md` #16 gọi
+    là chế độ hỏng chủ đạo của dự án này.
+
+    `autouse=True`: một fixture phải nhớ khai báo là một fixture sẽ bị
+    quên ở đúng file quên nó.
+    """
+    for ten in _CREDENTIAL_ENV:
+        monkeypatch.delenv(ten, raising=False)

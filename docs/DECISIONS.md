@@ -2419,3 +2419,52 @@ và cái không chạy trông giống hệt cái đã qua.** Số lượng lỗi
 
 Ba lỗi lần này được sửa TRONG CÙNG MỘT commit chính vì đã lường trước lớp
 thứ ba, không phải vì log CI đã nói ra nó.
+
+
+## Bộ test đọc `.env` THẬT — đỏ khi credential được điền (2026-08-14)
+
+### Triệu chứng
+
+Hai test trong `tests/test_monitoring_alerts.py` chuyển từ xanh sang đỏ
+**mà không dòng code nào đổi**:
+
+```
+test_telegram_not_called_when_not_configured
+test_webhook_not_called_when_not_configured
+```
+
+Thứ đã đổi là **`.env`**: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` được
+điền giá trị thật (mục treo #0 của `STATE.md`).
+
+### Nguyên nhân
+
+`monitoring/forward_watchdog.py:565` gọi `load_dotenv()` với đường dẫn
+MẶC ĐỊNH — `.env` thật của dự án — và hàm đó ghi thẳng vào `os.environ`.
+`monkeypatch` không hoàn tác được thứ nó không đặt, nên biến rò rỉ sang
+mọi test chạy sau trong cùng phiên. `AlertManager(telegram_bot_token=None)`
+nghĩa là "đọc từ env", nó thấy token thật, và gọi `requests.post`.
+
+### Vì sao đây là bug nặng hơn một test đỏ
+
+1. **Bộ test cho kết quả khác nhau trên hai máy** tuỳ máy đó có credential
+   hay không. Đúng lớp "lỗi xác minh" mà `CLAUDE.md` #16 gọi là chế độ
+   hỏng chủ đạo của dự án.
+2. Hai test đó chỉ **không gửi thật** vì chúng patch `requests.post`. Một
+   test không patch nó sẽ **gửi tin nhắn Telegram THẬT** từ bộ test.
+3. Nó ẩn được nhiều tháng vì cho tới hôm nay `.env` toàn giá trị rỗng.
+
+### Sửa
+
+`tests/conftest.py` — fixture `autouse=True` xoá 12 biến credential khỏi
+`os.environ` trước MỖI test. `autouse` chứ không phải khai báo tay: một
+fixture phải nhớ khai báo sẽ bị quên ở đúng file quên nó.
+
+Đột biến xác nhận: đổi `autouse=True` → `False`, hai test kia đỏ lại.
+
+### Điều KHÔNG sửa, và vì sao
+
+`load_dotenv()` ở `forward_watchdog.py` giữ nguyên. Nó cần đọc `.env`
+thật khi chạy dưới launchd (launchd không có env của shell). Vấn đề không
+nằm ở nó mà ở việc **bộ test chạy chung không gian tiến trình với nó** —
+nên cách ly thuộc về `conftest.py`, không thuộc về module đang làm đúng
+việc của mình.
