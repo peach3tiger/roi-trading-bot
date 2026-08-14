@@ -24,7 +24,7 @@ from ta.volatility import AverageTrueRange
 
 from core.hmm_engine import RegimeInfo, RegimeState
 
-_EMA_PERIOD = 40  # MUTANT
+_EMA_PERIOD = 50
 _ATR_PERIOD = 14
 _UNCERTAINTY_SUFFIX = " [UNCERTAINTY — size halved]"
 
