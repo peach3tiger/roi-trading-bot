@@ -2512,3 +2512,56 @@ sách không giao nhau.
 chạy dưới launchd (launchd không có env của shell). Vấn đề không nằm ở nó
 mà ở việc **bộ test chạy chung không gian tiến trình** — nên cách ly thuộc
 về `conftest.py`, không thuộc về module đang làm đúng việc của mình.
+
+
+## Điều kiện thời điểm deploy — ngưỡng biến động p80 đã đo (2026-08-14)
+
+Phase 12c §E. Quy trình CLAUDE.md #18.
+
+**Đại lượng:** `|log return|` 24 giờ, đơn vị %. **So cùng kích thước cửa
+sổ** (bước 1 của #18, bước hay bị bỏ nhất): giá trị hiện tại là
+`|log return|` của MỘT bar, và phân phối nền cũng là `|log return|` của
+TỪNG bar — không phải độ lệch chuẩn toàn kỳ.
+
+**Nguồn:** `tests/fixtures/btcusdt_1d_2018_2026.parquet`, 3137 bar
+(2018-01-02 → 2026-08-04).
+
+| p50 | p70 | p75 | p80 | p85 | p90 | p95 | p99 |
+|---|---|---|---|---|---|---|---|
+| 1.457 | 2.548 | 2.999 | **3.561** | 4.219 | 5.285 | 7.197 | 11.402 |
+
+trung bình 2.257, độ lệch chuẩn 2.575, lớn nhất **50.26**.
+
+**Tỷ lệ ngày bị CHẶN deploy đo được: 20.0% (628/3137).** Ở đây con số bằng
+đúng định nghĩa phân vị — p80 chặn 20% theo cấu trúc — nhưng vẫn phải ĐO
+chứ không suy: `percentile_of()` dùng "nhỏ hơn nghiêm ngặt", và giá trị
+lặp có thể làm lệch. Có test ghim cả ngưỡng lẫn tỷ lệ.
+
+Ý nghĩa vận hành: trung bình **chờ 5 ngày** là có một ngày deploy được.
+
+**Đánh đổi nếu muốn đổi ngưỡng:** p70 chặn 30%, p90 chặn 10%. Giữ p80
+theo §E; nới lên p90 nghĩa là chấp nhận deploy vào những ngày biến động
+gấp ~1.5 lần.
+
+**Vì sao PHÂN VỊ chứ không phải con số tuyệt đối:** ngưỡng tuyệt đối sai
+dần khi chế độ biến động của thị trường đổi (BTC 2018 và BTC 2026 không
+cùng biên độ), còn phân vị tự hiệu chỉnh theo lịch sử.
+
+### Trạng thái thứ ba: `ok = None`
+
+`Condition.ok` có BA giá trị, không hai. `None` = **không xác định được**
+(không hỏi được sàn, chưa đủ lịch sử, `risk_manager` không lộ đường dẫn
+halt lock). Trộn nó vào:
+
+- `True` -> cổng RỖNG: một sự cố mạng biến "chưa kiểm được" thành "đạt".
+- `False` -> một sự cố đo lường chặn deploy vĩnh viễn.
+
+`DeployReadiness.ok` chỉ `True` khi MỌI điều kiện `is True`. Đột biến đổi
+`is True` thành `is not False` bị bắt.
+
+### §E.3 không đo được, và không giả vờ đo được
+
+"Bạn có mặt được ít nhất 2 giờ tới không?" là điều kiện THẬT đằng sau luật
+"không deploy tối Thứ Sáu" — luật của thị trường có giờ đóng cửa, tồn tại
+vì cuối tuần không ai trực. `deploy_conditions.py` in câu hỏi đó ở MỌI lần
+chạy, kể cả khi mọi điều kiện khác đều ĐẠT: đó là lúc dễ bỏ qua nhất.

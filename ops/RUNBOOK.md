@@ -658,6 +658,97 @@ cụ).
 
 ---
 
+## Vì sao KHÔNG dùng blue-green (quyết định kiến trúc)
+
+Người đọc sau này sẽ muốn đảo ngược quyết định này. Đọc hết mục này trước.
+
+Blue-green giả định các instance **không chia sẻ trạng thái**. Với bot
+giao dịch, trạng thái thật nằm ở **SÀN**, không nằm trong tiến trình. Hai
+instance cùng quản một tài khoản sẽ tính rebalance độc lập và cùng gửi
+lệnh.
+
+`orderLinkId` sinh deterministic chỉ chặn lệnh trùng khi hai instance tính
+ra **CÙNG** allocation. Nếu chúng khác nhau — mà **khác nhau chính là lý
+do bạn đang deploy** — cả hai lệnh đều qua sàn, và vị thế nhân đôi.
+
+Vì vậy: **không bao giờ hai tiến trình cùng khả năng đặt lệnh trên một tài
+khoản** (`CLAUDE.md` bất biến #20).
+
+Mô hình thay thế:
+
+| Giai đoạn | Cơ chế |
+|---|---|
+| Kiểm logic | So sánh ngoại tuyến tất định trên toàn bộ dữ liệu lịch sử — `ops/compare_versions.py` |
+| Kiểm tầng sàn | Shadow mode CHỈ-ĐỌC 24–48 giờ — `ops/shadow_runner.py` |
+| Chuyển đổi | Restart MỘT instance duy nhất, bàn giao qua `state_snapshot.json` |
+| Rollback | `git checkout <ref cũ>`, restart |
+
+Shadow mode **không** dùng để kiểm logic: `compare_versions` làm việc đó
+tốt hơn nhiều (hàng nghìn bar thay vì vài chục, tái lập được, vài chục
+giây). Shadow chỉ trả lời những câu backtest không trả lời được — phản hồi
+API thật, `instrumentRules` thật, lệch đồng hồ, mạng chập chờn.
+
+---
+
+## Triển khai phiên bản mới — CHECKLIST
+
+Không bỏ bước. Bước 2 và 5 là hai cổng; bước 6 là điều kiện thời điểm.
+
+```
+ 1. pytest && pytest -m slow              -> cả HAI đều xanh
+                                             (một lệnh không phải "toàn bộ")
+ 2. python -m ops.compare_versions \
+      --ref-a <ref đang chạy> --ref-b <ref mới>
+                                          -> khớp 100%, HOẶC lệch CÓ CHỦ ĐÍCH
+                                             đã ghi docs/DECISIONS.md kèm bảng
+                                             hiệu năng cũ/mới
+ 3. pytest tests/regression_harness.py -m slow   -> xanh
+ 4. pytest tests/test_forward_golden.py          -> xanh
+ 5. python -m ops.shadow_runner   (24–48 giờ, song song với --dry-run)
+    python -m ops.shadow_diff                     -> 4 trường chính khớp 100%
+                                                     và đủ >= 24h bar CHUNG
+ 6. python -m ops.deploy_conditions               -> đủ điều kiện thời điểm
+    + TỰ TRẢ LỜI: "Tôi có mặt được 2 GIỜ tới không?"  (§E.3, không đo được)
+ 7. Dừng instance production. Xác nhận state_snapshot.json đã ghi.
+ 8. git checkout <ref mới> && restart
+ 9. Theo dõi 2 GIỜ:
+      cat ${STATE_DIR}/health.json    -> status "ok"
+      cat ${STATE_DIR}/drift.json     -> không cảnh báo
+      cat ${STATE_DIR}/heartbeat.json -> loop_seq TĂNG
+10. Ghi docs/DECISIONS.md: ref cũ, ref mới, ngày, kết quả so sánh.
+```
+
+**Rollback:** `git checkout <ref cũ>` rồi restart. Trạng thái đọc lại từ
+`state_snapshot.json` và **đối soát với sàn** — chạy
+`python scripts/recovery_checklist.py`, cùng cơ chế dùng cho khôi phục sau
+crash. Nhớ: stop-loss KHÔNG nằm trên sàn (xem mục riêng), nên khoảng thời
+gian giữa dừng và khởi động lại là khoảng vị thế KHÔNG được canh.
+
+### Điều kiện thời điểm — không dùng lịch (§E)
+
+Luật "không deploy tối Thứ Sáu" là luật của thị trường CÓ giờ đóng cửa:
+nó tồn tại vì cuối tuần không ai trực. Crypto chạy 24/7, nên mang luật đó
+vào đây là mang theo một giả định đã chết — và nó cho cảm giác an toàn vào
+Thứ Ba lúc thị trường đang sập.
+
+Ba điều kiện đo được thay cho nó:
+
+| | Điều kiện | Ai kiểm |
+|---|---|---|
+| E.1 | Biến động 24h dưới phân vị 80 lịch sử (ngưỡng đo được: **3.561%**, chặn **20%** số ngày) | `ops/deploy_conditions.py` |
+| E.2 | Không lệnh đang chờ, không circuit breaker hoạt động, không `trading_halted.lock` | `ops/deploy_conditions.py` |
+| E.3 | **Bạn có mặt được ít nhất 2 giờ tới** | **CON NGƯỜI** — không đo được |
+
+E.3 là điều kiện THẬT đằng sau luật Thứ Sáu. `deploy_conditions.py` in câu
+hỏi đó ở mọi lần chạy, kể cả khi mọi thứ khác đều ĐẠT — đó là lúc dễ bỏ
+qua nhất.
+
+Lưu ý về `ok = ???` trong báo cáo: đó là **không xác định được**, KHÔNG
+phải "đạt". Ví dụ không hỏi được sàn về lệnh mở. Cổng chỉ xanh khi mọi
+điều kiện `ĐẠT`.
+
+---
+
 ## Kiểm tra nhanh (không có sự cố cụ thể)
 
 ```bash

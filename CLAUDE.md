@@ -265,6 +265,35 @@ tại. `ops/verify_scope.py` cơ giới hoá điều này; `tests/test_verify_sc
 ghim nó. Đường dẫn trong một mục nghiệm thu mà không tồn tại là **FAIL**,
 không phải "sạch".
 
+### 20. Không bao giờ hai tiến trình cùng khả năng đặt lệnh trên một tài khoản
+
+Đây là **bất biến**, không phải lựa chọn triển khai.
+
+Blue-green giả định các instance **không chia sẻ trạng thái**. Với bot
+giao dịch, trạng thái thật nằm ở **SÀN**, không nằm trong tiến trình. Hai
+instance cùng quản một tài khoản sẽ tính rebalance độc lập và cùng gửi
+lệnh.
+
+`orderLinkId` sinh deterministic (#8) chỉ chặn được lệnh trùng khi hai
+instance tính ra **CÙNG** allocation. Nếu chúng khác nhau — mà khác nhau
+chính là lý do bạn đang deploy — cả hai lệnh đều qua, và **vị thế nhân
+đôi**.
+
+Hệ quả cụ thể:
+
+- Không blue-green, không rolling deploy, không "chạy song song để so".
+- Chuyển đổi phiên bản = **dừng instance cũ, rồi mới khởi động instance
+  mới**. Bàn giao qua `state_snapshot.json`.
+- Muốn so hai phiên bản: `ops/compare_versions.py` (ngoại tuyến, Phase
+  12c §A) hoặc shadow mode CHỈ-ĐỌC (`ops/shadow_runner.py`, không có
+  đường nào tới `broker/order_executor.py`).
+- `ops/shadow_runner.py` chặn bằng **kiến trúc** (không import), không
+  bằng cờ boolean. Một cờ `dry_run=True` có thể bị lật nhầm; một import
+  không tồn tại thì không.
+
+Quy trình triển khai đầy đủ: `ops/RUNBOOK.md` mục "Triển khai phiên bản
+mới". Điều kiện thời điểm: `ops/deploy_conditions.py` (§E).
+
 ## Phong cách code
 
 - Python 3.11+, type hint đầy đủ
