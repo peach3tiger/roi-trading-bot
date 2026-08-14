@@ -441,3 +441,18 @@ def test_main_truyen_ba_tran_vao_log_state() -> None:
     assert "hmm_allocation=result.hmm_allocation" in src
     assert "trend_gate_cap=result.trend_gate_cap" in src
     assert "risk_manager_cap=result.risk_manager_cap" in src
+
+
+def test_drift_sai_schema_thi_cung_la_None(logs: Path, tmp_path: Path) -> None:
+    """Đọc được JSON nhưng `metrics` không phải list — sai hợp đồng, tức
+    là bên ghi và bên đọc đã lệch nhau. Trả `()` ở đây sẽ hiển thị y hệt
+    "drift sạch", giấu mất chính sự lệch đó.
+
+    Nhánh này KHÁC nhánh JSON hỏng (`test_drift_hong_thi_cung_la_None`) —
+    đo bằng đột biến: sửa riêng nhánh này, test kia vẫn xanh.
+    """
+    (tmp_path / "drift.json").write_text(
+        json.dumps({"metrics": "khong-phai-list"}), encoding="utf-8"
+    )
+
+    assert collect(_NGAY, log_dir=logs, state_dir=tmp_path).drift_alerts is None

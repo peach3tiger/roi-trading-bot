@@ -625,3 +625,24 @@ def test_run_luon_truyen_dai(settings: dict[str, Any], tmp_path: Path) -> None:
     )
 
     assert "bands=bands" in src
+
+
+def test_trend_gate_bang_nhau_KHONG_tinh_la_chan(settings: dict[str, Any]) -> None:
+    """Trần 0.95 trên một signal 0.95 không giới hạn gì cả. Đếm nó vào sẽ
+    làm chỉ số này bão hoà gần 100 % trong mọi thị trường tăng — lúc đó nó
+    không còn phân biệt được "trend gate đang chặn" với "trend gate đang
+    mở hết cỡ".
+
+    Biên `<` vs `<=`: hai ký tự, hai chỉ số hoàn toàn khác nhau.
+    """
+    edges = allocation_bin_edges(nominal_allocation_levels(settings))
+    bars = pd.DataFrame(
+        {
+            "final_allocation": [0.95, 0.30],
+            "hmm_allocation": [0.95, 0.95],
+            "trend_gate_cap": [0.95, 0.30],  # bar 1: BẰNG NHAU, bar 2: chặn thật
+            "is_flickering": [False, False],
+        }
+    )
+
+    assert measure(bars, edges=edges).trend_gate_block_pct == 50.0
