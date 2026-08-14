@@ -1795,6 +1795,12 @@ def process_one_bar(
             positions=positions,
             daily_pnl=portfolio_state.daily_pnl,
             cumulative_fees_paid=cumulative_fees,
+            # Ba trần + drawdown (Phase 12b §C.2) — đọc THẲNG từ
+            # `SignalGeneratorResult`/`PortfolioState`, không tính lại.
+            hmm_allocation=result.hmm_allocation,
+            trend_gate_cap=result.trend_gate_cap,
+            risk_manager_cap=result.risk_manager_cap,
+            drawdown_pct=portfolio_state.drawdown,
         )
 
     return LiveLoopState(

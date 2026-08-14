@@ -130,9 +130,22 @@ def log_state(
     positions: dict,
     daily_pnl: Decimal,
     cumulative_fees_paid: Decimal,
+    *,
+    hmm_allocation: Decimal | None = None,
+    trend_gate_cap: Decimal | None = None,
+    risk_manager_cap: Decimal | None = None,
+    drawdown_pct: Decimal | None = None,
 ) -> None:
     """Mỗi entry gồm timestamp UTC, regime, probability, equity, positions,
     daily_pnl, cumulative_fees_paid.
+
+    BỐN trường sau là tuỳ chọn (Phase 12b §C.2, thêm 2026-08-14), mặc định
+    `None` để 23 test đã có trước đó không phải đổi: ba trần allocation +
+    drawdown. `monitoring/daily_digest.py` cần chúng để trả lời "tầng nào
+    giới hạn allocation bao nhiêu bar trong ngày" — không có chúng thì mục
+    đó của §C.2 luôn rỗng. Ghi `None` khi caller không truyền, KHÔNG bỏ
+    khoá: một khoá vắng mặt và một giá trị null cần phản ứng khác nhau khi
+    đọc lại log cũ.
 
     `Decimal` truyền vào luôn được ghi dưới dạng `str()` (không phải
     `float()`) — giữ đúng biểu diễn thập phân chính xác trong log, khớp
@@ -150,5 +163,9 @@ def log_state(
             "positions": _to_jsonable(positions),
             "daily_pnl": str(daily_pnl),
             "cumulative_fees_paid": str(cumulative_fees_paid),
+            "hmm_allocation": None if hmm_allocation is None else str(hmm_allocation),
+            "trend_gate_cap": None if trend_gate_cap is None else str(trend_gate_cap),
+            "risk_manager_cap": None if risk_manager_cap is None else str(risk_manager_cap),
+            "drawdown_pct": None if drawdown_pct is None else str(drawdown_pct),
         },
     )

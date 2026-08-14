@@ -96,6 +96,12 @@ class AlertType(Enum):
     # Dùng lại DATA_FEED_LOST/API_LOST ở đây sẽ gửi người vận hành đi kiểm
     # tra mạng cho một vấn đề nằm ở chỗ khác.
     HEALTH_CHECK_FAILED = "HEALTH_CHECK_FAILED"
+    # `monitoring/daily_digest.py` §C.2 — bản tóm tắt một dòng gửi 00:05
+    # UTC. severity INFO: đây là báo cáo định kỳ, không phải sự cố. Nhãn
+    # riêng để rate limit của nó độc lập với mọi cảnh báo thật — một
+    # digest bị nuốt vì trùng cửa sổ 15 phút với một alert khác là mất
+    # hẳn bản ghi của cả ngày hôm đó.
+    DAILY_DIGEST = "DAILY_DIGEST"
 
 
 @dataclass(frozen=True)
