@@ -362,3 +362,30 @@ def test_harness_khong_ghi_vao_forward() -> None:
     )
 
     assert "forward" not in src
+
+
+def test_bien_dong_GIA_GHI_LOCK_qua_duong_that(tmp_path: Path) -> None:
+    """NGHIỆM THU 12d #5 đầy đủ, qua `run_integrity_check` chứ không chỉ
+    `classify_price_move`.
+
+    `test_bien_dong_GIA_thi_khoa` chỉ kiểm HÀM PHÂN LOẠI (thuần). Nó KHÔNG
+    kiểm rằng phán quyết đó biến thành một lock. Đo được bằng đột biến: bỏ
+    nhánh `MOVE_BAD_DATA` trong `_move_violations` thì test kia vẫn xanh —
+    hệ thống phân loại đúng rồi không làm gì cả.
+    """
+    am = _FakeAlertManager()
+    bars = _bars()
+    bars.loc[_IDX[4], ["open", "high", "low", "close"]] = [14.0, 14.0, 9.0, 9.1]
+
+    ket_qua = run_integrity_check(
+        bars,
+        secondary_close=Decimal("14.0"),  # nguồn phụ KHÔNG thấy cú sập
+        lock_file=tmp_path / "dq.lock",
+        alert_manager=am,
+    )
+
+    assert ket_qua.move_verdict == MOVE_BAD_DATA
+    assert ket_qua.lock_written
+    assert (tmp_path / "dq.lock").exists()
+    assert any("hai nguồn khớp nhau" in v.check for v in ket_qua.violations)
+    assert am.sent[-1].alert_type is AlertType.DATA_QUALITY_FAILED

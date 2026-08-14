@@ -10,13 +10,13 @@ Vận hành: `ops/RUNBOOK.md`. Bất biến: `CLAUDE.md`.
 
 ## Đang ở đâu
 
-Phase 1–11 + 12b xong. Phase 12c, 12d chưa xây.
+Phase 1–11 + 12b + **12d** xong. Phase 12c chưa xây.
 
 ```
-pytest              731 passed / 6 deselected     # KHÔNG phải "tất cả"
+pytest              878 passed / 6 deselected     # KHÔNG phải "tất cả"
 pytest -m slow      6 passed                      # bộ đầy đủ là HAI lệnh
-ruff check .        86/86 file .py
-mypy .              86/86 file .py
+ruff check .        96/96 file .py
+mypy .              96/96 file .py
 python ops/verify_scope.py                        # in PHẠM VI của cả ba
 ```
 
@@ -30,10 +30,15 @@ python ops/verify_scope.py                        # in PHẠM VI của cả ba
 | Cổng trước merge | `pytest -m slow && python ops/readiness_gate.py --base origin/main` |
 | Drift | `python -m monitoring.drift` |
 | Digest | `python -m monitoring.daily_digest` |
+| Watchdog (tiến trình RIÊNG) | `python -m monitoring.watchdog` |
+| Giám sát dữ liệu (RIÊNG) | `python -m monitoring.data_harness` |
+| Kiểm trước khởi động | `python config/validate.py` |
+| Dừng khẩn cấp | `python scripts/emergency_kill.py --reason "..."` |
+| Sau mọi lần dừng bất thường | `python scripts/recovery_checklist.py` |
 
 `${STATE_DIR}` (mặc định `./state`, gitignore) chứa: `state_snapshot.json`,
-`trading_halted.lock`, `status.json` (sức khoẻ kênh alert), `health.json`,
-`drift.json`.
+`trading_halted.lock`, `data_quality.lock`, `status.json` (sức khoẻ kênh
+alert), `health.json`, `drift.json`, `heartbeat.json`, `watchdog_kill.json`.
 
 ## Bị chặn
 
@@ -59,6 +64,9 @@ kill+restart thật, `--dry-run` 24h, dashboard/Telegram thật.
    đáng tin trên Binance spot. Không bịa bằng cặp proxy chưa kiểm chứng.
 4. Phase 12c (`prompts/phase-12c-shadow-deploy.md`). Xây nó cũng đóng luôn
    mục nghiệm thu ĐẠT-một-cách-rỗng ở dưới.
+4b. Nạp launchd job cho `monitoring.watchdog` và `monitoring.data_harness`
+   — code xong, **chưa job nào được nạp**. Khuôn plist ở `ops/RUNBOOK.md`
+   mục "Chạy watchdog và data harness".
 5. `.github/workflows/ci.yml` **chưa từng chạy trên GitHub thật**. Lần
    push tới là lần đầu — đọc kết quả trước khi tin nó.
 
@@ -77,6 +85,12 @@ kill+restart thật, `--dry-run` 24h, dashboard/Telegram thật.
 - **Ba tầng hồi quy, đừng để trùng nhau:** `test_forward_golden` <1s /
   `test_snapshot` ~8s / `regression_harness` ~137s. Vai trò từng tầng:
   docstring `tests/test_snapshot.py`.
+- **STOP-LOSS KHÔNG NẰM TRÊN SÀN.** `modify_stop()` chỉ ghi vào bộ nhớ
+  tiến trình; enforce do vòng lặp bot làm mỗi bar. Hệ quả: **bot dừng =
+  vị thế không được canh**, kể cả khi `state_snapshot.json` có ghi stop.
+  `scripts/emergency_kill.py` và `scripts/recovery_checklist.py` đều cảnh
+  báo điều này; `test_stop_khong_ton_tai_tren_san` sẽ đỏ nếu `broker/` bắt
+  đầu gửi stop thật, buộc đọc lại cả hai script.
 
 ## Ranh giới không được vượt
 
