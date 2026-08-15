@@ -157,6 +157,38 @@ def check_testnet(settings: dict, env: Optional[dict[str, str]] = None) -> list[
     ]
 
 
+def check_n_init_floor(settings: dict) -> list[Problem]:
+    """`hmm.n_init` không được xuống dưới sàn đã ĐO.
+
+    `n_init` KHÔNG phải tham số tốc độ. Toàn bộ lớp bảo vệ chống model
+    phân kỳ nằm ở vòng random restart: `scan_bic` giữ restart có
+    log-likelihood cao nhất, và fit đã phân kỳ thì log-likelihood tệ nên
+    luôn thua. Ít restart hơn = lớp bảo vệ mỏng hơn.
+
+    Cổng này tồn tại vì đường làm nó biến mất đã có sẵn: `prompts/`
+    phase-12b §0.3 đề xuất giảm `n_init` xuống 3 cho kịch bản "nhanh". Với
+    tỷ lệ phân kỳ đo được, đó là một đánh đổi thật — và nó phải là một
+    quyết định được nhìn thấy, không phải một dòng config đi lọt.
+    """
+    from core.hmm_engine import MIN_N_INIT
+
+    hmm = settings.get("hmm") or {}
+    if "n_init" not in hmm:
+        return [Problem("hmm.n_init", "thiếu `hmm.n_init` trong settings.")]
+    n = hmm["n_init"]
+    if isinstance(n, int) and n >= MIN_N_INIT:
+        return []
+    return [
+        Problem(
+            "hmm.n_init",
+            f"`hmm.n_init` = {n!r}, dưới sàn đã đo {MIN_N_INIT}. n_init là "
+            f"tham số AN TOÀN, không phải tham số tốc độ — xem docstring "
+            f"`core.hmm_engine.MIN_N_INIT` và docs/DECISIONS.md 'Phân kỳ EM "
+            f"trong backtest kiểm định'.",
+        )
+    ]
+
+
 # ----------------------------------------------------------------------
 # §C.2 — bất biến, bằng AST
 # ----------------------------------------------------------------------
@@ -395,6 +427,7 @@ def validate(
         van_de += check_env(env)
     van_de += check_frozen_hash(repo_root=repo_root)
     van_de += check_testnet(settings, env)
+    van_de += check_n_init_floor(settings)
     for kiem in INVARIANT_CHECKS:
         van_de += kiem(repo_root=repo_root)
     return van_de
@@ -402,7 +435,10 @@ def validate(
 
 def format_report(problems: Sequence[Problem]) -> str:
     if not problems:
-        return "config/validate.py: OK — cấu hình đủ, 6 bất biến không bị vi phạm."
+        return (
+            "config/validate.py: OK — cấu hình đủ, sàn n_init đạt, "
+            f"{len(INVARIANT_CHECKS)} bất biến không bị vi phạm."
+        )
     dong = [f"config/validate.py: {len(problems)} VẤN ĐỀ", ""]
     dong += [f"  {p}" for p in problems]
     return "\n".join(dong)

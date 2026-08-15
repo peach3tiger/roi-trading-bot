@@ -26,6 +26,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import pickle
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +39,91 @@ from hmmlearn.hmm import GaussianHMM
 from scipy.special import logsumexp
 
 logger = logging.getLogger(__name__)
+
+# Ngưỡng gọi một lần EM là PHÂN KỲ. EM có tính chất log-likelihood đơn
+# điệu tăng, nên mọi delta âm đều bất thường; ngưỡng 1.0 loại nhiễu làm
+# tròn (|delta| điển hình của nhiễu ~1e-9) mà vẫn bắt trọn nhóm phân kỳ
+# thật — đo được trên backtest kiểm định: |delta| trong nhóm > 1 có trung
+# vị 78.9 và cực đại 128.8, không có giá trị nào rơi vào khoảng 1..10.
+# Xem docs/DECISIONS.md "Phân kỳ EM trong backtest kiểm định".
+_EM_DIVERGENCE_DELTA = 1.0
+
+# Sàn cho `n_init` trong CẤU HÌNH SẢN XUẤT. Không phải tham số tốc độ.
+#
+# Toàn bộ lớp bảo vệ chống phân kỳ EM nằm ở vòng random restart: `scan_bic`
+# giữ restart có log-likelihood cao nhất, và một fit đã phân kỳ thì
+# log-likelihood tệ nên luôn thua. Ít restart hơn = lớp bảo vệ mỏng hơn.
+#
+# Suy ra từ số đo, không phải số tròn (CLAUDE.md #18): ô (cửa sổ,
+# n_components) TỆ NHẤT trong backtest kiểm định có 7/10 restart dùng
+# được, tức 30% "bẩn". Để xác suất MỌI restart trong một ô đều bẩn dưới
+# 0.1% cần n_init >= ln(0.001)/ln(0.3) = 5.74 -> 6.
+#
+# Chỉ áp cho `config/settings.yaml` (qua `config/validate.py`), KHÔNG áp
+# trong `__init__`: test dùng n_init=1..3 trên dữ liệu tổng hợp là hợp lệ
+# và cần thiết cho tốc độ.
+MIN_N_INIT = 6
+
+
+class _ThuPhanKy(logging.Handler):
+    """Thu cảnh báo "Model is not converging" của hmmlearn cho MỘT lần fit.
+
+    Đọc `monitor_.converged` KHÔNG thay được việc này: hmmlearn trả `True`
+    khi `iter == n_iter`, tức chạm trần lặp cũng được tính là hội tụ. Và
+    cảnh báo phát ra ở BẤT KỲ vòng lặp nào log-likelihood giảm, độc lập
+    với `converged`. Đo bằng cái sai cho `0/650 không hội tụ` trong khi
+    thực tế 68 lần phân kỳ.
+    """
+
+    _RE_DELTA = re.compile(r"Delta is (-?[\d.]+(?:[eE][+-]?\d+)?)")
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.deltas: list[float] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001 — handler không được phép làm hỏng fit
+            return
+        if "not converging" not in msg:
+            return
+        m = self._RE_DELTA.search(msg)
+        if m:
+            self.deltas.append(float(m.group(1)))
+
+    @property
+    def phan_ky_max(self) -> float:
+        return max((abs(d) for d in self.deltas), default=0.0)
+
+
+@contextmanager
+def _theo_doi_phan_ky() -> Iterator[_ThuPhanKy]:
+    """Gắn bộ thu vào logger của hmmlearn, gỡ ra trong `finally`.
+
+    `propagate` giữ nguyên: bộ thu này QUAN SÁT, không nuốt cảnh báo —
+    người vận hành vẫn thấy chúng trong log như trước.
+    """
+    thu = _ThuPhanKy()
+    lg = logging.getLogger("hmmlearn")
+    muc_cu = lg.level
+    if muc_cu > logging.WARNING or muc_cu == logging.NOTSET:
+        lg.setLevel(logging.WARNING)
+    lg.addHandler(thu)
+    try:
+        yield thu
+    finally:
+        lg.removeHandler(thu)
+        lg.setLevel(muc_cu)
+
+
+class EMDivergenceError(RuntimeError):
+    """Model được BIC chọn tự nó phân kỳ trong lúc train.
+
+    Đây là RAISE chứ không phải log có chủ ý: một model phân kỳ vẫn cho ra
+    `predict_regime_filtered()` chạy được và trả về số — nó không hỏng ở
+    chỗ nhìn thấy được, nó hỏng ở chỗ những con số đó vô nghĩa.
+    """
 
 # Nhãn regime, sắp theo mean return TĂNG DẦN — chỉ để người đọc, không
 # điều khiển quyết định giao dịch (xem §2.2 của brain doc). StrategyOrchestrator
@@ -128,6 +216,10 @@ class BICCandidateResult:
     converged: bool
     n_iter: int
     n_params: int
+    # |delta| lớn nhất trong các cảnh báo "not converging" của restart
+    # THẮNG cuộc. 0.0 = không có cảnh báo nào. Mặc định để mọi caller cũ
+    # (test dựng thẳng dataclass) không phải đổi.
+    max_em_divergence: float = 0.0
 
 
 @dataclass
@@ -233,6 +325,22 @@ class HMMRegimeEngine:
 
         self.feature_names = list(features.columns)
         self.model, self.bic_results = self.scan_bic(features)
+
+        # HỢP ĐỒNG TƯỜNG MINH, không phải phụ phẩm.
+        #
+        # Lớp bảo vệ duy nhất chống model phân kỳ là vòng random restart —
+        # `scan_bic` giữ restart có log-likelihood cao nhất, và một fit đã
+        # phân kỳ thì log-likelihood tệ nên luôn thua. Đo trên backtest kiểm
+        # định: 0/13 cửa sổ chọn phải model phân kỳ, dù 10/13 cửa sổ CÓ
+        # chứa restart phân kỳ.
+        #
+        # Nhưng đó là một quan sát về dữ liệu đã thấy, không phải một bảo
+        # đảm. Giảm `n_init` làm nó mỏng đi và KHÔNG phép kiểm nào phản đối
+        # — cho tới dòng này. RAISE chứ không log: một model phân kỳ vẫn
+        # trả về số từ `predict_regime_filtered()`, nó không hỏng ở chỗ
+        # nhìn thấy được.
+        self._assert_chosen_model_converged()
+
         self.training_date = datetime.now(timezone.utc)
         self.data_hash = self._compute_data_hash(features)
         self.regime_infos = self._build_regime_infos()
@@ -276,6 +384,7 @@ class HMMRegimeEngine:
             # Đây là thứ làm ngưỡng regression 0.001 có nghĩa: hai lần chạy
             # cùng dữ liệu phải cho cùng model. Đo thật ở
             # tests/test_determinism.py, không suy luận.
+            best_restart_divergence = 0.0
             for restart in range(self.n_init):
                 candidate = GaussianHMM(
                     n_components=n_components,
@@ -284,11 +393,17 @@ class HMMRegimeEngine:
                     tol=_EM_TOL,
                     random_state=self.seed + restart,
                 )
-                candidate.fit(X)
+                # Bọc TỪNG lần fit riêng: cảnh báo phải quy được về đúng
+                # restart phát ra nó, không phải về cả cụm. Cụm thì restart
+                # thắng luôn "có vẻ phân kỳ" chỉ vì một restart khác đã phân
+                # kỳ, và khẳng định ở `select_and_train` thành vô dụng.
+                with _theo_doi_phan_ky() as thu:
+                    candidate.fit(X)
                 score = candidate.score(X)
                 if score > best_restart_score:
                     best_restart_score = score
                     best_restart = candidate
+                    best_restart_divergence = thu.phan_ky_max
 
             assert best_restart is not None
             bic = best_restart.bic(X)
@@ -296,6 +411,7 @@ class HMMRegimeEngine:
             result = BICCandidateResult(
                 n_components=n_components,
                 bic=bic,
+                max_em_divergence=best_restart_divergence,
                 log_likelihood=best_restart_score,
                 converged=bool(best_restart.monitor_.converged),
                 n_iter=best_restart.monitor_.iter,
@@ -328,6 +444,23 @@ class HMMRegimeEngine:
         )
 
         return best_model, bic_results
+
+    def _assert_chosen_model_converged(self) -> None:
+        """Model được BIC chọn không được tự nó phân kỳ trong lúc train."""
+        assert self.model is not None
+        chon = min(self.bic_results, key=lambda r: r.bic)
+        if chon.max_em_divergence <= _EM_DIVERGENCE_DELTA:
+            return
+        raise EMDivergenceError(
+            f"Model được BIC chọn (n_components={chon.n_components}, "
+            f"BIC={chon.bic:.2f}) phân kỳ trong lúc train: log-likelihood "
+            f"GIẢM {chon.max_em_divergence:.1f} ở ít nhất một vòng EM "
+            f"(ngưỡng {_EM_DIVERGENCE_DELTA}). EM đảm bảo log-likelihood đơn "
+            f"điệu tăng, nên đây là hỏng số học, không phải 'chưa hội tụ'. "
+            f"Tăng n_init (đang {self.n_init}, sàn sản xuất {MIN_N_INIT}) "
+            f"hoặc giảm n_components / đổi covariance_type. "
+            f"Xem docs/DECISIONS.md 'Phân kỳ EM trong backtest kiểm định'."
+        )
 
     def _build_regime_infos(self) -> list[RegimeInfo]:
         """Đọc trực tiếp means_/covars_ của model đã fit — KHÔNG per-bar

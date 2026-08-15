@@ -127,6 +127,41 @@ Không thêm feature vào HMM mà không chạy ablation test và ghi kết qu�
 
 `covariance_type="full"` làm số tham số tăng bậc hai theo số feature. Mỗi feature thêm vào là một khoản nợ overfit.
 
+### 13b. `n_init` là tham số AN TOÀN, không phải tham số tốc độ
+
+Toàn bộ lớp bảo vệ chống model HMM phân kỳ nằm ở vòng random restart:
+`scan_bic` giữ restart có log-likelihood **cao nhất**, và một fit đã phân
+kỳ thì log-likelihood tệ nên luôn thua. Không có cơ chế nào khác.
+
+Đo trên backtest kiểm định (650 lần `.fit()`, 13 cửa sổ): **10.5% số lần
+fit phân kỳ** (`|delta|` cực đại 128.8), nhưng **0/13 cửa sổ chọn phải
+model phân kỳ** — dù 10/13 cửa sổ CÓ chứa restart phân kỳ. Vòng restart
+làm đúng việc của nó.
+
+Đó là quan sát về dữ liệu đã thấy, không phải bảo đảm. Giảm `n_init` làm
+lớp bảo vệ mỏng đi theo hàm mũ, và trước 2026-08-15 **không phép kiểm nào
+phản đối** — `prompts/` phase-12b §0.3 còn đề xuất giảm xuống 3 cho kịch
+bản "nhanh".
+
+Ba thứ giữ nó lại, đừng gỡ cái nào:
+
+1. `core.hmm_engine.MIN_N_INIT` = 6 — **suy ra từ số đo, không phải số
+   tròn** (#18): ô (cửa sổ, `n_components`) tệ nhất có 7/10 restart dùng
+   được, tức 30% "bẩn"; `ceil(ln(0.001)/ln(0.3))` = 6.
+2. `config/validate.py::check_n_init_floor` — cổng chạy trước mỗi lần
+   khởi động, gác `settings.yaml`. KHÔNG gác `__init__`: test dùng
+   `n_init=1..3` trên dữ liệu tổng hợp là hợp lệ và cần cho tốc độ.
+3. `select_and_train()` **raise** `EMDivergenceError` nếu model được BIC
+   chọn tự nó phân kỳ. Raise chứ không log: một model phân kỳ vẫn cho
+   `predict_regime_filtered()` chạy được và trả về số — nó không hỏng ở
+   chỗ nhìn thấy được.
+
+Đo kèm theo, cần biết trước khi tin vào lựa chọn BIC: **`n_init` hiệu
+dụng ≈ 9.55/10** theo tiêu chí phân kỳ. Nhưng theo tiêu chí "không tràn
+số" thì là **0/650** — `covariance_type="full"` làm **mọi** lần fit đi
+qua `overflow`/`divide by zero` trong `matmul` (tối thiểu 111 lần mỗi
+fit). Xem `docs/DECISIONS.md`.
+
 ### 14. Tham số nằm trong `settings.yaml`
 
 Không magic number trong code. Nếu một con số có thể cần chỉnh, nó thuộc về config. Điều này làm cho việc quét tham số ở Phase 4 trở nên khả thi.

@@ -3068,3 +3068,86 @@ rộng thanh ghi vector.
 Ubuntu runner còn chờ số liệu. Cho tới lúc đó, KHÔNG kết luận nguyên
 nhân — mẫu hỏng của dự án này là kết luận từ đọc code thay vì từ số đo,
 và nó đã lặp bốn lần.
+
+## Cửa sổ nào lệch, và `n_init` hiệu dụng (2026-08-15)
+
+### Mục 1 — giả thuyết "cửa sổ biên BIC 3.0 gây ra bar lệch" là SAI
+
+Bar đầu tiên lệch giữa local và CI là **2025-05-16**. Cửa sổ có biên BIC
+3.0 điểm là **#11**, và OOS của nó là **2025-10-20 → 2026-04-19** —
+**không chứa** 2025-05-16.
+
+| # | IS | OOS | biên BIC | % | thắng | nhì |
+|---|---|---|---|---|---|---|
+| 9 | 2023-10-22 → 2024-10-20 | 2024-10-21 → 2025-04-20 | 25.0 | 0.35% | 4 | 5 |
+| **10** | **2024-04-21 → 2025-04-20** | **2025-04-21 → 2025-10-19** | **36.4** | **0.53%** | **5** | **4** |
+| 11 | 2024-10-20 → 2025-10-19 | 2025-10-20 → 2026-04-19 | **3.0** | 0.04% | 4 | 5 |
+| 12 | 2025-04-20 → 2026-04-19 | 2026-04-20 → 2026-08-04 | 99.3 | 1.51% | 5 | 4 |
+
+Cửa sổ THẬT SỰ giao dịch 2025-05-16 là **#10**: biên BIC **36.4 (0.53%)**,
+thắng `n_components=5`, á quân `4`. Đó là biên rộng thứ 5 trong 13 — **không
+có gì mong manh bất thường**.
+
+**Vòng nhân quả KHÔNG đóng được.** Cơ chế "nhiễu liên máy lật lựa chọn BIC
+ở cửa sổ mong manh nhất" không giải thích được bar 2025-05-16, vì cửa sổ
+mong manh nhất trade một giai đoạn KHÁC, muộn hơn 5 tháng.
+
+Giả thuyết thay thế còn để ngỏ, chưa đo: khác biệt không đến từ việc lật
+`n_components`, mà từ việc cùng `n_components=5` cho ra **tham số model
+khác nhau** (restart nào thắng, hoặc EM dừng ở điểm khác) — thứ không lộ
+ra ở bảng BIC. Muốn phân biệt cần so `means_`/`transmat_` của cửa sổ #10
+giữa hai máy, không phải so BIC.
+
+Cửa sổ #11 (biên 3.0) vẫn là điểm yếu đã biết, chỉ là **không phải điểm
+yếu đã kích hoạt**: nếu chạy đủ dài để tới OOS của nó, nó là chỗ dễ lật
+nhất.
+
+### Mục 3 — `n_init` hiệu dụng
+
+Định nghĩa "dùng được" quyết định câu trả lời, nên ghi cả hai:
+
+| tiêu chí | restart dùng được | `n_init` hiệu dụng |
+|---|---|---|
+| không phân kỳ `\|delta\|>1`, không chạm trần `n_iter` | 621/650 (95.5%) | **9.55/10** |
+| thêm điều kiện **không tràn số** | **0/650 (0.0%)** | **0** |
+
+Tiêu chí thứ hai không phân biệt được gì — **mọi** lần fit đều tràn:
+tối thiểu 111 lần `overflow`/`divide by zero` trong `matmul` mỗi fit,
+trung vị 273, cực đại 810. Đó không phải một phép đo hỏng; đó là câu trả
+lời: với `covariance_type="full"` và 8 feature, **không có model nào
+trong dự án này được fit mà không đi qua tràn số**.
+
+Theo tiêu chí phân kỳ thì không gian tìm kiếm KHÔNG hẹp hơn danh nghĩa
+đáng kể — ô (cửa sổ, `n_components`) tệ nhất vẫn còn 7/10 restart dùng
+được, và 0/65 ô có ≤ 3.
+
+| # | n=3 | n=4 | n=5 | n=6 | n=7 |
+|---|---|---|---|---|---|
+| tệ nhất | 10 | 8 | 9 | 8 | **7** |
+
+Con số 7/10 đó là căn cứ của `MIN_N_INIT = 6`:
+`ceil(ln(0.001)/ln(0.3)) = 6` — xác suất MỌI restart trong một ô đều bẩn
+dưới 0.1%.
+
+### Mục 2 — lớp bảo vệ phụ phẩm thành hợp đồng
+
+Trước hôm nay, "fit phân kỳ luôn thua vì log-likelihood tệ" là một **hệ
+quả phụ** của `n_init`, không phải một phòng thủ có chủ ý, và không phép
+kiểm nào giữ nó lại. Ba thứ đã thêm: `MIN_N_INIT` (suy từ số đo),
+`check_n_init_floor` trong cổng cấu hình, và `EMDivergenceError` raise từ
+`select_and_train`.
+
+**Đột biến, hai vòng.** Vòng đầu 6/8 đỏ, hai sống sót — cả hai là lỗ hổng
+thật, không phải đột biến tương đương:
+
+- *"bỏ khẳng định trong `select_and_train`"* sống vì mọi test gọi THẲNG
+  `_assert_chosen_model_converged()`. Không ai kiểm nó ĐƯỢC GỌI — đúng
+  mẫu hỏng của cổng §E: một cổng không nối vào đường thật là một cổng
+  không tồn tại.
+- *"phân kỳ của restart thắng luôn = 0"* sống vì không test nào kiểm
+  trường `max_em_divergence` được ĐIỀN từ fit thật. Cả cổng đứng trên nó.
+
+Thêm ba test đi qua `scan_bic`/`select_and_train` với một `GaussianHMM`
+giả (không có cách nào ép EM thật phân kỳ một cách tất định — một test
+dựa vào "nó thường xảy ra" là test ngẫu nhiên đội lốt). Vòng hai: **8/8
+đỏ**.
