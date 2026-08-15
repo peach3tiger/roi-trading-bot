@@ -202,7 +202,7 @@ jobs:
       # MỘT bước duy nhất. Bản cũ tách "xác định mốc" khỏi "dò diff" và
       # truyền BASE qua `$GITHUB_OUTPUT`; gộp lại để không còn ranh giới
       # nào cho giá trị đi lạc, và để `set -euo pipefail` phủ cả hai việc.
-      - name: Cổng §E — dò phạm vi diff
+      - name: Dò phạm vi diff (§E)
         id: scope
         shell: bash
         run: |

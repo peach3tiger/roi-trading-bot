@@ -346,16 +346,84 @@ def test_ci_checkout_day_du_lich_su() -> None:
     assert checkout[0]["with"]["fetch-depth"] == 0
 
 
+def _buoc_theo_lenh(manh: str) -> dict:
+    """Chọn bước theo LỆNH nó chạy, không theo TÊN.
+
+    Bản đầu chọn theo tên (`n.startswith("Cổng §E")`) và gãy ngay khi có
+    bước thứ hai cùng tiền tố. Tên là nhãn cho người đọc và sẽ đổi; lệnh
+    là thứ CI thật sự thi hành.
+    """
+    hop = [s for s in _slow_gate_steps() if manh in s.get("run", "")]
+    assert len(hop) == 1, f"cần đúng 1 bước chạy {manh!r}, thấy {len(hop)}"
+    return hop[0]
+
+
+def _buoc_do_pham_vi() -> dict:
+    """Bước dò, chọn theo `id` — `id` là thứ các bước sau THAM CHIẾU, nên
+    nó là danh tính thật của bước. Chọn theo nội dung `run` không dùng được
+    ở đây: bước CHẨN ĐOÁN tạm cố ý chạy cùng biểu thức để đối chiếu."""
+    hop = [s for s in _slow_gate_steps() if s.get("id") == "scope"]
+    assert len(hop) == 1, f"cần đúng 1 bước id=scope, thấy {len(hop)}"
+    return hop[0]
+
+
 def test_ci_chay_slow_va_cong_khi_co_file_trong_pham_vi() -> None:
     """Hai bước phải cùng ĐIỀU KIỆN `if`: chạy slow mà không chạy cổng thì
     không ai kiểm kết quả; chạy cổng mà không chạy slow thì cổng chắc chắn
     FAIL trên CI sạch (không có biên lai)."""
-    buoc = {s.get("name", ""): s for s in _slow_gate_steps()}
-    slow = next(s for n, s in buoc.items() if "pytest -m slow" in n)
-    cong = next(s for n, s in buoc.items() if n.startswith("Cổng §E"))
+    slow = _buoc_theo_lenh("pytest -m slow")
+    cong = _buoc_theo_lenh("ops/readiness_gate.py")
 
     assert slow["if"] == cong["if"]
-    assert "!= '0'" in slow["if"]
+    assert slow["if"] == "steps.scope.outputs.touched == 'true'"
+
+
+def test_do_pham_vi_va_bo_qua_la_hai_nhanh_bu_nhau() -> None:
+    """Một cổng LUÔN chạy cũng vô dụng như một cổng KHÔNG BAO GIỜ chạy: nó
+    sẽ bị tắt trong tuần đầu. Hai nhánh phải phủ đúng hai trạng thái của
+    cùng một cờ boolean — không có trạng thái thứ ba để hiểu nhầm."""
+    dieu_kien = {s["if"] for s in _slow_gate_steps() if "if" in s}
+
+    assert dieu_kien == {
+        "steps.scope.outputs.touched == 'true'",
+        "steps.scope.outputs.touched == 'false'",
+    }
+
+
+def test_bat_dau_do_va_ket_thuc_do_nam_trong_MOT_buoc() -> None:
+    """Mỗi `run:` của GitHub Actions là một shell RIÊNG. Bản cũ tách "xác
+    định mốc" khỏi "dò diff" thành hai bước; mọi ranh giới như vậy là một
+    chỗ giá trị có thể đi lạc mà không ai thấy."""
+    buoc = _buoc_do_pham_vi()
+
+    assert "github.event.before" in buoc["run"], "mốc so phải xác định TRONG cùng bước"
+    assert buoc.get("shell") == "bash"
+    assert "set -euo pipefail" in buoc["run"]
+
+
+def test_git_diff_khong_bao_gio_di_thang_vao_pipe() -> None:
+    """CLAUDE.md #17. `git diff ... | grep -c` in ra "0" kể cả khi `git
+    diff` CHẾT — và "0" là chính xác giá trị nghĩa là "sạch, cho qua".
+
+    Đây là khiếm khuyết đã làm cổng §E không gác gì kể từ khi được viết:
+    một diff hỏng và một diff sạch trông giống hệt nhau.
+    """
+    buoc = _buoc_do_pham_vi()
+
+    for dong in buoc["run"].splitlines():
+        if "git diff" in dong and not dong.strip().startswith("#"):
+            assert "|" not in dong, f"git diff đi vào pipe, exit code bị nuốt: {dong.strip()}"
+
+
+def test_khong_xac_dinh_duoc_moc_so_thi_DO_khong_phai_bo_qua() -> None:
+    """Chế độ hỏng CLAUDE.md #19: một cổng không kiểm được phải HỎNG TO,
+    không được rơi vào nhánh "không chạm" rồi in "Bỏ qua". Bản cũ làm đúng
+    điều đó và trông xanh suốt."""
+    buoc = _buoc_do_pham_vi()
+
+    assert buoc["run"].count("exit 1") >= 2, (
+        "cần ÍT NHẤT hai lối thoát đỏ: BASE không xác định được, và git diff chết"
+    )
 
 
 def test_readiness_gate_co_trong_tai_lieu() -> None:
