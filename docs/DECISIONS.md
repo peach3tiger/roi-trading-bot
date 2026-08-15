@@ -2931,3 +2931,123 @@ mà tưởng là ba tuần sự cố riêng biệt sẽ dẫn tới kết luận
 `unfilled_order_degraded_seconds` là mục HOÃN chứ không phải "chưa đo":
 backtest không mô phỏng độ trễ khớp nên không tồn tại phân phối để trượt
 cửa sổ. Gỡ khi testnet tích đủ vài chục lệnh thật.
+
+## Phân kỳ EM trong backtest kiểm định — đo, không suy (2026-08-15)
+
+### Vì sao đo
+
+`tests/regression_harness.py` đỏ trên `ubuntu-latest` trong khi xanh trên
+macOS. Log CI kèm hàng chục `hmmlearn: Model is not converging` với
+`delta = -161`. Delta âm 161 không phải nhiễu làm tròn — EM có tính chất
+log-likelihood **đơn điệu tăng**, nên một lần giảm 161 là phân kỳ thật.
+
+Câu hỏi thật không phải "CI có xanh không" mà: **nếu BIC đang chọn model
+giữa các lần fit phân kỳ như vậy, lựa chọn đó do nhiễu quyết định**, và
+mọi kết luận Phase 7 đứng trên nó.
+
+### Cách đo
+
+Bọc `GaussianHMM.fit` và `HMMRegimeEngine.scan_bic`, chạy đúng backtest
+ghim của harness (pruned-8, 2018-02-09 → 2026-08-04, 13 cửa sổ
+walk-forward). Bắt cảnh báo qua `logging` handler trên logger `hmmlearn`.
+
+**Hai sai lầm đo lường đã mắc và sửa** — ghi lại vì cả hai đều cho ra một
+con số trông hợp lý:
+
+1. Bản đầu đọc `monitor_.converged`. Vô dụng: hmmlearn trả `True` khi
+   `iter == n_iter`, tức **chạm trần lặp cũng được tính là hội tụ**. Nó
+   báo `0/650 không hội tụ` trong khi thực tế 68 lần phát cảnh báo.
+2. Bản hai khớp model được chọn bằng `id(best_model)`. `id()` được **tái
+   sử dụng** sau khi các candidate thua bị GC, nên nó khớp nhầm bản ghi —
+   báo `n_components` được chọn là 3,5,3,6,… trong khi bảng BIC nói
+   5,6,4,6,…. Sửa bằng nhãn gắn trên chính đối tượng.
+
+Không phát hiện được (2) nếu không đối chiếu chéo với bảng BIC. Một con
+số đơn lẻ không tự tố cáo mình sai.
+
+### Kết quả
+
+| | |
+|---|---|
+| tổng số lần `.fit()` | 650 |
+| phát ít nhất một `not converging` | **68 (10.5%)** |
+| có cảnh báo với `\|delta\| > 1` | **27 (4.2%)** |
+| chạm trần `n_iter` | 2 (0.3%) |
+| `\|delta\|` lớn nhất | **128.8** |
+| `\|delta\|` trung vị trong nhóm > 1 | 78.9 |
+| `overflow`/`divide by zero`/`invalid` trong `matmul` | **62.534 lần** |
+
+Phân kỳ tăng theo số trạng thái — đúng như kỳ vọng với
+`covariance_type="full"` (số tham số tăng bậc hai):
+
+| `n_components` | fit phân kỳ `\|delta\|>1` |
+|---|---|
+| 3 | 0/130 (0.0%) |
+| 4 | 2/130 (1.5%) |
+| 5 | 5/130 (3.8%) |
+| 6 | 7/130 (5.4%) |
+| 7 | 13/130 (10.0%) |
+
+### Kết luận cho Phase 7: lựa chọn KHÔNG do nhiễu quyết định
+
+**0/13 cửa sổ chọn phải một model phân kỳ.** Ở cả 13 cửa sổ, model được
+BIC chọn có `0` cảnh báo `|delta|>1` và không chạm trần lặp — dù 10/13
+cửa sổ CÓ chứa ít nhất một restart phân kỳ trong số 50 lần thử.
+
+Cơ chế bảo vệ là vòng random restart: `scan_bic` giữ restart có
+log-likelihood **cao nhất**, và một fit đã phân kỳ thì log-likelihood
+tệ, nên nó luôn thua. Cơ chế này chưa từng được viết ra như một phép
+phòng thủ có chủ ý — nó là hệ quả phụ của `n_init`, và giờ được ghi lại
+kèm số đo.
+
+**Biên BIC giữa lựa chọn thắng và á quân** (thứ quyết định lựa chọn có
+mong manh không):
+
+| | |
+|---|---|
+| biên nhỏ nhất | **3.0** (0.04% của `\|BIC\|`) |
+| biên trung vị | 47.5 (0.66%) |
+
+Một cửa sổ có biên 3.0 điểm BIC. Đó là cửa sổ dễ lật nhất dưới một thay
+đổi số học nhỏ, và là ứng viên hàng đầu cho chỗ đường equity bắt đầu lệch
+giữa hai máy.
+
+### Điều này KHÔNG chứng minh
+
+Không chứng minh kết quả Phase 7 đúng. Nó chỉ loại một chế độ hỏng cụ
+thể: "BIC chọn phải model rác". Vấn đề `covariance_type="full"` sinh
+62.534 lần tràn số vẫn còn nguyên, và 10.5% số fit đi qua vùng số học
+không tin cậy được là một khoản nợ đã lượng hoá chứ không phải đã trả.
+
+Chi tiết từng lần fit: `reports/do_hoi_tu_em.json`.
+
+## Tất định NỘI MÁY vs LIÊN MÁY — lần thứ tư (2026-08-15)
+
+`tests/regression_harness.py` xanh trên macOS, đỏ trên `ubuntu-latest`.
+`max_drawdown_pct` khớp 9 chữ số; đường equity lệch từ một bar ở giữa.
+
+**Đây là lần thứ TƯ một khẳng định "sạch" hoá ra hẹp hơn nó tự nhận**,
+sau: `regression_harness` chưa từng được thu thập; cổng §E chưa từng kích
+hoạt; thí nghiệm kiểm chứng cổng §E chưa từng chạy. Ba lần trước là phạm
+vi CHẠY. Lần này là phạm vi MÔI TRƯỜNG — mọi con số "bit-for-bit" và
+ngưỡng 0.001 của dự án này chỉ có nghĩa trên *cùng máy, cùng BLAS, cùng
+số thread*, và điều đó chưa bao giờ được viết ra.
+
+`ops/kiem_tat_dinh.py` cơ giới hoá cả hai phần: `--runs 0` in dấu vân tay
+môi trường, `--runs N` chạy backtest ghim N lần trong CÙNG tiến trình và
+so hash `repr()` từng float (không làm tròn, không `allclose` — câu hỏi
+là "cùng bit không", khác hẳn câu hỏi "chiến lược có trôi không").
+
+**Thứ tự bắt buộc:** loại bất định NỘI MÁY trước. Nếu cùng máy chạy hai
+lần đã khác nhau thì mọi so sánh liên máy đều vô nghĩa.
+
+### Đo được ở local (macOS arm64)
+
+| | |
+|---|---|
+| BLAS | **accelerate** |
+| threadpool mặc định | `openblas=10; openmp=10` |
+| python / numpy / scipy / sklearn / hmmlearn | 3.9.6 / 2.0.2 / 1.13.1 / 1.6.1 / 0.3.3 |
+| 2 lần chạy, `*_NUM_THREADS=1` | **CÙNG hash** `470fdff6…` |
+
+Tất định nội máy ĐẠT ở local. Ubuntu runner còn chờ số liệu.

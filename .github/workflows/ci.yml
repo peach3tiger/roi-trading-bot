@@ -129,6 +129,15 @@ jobs:
   slow-gate:
     name: Cổng §E — test chậm khi chạm tầng quyết định
     runs-on: ubuntu-latest
+    # Số thread BLAS đổi thứ tự cộng dồn trong `matmul`, và cộng dồn số
+    # thực KHÔNG kết hợp được. Đây là nguồn bất định phổ biến nhất và rẻ
+    # nhất để loại — đặt ở tầng JOB vì phải có TRƯỚC khi numpy nạp.
+    env:
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+      NUMEXPR_NUM_THREADS: 1
+      VECLIB_MAXIMUM_THREADS: 1
     steps:
       # `fetch-depth: 0` — cổng chạy `git diff <base>..HEAD`; một bản
       # checkout nông không có `base` để so, và cổng sẽ hỏng theo kiểu
@@ -254,6 +263,13 @@ jobs:
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           if [ "$N" -gt 0 ]; then echo "touched=true" >> "$GITHUB_OUTPUT"
           else echo "touched=false" >> "$GITHUB_OUTPUT"; fi
+
+      # Trước khi đổ cho "khác máy", phải loại khả năng CÙNG MÁY chạy hai
+      # lần đã khác nhau — nếu vậy vấn đề nặng hơn nhiều và mọi so sánh
+      # liên máy đều vô nghĩa. `--runs 2` trả exit 1 khi hai hash khác nhau.
+      - name: Tất định NỘI MÁY + dấu vân tay số học
+        if: steps.scope.outputs.touched == 'true'
+        run: python ops/kiem_tat_dinh.py --runs 2
 
       - name: pytest -m slow (BẮT BUỘC khi diff chạm tầng quyết định)
         if: steps.scope.outputs.touched == 'true'

@@ -320,6 +320,40 @@ tại. `ops/verify_scope.py` cơ giới hoá điều này; `tests/test_verify_sc
 ghim nó. Đường dẫn trong một mục nghiệm thu mà không tồn tại là **FAIL**,
 không phải "sạch".
 
+#### Tất định của dự án này là tất định NỘI MÁY
+
+**Chưa từng được kiểm chứng liên máy.** Mọi khẳng định "bit-for-bit",
+"tất định", và ngưỡng hồi quy 0.001 chỉ có nghĩa trong phạm vi: *cùng
+máy, cùng interpreter, cùng BLAS, cùng số thread.*
+
+Phát hiện 2026-08-15: `tests/regression_harness.py` xanh trên macOS
+(BLAS = Accelerate, arm64) và ĐỎ trên `ubuntu-latest` (OpenBLAS, x86_64)
+— `max_drawdown_pct` khớp tới 9 chữ số nhưng đường equity lệch từ một bar
+ở giữa. Đây là lần thứ TƯ một khẳng định "sạch" hoá ra hẹp hơn nó tự
+nhận, sau: `regression_harness` chưa từng được thu thập, cổng §E chưa
+từng kích hoạt, và thí nghiệm kiểm chứng cổng §E chưa từng chạy.
+
+Vì sao dự án này đặc biệt nhạy: EM của `hmmlearn` khuếch đại sai khác
+chữ số cuối. Đo trên backtest kiểm định (pruned-8, 13 cửa sổ, 650 lần
+`.fit()`): **10.5% số lần fit phát cảnh báo "Model is not converging",
+4.2% có `|delta| > 1`, `|delta|` lớn nhất 128.8**, kèm 62.534 lần
+`overflow`/`divide by zero` trong `matmul`. Một chuỗi tính toán đi qua
+vùng tràn số như vậy không có lý do gì cho cùng kết quả dưới hai thư
+viện BLAS khác nhau.
+
+**Bắt buộc:**
+
+- Mọi khẳng định tất định phải kèm dấu vân tay môi trường:
+  `python ops/kiem_tat_dinh.py --runs 0` in ra BLAS, số thread, kiến
+  trúc, phiên bản numpy/scipy/hmmlearn.
+- Trước khi kết luận "khác máy", loại khả năng **bất định nội máy** bằng
+  `--runs 2` (chạy hai lần trong CÙNG tiến trình, so hash `repr()` từng
+  float — không làm tròn, không `allclose`). Khác nhau ở đó nghĩa là vấn
+  đề nặng hơn nhiều và mọi so sánh liên máy đều vô nghĩa.
+- Job CI chạy test chậm phải đặt `OMP_NUM_THREADS=1` và các biến anh em ở
+  tầng **job**, không phải trong Python — số thread BLAS đổi thứ tự cộng
+  dồn, và cộng dồn số thực không kết hợp được.
+
 ### 20. Không bao giờ hai tiến trình cùng khả năng đặt lệnh trên một tài khoản
 
 Đây là **bất biến**, không phải lựa chọn triển khai.
