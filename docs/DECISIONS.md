@@ -3049,5 +3049,22 @@ lần đã khác nhau thì mọi so sánh liên máy đều vô nghĩa.
 | threadpool mặc định | `openblas=10; openmp=10` |
 | python / numpy / scipy / sklearn / hmmlearn | 3.9.6 / 2.0.2 / 1.13.1 / 1.6.1 / 0.3.3 |
 | 2 lần chạy, `*_NUM_THREADS=1` | **CÙNG hash** `470fdff6…` |
+| 2 lần chạy, thread mặc định (10) | **CÙNG hash** `470fdff6…` |
 
-Tất định nội máy ĐẠT ở local. Ubuntu runner còn chờ số liệu.
+**Bốn lần chạy, MỘT hash.** Tất định nội máy ĐẠT ở local, và — quan trọng
+hơn — **số thread KHÔNG đổi kết quả trên máy này**. Hash của bộ 1 thread
+và bộ 10 thread giống hệt nhau.
+
+Điều này LOẠI threading khỏi danh sách nghi phạm ở phía macOS. Nó không
+loại được ở phía Ubuntu: Accelerate và OpenBLAS có chiến lược chia khối
+khác nhau, nên "1 thread không đổi gì" ở đây không suy ra được điều tương
+tự ở kia. Biến `*_NUM_THREADS=1` vẫn giữ trong CI — nó rẻ, và giá trị của
+nó là làm cho số liệu Ubuntu **diễn giải được**, không phải để sửa lỗi.
+
+Nghi phạm còn lại, theo thứ tự: (1) thư viện BLAS — `accelerate` vs
+`openblas`; (2) kiến trúc — `arm64` vs `x86_64`, khác nhau ở FMA và độ
+rộng thanh ghi vector.
+
+Ubuntu runner còn chờ số liệu. Cho tới lúc đó, KHÔNG kết luận nguyên
+nhân — mẫu hỏng của dự án này là kết luận từ đọc code thay vì từ số đo,
+và nó đã lặp bốn lần.
