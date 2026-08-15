@@ -24,7 +24,7 @@ from ta.volatility import AverageTrueRange
 
 from core.hmm_engine import RegimeInfo, RegimeState
 
-_EMA_PERIOD = 50
+_EMA_PERIOD = 50  # TEST-CONG-E: kiểm cổng §E, sẽ xoá
 _ATR_PERIOD = 14
 _UNCERTAINTY_SUFFIX = " [UNCERTAINTY — size halved]"
 
