@@ -2931,3 +2931,75 @@ mà tưởng là ba tuần sự cố riêng biệt sẽ dẫn tới kết luận
 `unfilled_order_degraded_seconds` là mục HOÃN chứ không phải "chưa đo":
 backtest không mô phỏng độ trễ khớp nên không tồn tại phân phối để trượt
 cửa sổ. Gỡ khi testnet tích đủ vài chục lệnh thật.
+
+
+## MẪU: cổng có ĐIỀU KIỆN KÍCH HOẠT thì điều kiện đó cũng phải được kiểm chứng (2026-08-15)
+
+Ba lần trong hai ngày, cùng một mẫu. **Không phải ba sự cố riêng lẻ.**
+
+| Lần | Cổng | Điều kiện kích hoạt | Vì sao nó không bao giờ đúng | Cổng có bao giờ chạy? |
+|---|---|---|---|---|
+| 1 | `regression_harness` | pytest phải **thu thập** file | tên `regression_harness.py` không khớp `python_files = test_*.py` | **CHƯA từng** |
+| 2 | Cổng §E (CI) | diff phải **chạm** `core/`/`backtest/` | phép dò diff hỏng — xem dưới | **CHƯA từng** |
+| 3 | Thí nghiệm kiểm chứng cổng §E | CI phải **chạy** trên nhánh được push | `on: push: branches: [main]` | **KHÔNG chạy** |
+
+Cả ba đều **xanh**. Cả ba đều **chưa chạy**. Và lần 3 là phép kiểm chứng
+của lần 2 — tức là cái mẫu này đã tự tái diễn ngay trong lúc đang được
+điều tra.
+
+### Bài học, phát biểu chính xác
+
+Kiểm chứng bản thân cổng là **chưa đủ**. Một cổng gồm hai phần:
+
+1. **Logic** — "khi chạy, nó có bắt được không?"
+2. **Điều kiện kích hoạt** — "nó có bao giờ chạy không?"
+
+Mọi phép kiểm chứng từ trước tới nay chỉ chạm phần 1. `regression_harness`
+được chạy TƯỜNG MINH (`pytest tests/regression_harness.py`) nên logic đúng
+— và cách gọi đó bỏ qua đúng phần 2. Cổng §E được test bằng
+`tests/test_readiness_gate.py` trên repo giả — logic đúng, và bộ test đó
+không đụng tới bước YAML dò diff.
+
+**Phần 2 chỉ kiểm được bằng cách làm cho nó PHẢI kích hoạt, rồi xem nó có
+kích hoạt không.** Không đọc code thay được.
+
+### Sửa attribution: mục "Cổng §E đỏ đúng vai" là SAI
+
+Mục "CI xác nhận trên GitHub Actions" (2026-08-15) ghi *"`c7fb25b` sửa
+`core/regime_strategies.py`, nên job Cổng §E chạy đúng vai và nó ĐỎ"*.
+
+**Sai.** Bằng chứng thật: job "Cổng §E" trên `c7fb25b` **SUCCEEDED in
+1m55s**, bước cuối ghi *"Bỏ qua (diff không chạm tầng quyết định)"* — trên
+chính commit sửa `_EMA_PERIOD`. Tôi đã đọc nhầm ảnh chụp CI **#1** thành
+CI **#8**.
+
+Cả hai job đỏ ở CI #8 mà tôi ghi thực ra là **một** job đỏ (`pytest
+-m 'not slow'`) cộng một job xanh-một-cách-rỗng.
+
+### Nguyên nhân kỹ thuật của lần 2
+
+`_EMA_PERIOD` nằm ở `core/regime_strategies.py:27`, và `c7fb25b` sửa đúng
+và chỉ file đó. Bước dò diff:
+
+```bash
+n=$(git diff --name-only "$BASE..HEAD" | grep -cE '^(core|backtest)/' || true)
+```
+
+**`grep -c` in ra `0` kể cả khi `git diff` chết** — đầu vào rỗng vẫn cho
+`0`. `set -o pipefail` bắt được lỗi, nhưng `|| true` nuốt mất. Nên một
+`git diff` HỎNG không phân biệt được với một diff SẠCH: đúng chế độ hỏng
+`CLAUDE.md` #19, lần này nằm trong code do tôi viết ra để thi hành #19.
+
+Nguyên nhân `$BASE` sai còn ĐANG ĐO — không kết luận từ việc đọc code.
+Ứng viên: `github.event.before` = 40 số 0 khi push đầu vào nhánh mới.
+
+### Trạng thái
+
+- Lần 1: **đã sửa** (`python_files` + `tests/test_collection_scope.py`).
+- Lần 3: **đã sửa** (`on: push: branches: ['**']` + `workflow_dispatch`),
+  chi phí đo được 5/50 commit chạm `core/` nên `slow-gate` chỉ chạy bộ
+  slow ở 10% số lần push.
+- Lần 2: **bản sửa đã viết nhưng CHƯA push** — chờ dữ liệu từ nhánh
+  `test-cong-e-doi-core` (commit `9d430ef`). Push bản sửa trước khi có dữ
+  liệu thì thấy xanh cũng không biết xanh vì sửa đúng hay vì cổng vẫn chưa
+  chạy.

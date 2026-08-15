@@ -77,10 +77,12 @@ kill+restart thật, `--dry-run` 24h, dashboard/Telegram thật.
    + lệnh XÁC MINH (chứng minh tiến trình đang chạy thật, không chỉ "load
    không báo lỗi") ở `ops/RUNBOOK.md` mục "Nạp watchdog + data harness vào
    launchd — BỐN LỆNH".
-5. **Đọc log CI #8 (`c7fb25b`), job "Cổng §E", xem bước nào đỏ.** Hai khả
-   năng có ý nghĩa khác hẳn nhau: một test slow hỏng riêng trên CI, hay cơ
-   chế biên lai `.slow_receipt.json` không hoạt động trên runner sạch. Xem
-   `docs/DECISIONS.md` mục "CI xác nhận trên GitHub Actions".
+5. **CỔNG §E CHƯA TỪNG GÁC GÌ TRÊN CI — đang sửa.** Job "Cổng §E" trên
+   `c7fb25b` SUCCEEDED, bước cuối "Bỏ qua (diff không chạm tầng quyết
+   định)" trên chính commit sửa `core/regime_strategies.py`. Bản sửa đã
+   viết, **chưa push**; đang chờ dữ liệu CI từ nhánh
+   `test-cong-e-doi-core` (`9d430ef`) để biết cổng hỏng ở đâu trước khi
+   sửa. Xem `docs/DECISIONS.md` mục "MẪU: cổng có ĐIỀU KIỆN KÍCH HOẠT".
 
 ## Cạm bẫy đang mở
 
