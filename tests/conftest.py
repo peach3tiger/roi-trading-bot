@@ -126,10 +126,19 @@ NON_SECRET_ENV = (
     "STATE_DIR",
     "WATCHDOG_POLL_SEC",
     "WATCHDOG_STALE_SEC",
-    # Đường dẫn file do GitHub Actions cấp; `ops/ci_bao_cao.py` ghi
-    # bảng markdown vào đó. Không bí mật, và vắng mặt ở local là
-    # trạng thái BÌNH THƯỜNG — `them_summary()` trả False.
+    # Đường dẫn file do GitHub Actions cấp; `ops/ci_bao_cao.py` ghi bảng
+    # markdown vào đó. Không bí mật, và vắng mặt ở local là trạng thái
+    # BÌNH THƯỜNG — `them_summary()` trả False.
     "GITHUB_STEP_SUMMARY",
+    # Số thread BLAS. `ci.yml` đặt cả năm ở tầng job và
+    # `ops/kiem_tat_dinh.py` đọc chúng để in dấu vân tay. Tham số VẬN
+    # HÀNH, không phải bí mật — nhưng chúng đổi KẾT QUẢ SỐ, nên phải có
+    # mặt trong dấu vân tay chứ không được lặng lẽ vắng.
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 )
 
 

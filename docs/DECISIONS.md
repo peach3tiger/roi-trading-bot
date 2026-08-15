@@ -3215,7 +3215,7 @@ từng bước**. Điều đó chặn công việc ít nhất năm lần, và m�
 | bước CHẨN ĐOÁN chưa ai đọc | nguyên nhân gốc CI #8/#14 tới giờ **vẫn không biết** |
 | harness đỏ trên Ubuntu | phải đoán từ hai dòng người dùng chép lại |
 | tất định nội máy trên Ubuntu | chưa có số liệu |
-| bất đối xứng py3.9 vs py3.11 | chặn hoàn toàn — không có tên test đỏ |
+| ~~bất đối xứng py3.9 vs py3.11~~ | **KHÔNG TỒN TẠI** — xem mục "Bất đối xứng py3.9/py3.11 là ảo ảnh" bên dưới |
 
 Đây không phải năm sự cố riêng lẻ. Đó là **một** khiếm khuyết kiến trúc
 lặp lại: phép đo chạy ở nơi A, người cần nó ở nơi B, và giữa hai nơi chỉ
@@ -3358,3 +3358,91 @@ Phép đo tất định 2 lần (~4 phút) giữ nguyên ở `slow-gate` — đ�
 
 Đột biến 9 phép, **9/9 đỏ**, gồm cả hai đột biến vị trí ("dấu vân tay
 quay về chỉ ở slow-gate", "kéo phép đo 4 phút vào job fast").
+
+## Bất đối xứng py3.9/py3.11 là ẢO ẢNH — đọc trạng thái CI khi chưa chạy xong (2026-08-16)
+
+Ghi trước đó: "CI #21 py3.11 ĐỎ, py3.9 XANH — bất đối xứng theo phiên bản
+Python, chưa từng thấy". **SAI.** Cả hai job đỏ ở **cùng một test**. Job
+py3.9 hiện xanh vì lúc đọc nó **chưa chạy xong**.
+
+Chế độ hỏng: "chưa xong" và "đã xong, xanh" trông giống nhau đủ để đọc
+nhầm khi đang vội. Cùng họ với ba lần trước trong dự án này — "không có
+kết quả" đọc thành "sạch", "Bỏ qua" đọc thành "đã kiểm", `grep` trên thư
+mục không tồn tại đọc thành "không có vi phạm".
+
+Cái giá: một vòng chẩn đoán cho một hiện tượng không tồn tại, gồm cả việc
+đi tìm interpreter 3.11 trên máy dev (không có) và cân nhắc tải một bản
+standalone về chỉ để tái hiện nó.
+
+**Quy tắc rút ra: đọc kết luận CI chỉ khi run đã kết thúc.** Annotation
+giúp ở đây — nó chỉ tồn tại sau khi bước phát ra nó chạy xong, nên "không
+có annotation" là tín hiệu rõ hơn "job hiện màu xanh".
+
+## Test đỏ trên CI: `GITHUB_STEP_SUMMARY`, KHÔNG phải năm biến thread (2026-08-16)
+
+`tests/test_env_isolation.py::test_khong_bien_moi_truong_nao_bi_bo_quen`
+đỏ ở cả hai job. Giả thuyết ban đầu, nghe rất hợp lý: `ci.yml` vừa đặt
+`OMP/OPENBLAS/MKL/NUMEXPR/VECLIB_*_THREADS` ở tầng job, và
+`ops/kiem_tat_dinh.py` đọc chúng — năm tên mới chưa phân loại.
+
+**ĐO trước khi sửa, và phép đo bác bỏ giả thuyết đó:**
+
+```
+tổng biến dò được : 20
+THREAD vars       : KHÔNG có cái nào
+chưa phân loại    : không có
+```
+
+Bộ dò dùng **regex trên chuỗi hằng**, còn `kiem_tat_dinh.py` đọc qua biến
+lặp (`for b in _BIEN_THREAD: os.environ.get(b, ...)`). Regex mù hoàn toàn
+với cách đó. Năm biến ấy **chưa từng** nằm trong phép chống trôi.
+
+Nguyên nhân thật là `GITHUB_STEP_SUMMARY` — một chuỗi hằng trong
+`ops/ci_bao_cao.py`, thêm ở `2f1c961` và phân loại ở `2e07b95`. Lần chạy
+CI đọc được là của `2f1c961`; nó đã được sửa trước khi ai đọc nó.
+
+Bằng chứng xác định lần chạy: `2f1c961` có
+`os.environ.get("GITHUB_STEP_SUMMARY")` trong `ops/ci_bao_cao.py` và
+KHÔNG có tên đó trong `tests/conftest.py`; số test collect ở đó là 1089,
+khớp với "1 failed, 1087 passed" mà CI báo.
+
+### Điểm mù thật, tìm ra nhờ đi tìm nhầm chỗ
+
+Giả thuyết sai vẫn dẫn tới một phát hiện đúng: **phép chống trôi danh
+sách đen tự nó có điểm mù** — nó không thấy biến đọc qua biến lặp. Đó là
+một khẳng định "đã phân loại hết" hẹp hơn nó tự nhận (CLAUDE.md #19), và
+nó vô hình đúng lúc `ci.yml` bắt đầu đặt năm biến đó.
+
+Sửa: thêm đường quét **AST** nối biến-lặp với tuple hằng nó duyệt
+(`_ten_qua_bien_lap`). Sau đó bộ dò thấy 25 biến thay vì 20, và năm biến
+thread được xếp vào `NON_SECRET_ENV` — tham số vận hành, không bí mật,
+**nhưng chúng đổi KẾT QUẢ SỐ**, nên phải có mặt trong dấu vân tay chứ
+không được lặng lẽ vắng.
+
+Đột biến 6 phép, **6/6 đỏ**, gồm cả đột biến "bộ dò đếm BỪA mọi tuple
+chuỗi" — chiều ngược lại cũng phải đúng, một bộ dò đếm bừa buộc phân loại
+những tên không phải biến môi trường và làm danh sách mất nghĩa.
+
+## Kênh annotation đã thay thế được vòng "người dùng copy log" (2026-08-16)
+
+Xác nhận trên CI thật. Ba câu hỏi từng chặn cả phiên được trả lời **chỉ
+bằng cách đọc mục Annotations của trang run**, không mở log, không cần
+`gh`, không chép tay:
+
+| câu hỏi | annotation trả lời |
+|---|---|
+| cổng §E hỏng ở đâu | `CHAN DOAN E` — `base_resolve=OK git_diff=OK shallow=false n_commit=127` |
+| test nào đỏ trên CI | `PYTEST FAILED` — tên test, không traceback |
+| bất đối xứng 3.9/3.11 có thật không | hai bản ghi `PYTEST FAILED` giống hệt nhau → không |
+
+Trước đó mỗi câu hỏi tốn một vòng: đề nghị người dùng mở log → chép tay →
+dán → phân tích. Vòng đó biến mất.
+
+**Điều còn thiếu và đã bịt:** `ruff`/`mypy` chạy TRƯỚC `pytest`, nên một
+job đỏ ở mypy không phát annotation nào và trang run trông y hệt trường
+hợp kênh hỏng. Cả hai giờ cũng phát `::error` kèm 20 dòng đầu.
+
+Chi phí duy trì: `tests/test_ci_bao_cao.py` ghim rằng mỗi
+`pytest … > X.log` phải kèm `--tu-pytest X.log` trong CÙNG bước, và cả
+hai job đều phải có. Không có ràng buộc đó thì kênh mất dần theo từng lần
+sửa `ci.yml`, và mất im lặng.

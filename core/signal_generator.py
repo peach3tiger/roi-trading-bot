@@ -8,6 +8,17 @@ Luôn dùng hàm tối thiểu (min) — không bao giờ hàm tối đa, không
 cộng, không "hoà giải" giữa các tầng (xem CLAUDE.md bất biến #2). Module
 này là nơi DUY NHẤT ba tầng gặp nhau; mỗi tầng bên dưới không biết về sự
 tồn tại của các tầng khác.
+
+## File này nằm trong phạm vi cổng §E
+
+`GATED_PREFIXES = ("core/", "backtest/")`: mọi thay đổi ở đây BẮT BUỘC
+chạy `pytest -m slow` trước khi merge. Cổng đã được kiểm chứng HAI CHIỀU
+trên CI thật (2026-08-16) — commit chạm `core/` thì chạy test chậm;
+commit chỉ chạm `docs/` thì bỏ qua. Một cổng LUÔN chạy cũng vô dụng như
+một cổng không bao giờ chạy: nó sẽ bị tắt trong tuần đầu.
+
+Xem `ops/readiness_gate.py`, job `slow-gate` trong
+`.github/workflows/ci.yml`, và `docs/DECISIONS.md`.
 """
 
 from __future__ import annotations
@@ -24,12 +35,6 @@ from core.trend_gate import StructuralTrendGate
 
 
 @dataclass(frozen=True)
-# Cổng §E đã được kiểm chứng HAI CHIỀU trên CI thật (2026-08-16):
-# commit chạm file này -> chạy `pytest -m slow`; commit chỉ chạm
-# `docs/` -> bỏ qua. Xem docs/DECISIONS.md.
-# File này nằm trong phạm vi cổng §E (`GATED_PREFIXES = core/, backtest/`):
-# mọi thay đổi ở đây BẮT BUỘC chạy `pytest -m slow` trước khi merge.
-# Xem `ops/readiness_gate.py` và job `slow-gate` trong `.github/workflows/ci.yml`.
 class SignalGeneratorResult:
     """`RiskDecision` một mình không đủ cho caller (main loop, Phase 10):
     cần cả `regime_state`/`is_flickering` để log và ghi `state_snapshot.json`
