@@ -8,10 +8,29 @@
 
 name: CI
 
+# MỌI NHÁNH, không chỉ `main`.
+#
+# Đổi 2026-08-15 sau khi một thí nghiệm kiểm chứng cổng §E cho ra 0 dữ
+# liệu: nhánh tạm được push, và KHÔNG lần chạy CI nào xảy ra — cột Check
+# status trống, lọc Actions theo nhánh ra 0 kết quả. Phép kiểm chứng trở
+# nên vô hình.
+#
+# Lý do đổi KHÔNG phải "để chạy thí nghiệm hôm nay". Lý do là: một CI chỉ
+# chạy trên `main` biến MỌI phép kiểm chứng trên nhánh tạm thành vô hình,
+# nên cách duy nhất để biết một thay đổi có qua CI hay không là push thẳng
+# lên `main` — tức là đúng cái việc mà nhánh tạm sinh ra để tránh.
+#
+# CHI PHÍ, đã ĐO chứ không đoán: 5/50 commit gần nhất chạm `core/` hoặc
+# `backtest/` (10%). Job `slow-gate` chỉ chạy `pytest -m slow` (~2 phút)
+# ở 10% đó; 90% còn lại nó dừng ở bước dò diff (~1 phút gồm checkout +
+# cài đặt). Job `fast` chạy mọi lần, 2 phiên bản Python.
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
+  # Chạy tay từ tab Actions — cần khi muốn kiểm CI trên một commit đã có
+  # sẵn mà không phải tạo commit rỗng chỉ để kích hoạt.
+  workflow_dispatch:
 
 jobs:
   fast:

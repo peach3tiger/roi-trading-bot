@@ -473,3 +473,25 @@ def test_ci_dung_scope_merge() -> None:
     ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     assert "--scope deploy" not in ci
+
+
+def test_ci_chay_tren_MOI_nhanh_khong_chi_main() -> None:
+    """Một CI chỉ chạy trên `main` biến MỌI phép kiểm chứng trên nhánh tạm
+    thành VÔ HÌNH.
+
+    Đã xảy ra 2026-08-15: nhánh `test-cong-e-doi-core` được push để kiểm
+    chứng cổng §E, và KHÔNG lần chạy CI nào xảy ra — thí nghiệm cho ra 0
+    dữ liệu. Hệ quả sâu hơn: cách duy nhất để biết một thay đổi có qua CI
+    hay không là push thẳng lên `main`, tức đúng cái việc mà nhánh tạm
+    sinh ra để tránh.
+    """
+    import yaml
+
+    d = yaml.safe_load((_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    # PyYAML đọc khoá `on:` thành boolean True (YAML 1.1).
+    kich_hoat = d[True] if True in d else d["on"]
+
+    assert kich_hoat["push"]["branches"] == ["**"], (
+        "CI phải chạy trên MỌI nhánh — nếu không, kiểm chứng trên nhánh tạm là vô hình"
+    )
+    assert "workflow_dispatch" in kich_hoat, "cần chạy tay được để kiểm một commit đã có sẵn"
