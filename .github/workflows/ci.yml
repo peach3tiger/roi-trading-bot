@@ -199,39 +199,73 @@ jobs:
           n=$(git diff --name-only "$BASE..HEAD" 2>/dev/null | grep -cE '^(core|backtest)/' || true)
           echo "    n = '$n'   <- grep -c in ra 0 kể cả khi git diff chết"
 
-      - name: Xác định mốc so sánh
-        id: base
+      # MỘT bước duy nhất. Bản cũ tách "xác định mốc" khỏi "dò diff" và
+      # truyền BASE qua `$GITHUB_OUTPUT`; gộp lại để không còn ranh giới
+      # nào cho giá trị đi lạc, và để `set -euo pipefail` phủ cả hai việc.
+      - name: Cổng §E — dò phạm vi diff
+        id: scope
+        shell: bash
         run: |
-          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
-            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-          else
-            # Push thẳng lên main: so với commit ngay trước.
-            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          ZERO="0000000000000000000000000000000000000000"
+          BEFORE="${{ github.event.before }}"
+          resolve() { git cat-file -e "$1^{commit}" 2>/dev/null; }
+
+          # Ba nguồn mốc so, theo thứ tự tin cậy giảm dần. `merge-base` là
+          # lớp giữa quan trọng: nó cứu được cả trường hợp push đầu vào
+          # nhánh (before = 40 số 0) LẪN trường hợp force-push làm `before`
+          # thành commit mồ côi, không còn reachable để fetch.
+          BASE=""; SRC=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "$ZERO" ] && resolve "$BEFORE"; then
+            BASE="$BEFORE"; SRC="github.event.before"
+          elif git fetch --no-tags --depth=200 origin main 2>/dev/null \
+               && MB=$(git merge-base origin/main HEAD 2>/dev/null) \
+               && [ "$MB" != "$(git rev-parse HEAD)" ]; then
+            BASE="$MB"; SRC="merge-base origin/main"
+          elif resolve "HEAD~1"; then
+            BASE="$(git rev-parse HEAD~1)"; SRC="HEAD~1"
           fi
 
-      - name: Diff có chạm core/ hoặc backtest/ không?
-        id: scope
-        run: |
-          set -o pipefail
-          # KHÔNG đọc exit code sau pipe (CLAUDE.md #17) — `grep` không tìm
-          # thấy trả 1, và ở đây "không tìm thấy" là kết quả HỢP LỆ, không
-          # phải lỗi. Đếm dòng thay vì đọc mã thoát.
-          n=$(git diff --name-only "${{ steps.base.outputs.ref }}..HEAD" \
-              | grep -cE '^(core|backtest)/' || true)
-          echo "n=$n" >> "$GITHUB_OUTPUT"
-          echo "File trong phạm vi cổng: $n"
+          # Cổng KHÔNG XÁC ĐỊNH ĐƯỢC phải HỎNG TO. Bản cũ để trường hợp này
+          # rơi vào `n=0` và in "Bỏ qua" — chế độ hỏng CLAUDE.md #19, và nó
+          # làm cổng §E chưa từng gác gì kể từ khi được viết.
+          if [ -z "$BASE" ]; then
+            echo "::error::Không xác định được mốc so sánh — cổng §E KHÔNG kiểm được."
+            exit 1
+          fi
+          echo "Mốc so sánh: $BASE (nguồn: $SRC)"
+
+          # `git diff` chạy NGOÀI pipe: lỗi của nó không bị `grep -c` nuốt.
+          # `grep -c` in ra "0" kể cả khi đầu vào rỗng vì lệnh trước đã
+          # chết, nên một diff HỎNG từng không phân biệt được với diff SẠCH.
+          if ! CHANGED=$(git diff --name-only "$BASE" HEAD); then
+            echo "::error::git diff thất bại với BASE=$BASE — cổng §E KHÔNG kiểm được."
+            exit 1
+          fi
+
+          echo "Toàn bộ file đã đổi:"; printf '%s\n' "$CHANGED" | sed 's/^/  /'
+          # `|| true` giờ CHỈ còn che đúng một trường hợp hợp lệ: grep không
+          # tìm thấy gì thì trả 1 (CLAUDE.md #17). Đầu vào đã được xác nhận
+          # hợp lệ ở trên.
+          IN_SCOPE=$(printf '%s\n' "$CHANGED" | grep -E '^(core|backtest)/' || true)
+          N=$(printf '%s' "$IN_SCOPE" | grep -c . || true)
+          echo "File trong phạm vi cổng: $N"
+          [ -n "$IN_SCOPE" ] && printf '%s\n' "$IN_SCOPE" | sed 's/^/  /'
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          if [ "$N" -gt 0 ]; then echo "touched=true" >> "$GITHUB_OUTPUT"
+          else echo "touched=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: pytest -m slow (BẮT BUỘC khi diff chạm tầng quyết định)
-        if: steps.scope.outputs.n != '0'
+        if: steps.scope.outputs.touched == 'true'
         run: |
           echo "── test slow sẽ chạy ────────────────────────────────"
           pytest --collect-only -q -m slow 2>/dev/null | tail -1
           pytest -m slow -q
 
       - name: Cổng §E
-        if: steps.scope.outputs.n != '0'
-        run: python ops/readiness_gate.py --base "${{ steps.base.outputs.ref }}"
+        if: steps.scope.outputs.touched == 'true'
+        run: python ops/readiness_gate.py --base "${{ steps.scope.outputs.base }}"
 
       - name: Bỏ qua (diff không chạm tầng quyết định)
-        if: steps.scope.outputs.n == '0'
+        if: steps.scope.outputs.touched == 'false'
         run: echo "Diff không chạm core/ hay backtest/ — slow không bắt buộc."
