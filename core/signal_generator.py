@@ -24,6 +24,9 @@ from core.trend_gate import StructuralTrendGate
 
 
 @dataclass(frozen=True)
+# Cổng §E đã được kiểm chứng HAI CHIỀU trên CI thật (2026-08-16):
+# commit chạm file này -> chạy `pytest -m slow`; commit chỉ chạm
+# `docs/` -> bỏ qua. Xem docs/DECISIONS.md.
 # File này nằm trong phạm vi cổng §E (`GATED_PREFIXES = core/, backtest/`):
 # mọi thay đổi ở đây BẮT BUỘC chạy `pytest -m slow` trước khi merge.
 # Xem `ops/readiness_gate.py` và job `slow-gate` trong `.github/workflows/ci.yml`.

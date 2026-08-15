@@ -3279,3 +3279,82 @@ file này sinh ra để gác.
 Thay bằng ràng buộc cấu trúc: mỗi `pytest … > X.log` phải đi kèm
 `--tu-pytest X.log` TRONG CÙNG bước, và cả hai job đều phải có. Vòng hai
 **12/12 đỏ**.
+
+## Cổng §E: cả H1, H2, H3 đều đã LOẠI BẰNG ĐO — nguyên nhân gốc vẫn chưa xác định (2026-08-16)
+
+Bước CHẨN ĐOÁN trên `2f1c961` phát ra annotation `CHAN DOAN E` và **đã
+đọc được** — lần đầu một phép đo CI tới thẳng nơi cần nó, không qua thao
+tác chép tay:
+
+```
+base_resolve=OK   git_diff=OK   shallow=false   n_commit=127
+```
+
+| | trạng thái | loại bằng |
+|---|---|---|
+| H1 `before` = 40 số 0 | **LOẠI** | `before` là SHA thật ở CI #8 (`a488ccd`); `base_resolve=OK` |
+| H2 checkout nông | **LOẠI** | `shallow=false`, `n_commit=127`, `git_diff=OK` — đo trên runner thật |
+| H3 biến shell không sống qua bước | **LOẠI** | `BASE` đi qua `$GITHUB_OUTPUT`, đọc từ `ci.yml` đã parse |
+| H4 `before` mồ côi sau force-push | còn ngỏ, chỉ áp cho CI #14 | — |
+
+**Nguyên nhân gốc của CI #8 và CI #14 KHÔNG XÁC ĐỊNH ĐƯỢC.** Ghi đúng như
+vậy, không viết thành "đã sửa".
+
+Ba lý do vì sao nó có thể mãi mãi không xác định được, và cả ba đều là
+hệ quả của việc sửa trước khi đo:
+
+1. Bản sửa gộp **ba** khiếm khuyết độc lập trong một lần. Kể cả có log
+   đầy đủ của CI #8 bây giờ, nó cũng không nói được cái nào là nguyên
+   nhân — chỉ nói được cả ba đã biến mất cùng lúc.
+2. Bước CHẨN ĐOÁN chạy trên **`ci.yml` MỚI**. Nó đo runner hôm nay, không
+   đo runner của CI #8. `shallow=false` hôm nay không chứng minh
+   `shallow=false` hôm đó.
+3. Không chạy lại được CI #8: `c7fb25b` đã bị revert, và nhánh mang nó đã
+   xoá.
+
+Điều rút ra, quan trọng hơn chính câu hỏi: **thứ tự đúng là ĐO rồi mới
+SỬA.** Ở đây làm ngược — sửa ba thứ cùng lúc rồi mới thêm bước đo — nên
+đổi lấy một cổng hoạt động bằng cái giá là một nguyên nhân vĩnh viễn
+không biết. Với một cổng CI thì đánh đổi đó chấp nhận được; với một bug
+giao dịch thì không.
+
+Bước CHẨN ĐOÁN giữ lại tới khi nhánh tạm merge, rồi gỡ — nó đã trả lời
+xong phần trả lời được.
+
+## Lỗ trong chính kênh báo cáo: bước ĐỎ TRƯỚC pytest không tự báo tên (2026-08-16)
+
+Trang run của `2f1c961` hiện `CHAN DOAN E` nhưng **không** hiện
+`PYTEST FAILED` dù job py3.11 đỏ. Hai khả năng có ý nghĩa khác hẳn nhau:
+kênh báo cáo hỏng ở đúng chỗ cần nhất, hay pytest chưa từng chạy.
+
+**Nghiệm bằng đột biến, không bằng đọc code.** `tests/test_ci_bao_cao.py`
+giờ trích kịch bản `run:` của bước ra khỏi `ci.yml`, dựng một `pytest`
+GIẢ luôn đỏ trên `PATH`, chạy đúng những dòng runner chạy, rồi đọc stdout
+và mã thoát. Kết quả: bước **CÓ** phát `::error title=PYTEST FAILED`, kèm
+tên test, và **giữ** mã thoát 1 — ở cả hai job.
+
+Nên kênh không hỏng. Lỗ nằm chỗ khác: `ruff` và `mypy` chạy **TRƯỚC**
+`pytest`. Một job đỏ ở mypy thì pytest **không bao giờ chạy**, không có
+annotation nào, và trang run trông y hệt trường hợp kênh hỏng.
+
+Đây là **lần thứ tư** của mẫu "lỗi bị che bởi lỗi đứng trước": sau
+`cmd | tail` nuốt mã thoát, bước PHẠM VI không chạy vì pytest đỏ trước,
+và `test_snapshot` gọi mạng mà job không đỏ vì mypy chết trước.
+
+Sửa: `ruff` và `mypy` giờ cũng phát `::error` kèm **20 dòng đầu** của
+output. Cắt ở ĐẦU, ngược với pytest — output của linter có phần dùng
+được ở đầu, còn pytest có kết luận ở cuối. Cắt nhầm chiều là mất đúng thứ
+cần đọc.
+
+### `DAU VAN TAY` chuyển sang job `fast`
+
+Nó tốn ~0 giây nhưng đang nằm trong `slow-gate`, tức là **vắng mặt ở đúng
+những lần chạy cần nó nhất** — mọi commit không chạm `core/`. Chuyển sang
+job `fast` cũng có nghĩa nó chạy ở CẢ `py3.9` LẪN `py3.11`, và bất đối
+xứng giữa hai phiên bản có thể nằm ngay trong bảng đó (numpy/scipy wheel
+khác nhau theo phiên bản Python).
+
+Phép đo tất định 2 lần (~4 phút) giữ nguyên ở `slow-gate` — đúng chỗ.
+
+Đột biến 9 phép, **9/9 đỏ**, gồm cả hai đột biến vị trí ("dấu vân tay
+quay về chỉ ở slow-gate", "kéo phép đo 4 phút vào job fast").

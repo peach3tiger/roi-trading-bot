@@ -126,6 +126,10 @@ NON_SECRET_ENV = (
     "STATE_DIR",
     "WATCHDOG_POLL_SEC",
     "WATCHDOG_STALE_SEC",
+    # Đường dẫn file do GitHub Actions cấp; `ops/ci_bao_cao.py` ghi
+    # bảng markdown vào đó. Không bí mật, và vắng mặt ở local là
+    # trạng thái BÌNH THƯỜNG — `them_summary()` trả False.
+    "GITHUB_STEP_SUMMARY",
 )
 
 

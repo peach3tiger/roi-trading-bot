@@ -11,8 +11,10 @@ và được đọc thành "đã kiểm".
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -260,3 +262,210 @@ def test_tat_dinh_noi_may_tu_phat_annotation() -> None:
 
     assert "TAT DINH NOI MAY" in src
     assert "DAU VAN TAY" in src
+
+
+# ----------------------------------------------------------------------
+# ĐẦU-CUỐI: chạy ĐÚNG kịch bản của bước CI với một `pytest` giả ĐỎ
+# ----------------------------------------------------------------------
+#
+# Câu hỏi mà mọi test ở trên KHÔNG trả lời được: khi pytest đỏ thật, bước
+# CI có phát `::error title=PYTEST FAILED` không? Các test trên gọi
+# `bao_cao_pytest()` trực tiếp — chúng chứng minh HÀM đúng, không chứng
+# minh BƯỚC gọi hàm đó. Cùng lỗ hổng đã làm đột biến "bỏ khẳng định trong
+# select_and_train" sống sót, và cùng mẫu hỏng của cổng §E: một cơ chế
+# đúng nhưng không được nối vào đường thật.
+#
+# Trang run của `2f1c961` hiện CHAN DOAN E nhưng KHÔNG hiện PYTEST FAILED
+# dù job py3.11 đỏ. Đây là phép kiểm để phân biệt "kênh hỏng" với "pytest
+# chưa từng chạy vì một bước trước đó đã đỏ".
+
+_PYTEST_GIA = """#!/bin/bash
+# `--collect-only` chỉ đếm; đỏ ở đó không phải chuyện file này kiểm.
+for a in "$@"; do [ "$a" = "--collect-only" ] && { echo "3 tests collected"; exit 0; }; done
+cat <<'EOF'
+FAILED tests/test_gia.py::test_mot - AssertionError: chi tiet
+FAILED tests/test_gia.py::test_hai - ValueError
+=========================== 2 failed, 1 passed in 0.10s ===========================
+EOF
+exit 1
+"""
+
+
+def _buoc_chay_pytest_that() -> list[tuple[str, str, str]]:
+    return [
+        (job, ten, kb)
+        for job, ten, kb in _cac_buoc_run()
+        if _LOG_PYTEST.search(kb)
+    ]
+
+
+@pytest.mark.parametrize("job,ten,kich_ban", _buoc_chay_pytest_that())
+def test_buoc_CI_phat_annotation_khi_pytest_DO(
+    job: str, ten: str, kich_ban: str, tmp_path: Path
+) -> None:
+    """Thi hành kịch bản thật của bước, với `pytest` giả luôn đỏ.
+
+    Không mock `bao_cao_pytest`, không đọc `ci.yml` bằng chuỗi: chạy đúng
+    những dòng runner sẽ chạy, rồi đọc stdout và mã thoát.
+    """
+    bin_gia = tmp_path / "bin"
+    bin_gia.mkdir()
+    (bin_gia / "pytest").write_text(_PYTEST_GIA)
+    (bin_gia / "pytest").chmod(0o755)
+    # `python` có thể không tồn tại trên máy dev (chỉ có `python3`); runner
+    # Ubuntu thì có. Cầu nối để kịch bản chạy được ở cả hai nơi.
+    (bin_gia / "python").write_text(f'#!/bin/bash\nexec "{sys.executable}" "$@"\n')
+    (bin_gia / "python").chmod(0o755)
+    (tmp_path / "ops").symlink_to(_ROOT / "ops")
+
+    kb = re.sub(r"\$\{\{[^}]*\}\}", "3.11", kich_ban)
+    p = subprocess.run(
+        ["bash", "-e", "-c", kb],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PATH": f"{bin_gia}:{os.environ['PATH']}"},
+    )
+
+    assert "::error title=PYTEST FAILED" in p.stdout, (
+        f"{job} / {ten}: pytest ĐỎ nhưng bước KHÔNG phát annotation.\n"
+        f"stdout:\n{p.stdout}\nstderr:\n{p.stderr}"
+    )
+    assert "test_mot" in p.stdout, "annotation không kèm tên test đỏ"
+    assert p.returncode == 1, (
+        f"{job} / {ten}: bước phải GIỮ mã thoát của pytest. Một bộ báo cáo "
+        f"nuốt mã thoát biến job đỏ thành job xanh — thấy {p.returncode}."
+    )
+
+
+@pytest.mark.parametrize("job,ten,kich_ban", _buoc_chay_pytest_that())
+def test_buoc_CI_van_bao_cao_khi_pytest_XANH(
+    job: str, ten: str, kich_ban: str, tmp_path: Path
+) -> None:
+    """Chiều còn lại. Một kênh chỉ phát khi đỏ không phân biệt được
+    "xanh" với "bước chưa từng chạy" — và phân biệt đúng hai thứ đó là
+    câu hỏi đang mở về `2f1c961`."""
+    bin_gia = tmp_path / "bin"
+    bin_gia.mkdir()
+    (bin_gia / "pytest").write_text(
+        '#!/bin/bash\necho "1088 passed, 9 deselected in 110.57s"\nexit 0\n'
+    )
+    (bin_gia / "pytest").chmod(0o755)
+    (bin_gia / "python").write_text(f'#!/bin/bash\nexec "{sys.executable}" "$@"\n')
+    (bin_gia / "python").chmod(0o755)
+    (tmp_path / "ops").symlink_to(_ROOT / "ops")
+
+    kb = re.sub(r"\$\{\{[^}]*\}\}", "3.11", kich_ban)
+    p = subprocess.run(
+        ["bash", "-e", "-c", kb], cwd=tmp_path, capture_output=True, text=True,
+        timeout=60, env={**os.environ, "PATH": f"{bin_gia}:{os.environ['PATH']}"},
+    )
+
+    assert "::notice title=PYTEST OK" in p.stdout, p.stdout
+    assert p.returncode == 0
+
+
+# ----------------------------------------------------------------------
+# ruff / mypy — bước đỏ TRƯỚC pytest phải tự báo tên nó
+# ----------------------------------------------------------------------
+
+_TOOL_LOG = re.compile(r"^\s*(ruff|mypy)\b[^\n]*>\s*(\S+\.log)\b", re.M)
+
+
+def _buoc_cong_cu() -> list[tuple[str, str, str, str]]:
+    return [
+        (job, ten, m.group(1), kb)
+        for job, ten, kb in _cac_buoc_run()
+        for m in _TOOL_LOG.finditer(kb)
+    ]
+
+
+def test_ruff_va_mypy_deu_co_buoc_bao_cao() -> None:
+    """`ruff` và `mypy` chạy TRƯỚC `pytest`. Một job đỏ ở mypy thì pytest
+    KHÔNG BAO GIỜ CHẠY — trang run không có annotation nào, và trông y hệt
+    trường hợp kênh báo cáo hỏng.
+
+    Đó là lần thứ tư của mẫu "lỗi bị che bởi lỗi đứng trước" trong dự án
+    này; ba lần trước: `cmd | tail` nuốt mã thoát, bước PHẠM VI không chạy
+    vì pytest đỏ trước, và `test_snapshot` gọi mạng mà job không đỏ vì
+    mypy chết trước.
+    """
+    cong_cu = {t for _, _, t, _ in _buoc_cong_cu()}
+
+    assert cong_cu == {"ruff", "mypy"}, f"thiếu báo cáo cho: {{'ruff','mypy'}} - {cong_cu}"
+
+
+@pytest.mark.parametrize("job,ten,cong_cu,kich_ban", _buoc_cong_cu())
+def test_buoc_cong_cu_phat_annotation_khi_DO(
+    job: str, ten: str, cong_cu: str, kich_ban: str, tmp_path: Path
+) -> None:
+    """Chạy thật kịch bản bước, với `ruff`/`mypy` giả luôn đỏ."""
+    bin_gia = tmp_path / "bin"
+    bin_gia.mkdir()
+    for t in ("ruff", "mypy"):
+        (bin_gia / t).write_text(
+            f'#!/bin/bash\necho "{t}: dong loi dau tien"\necho "{t}: dong hai"\nexit 1\n'
+        )
+        (bin_gia / t).chmod(0o755)
+    (bin_gia / "python").write_text(f'#!/bin/bash\nexec "{sys.executable}" "$@"\n')
+    (bin_gia / "python").chmod(0o755)
+    (tmp_path / "ops").symlink_to(_ROOT / "ops")
+
+    kb = re.sub(r"\$\{\{[^}]*\}\}", "3.11", kich_ban)
+    p = subprocess.run(
+        ["bash", "-e", "-c", kb], cwd=tmp_path, capture_output=True, text=True,
+        timeout=60, env={**os.environ, "PATH": f"{bin_gia}:{os.environ['PATH']}"},
+    )
+
+    assert "::error title=" in p.stdout and "FAILED" in p.stdout, (
+        f"{job} / {ten}: {cong_cu} ĐỎ nhưng bước KHÔNG phát annotation.\n{p.stdout}"
+    )
+    assert "dong loi dau tien" in p.stdout, "không kèm dòng lỗi đầu tiên"
+    assert p.returncode == 1, f"bước phải giữ mã thoát, thấy {p.returncode}"
+
+
+def test_cong_cu_cat_o_DAU_khong_o_cuoi(capsys: pytest.CaptureFixture[str]) -> None:
+    """Ngược với pytest: output của ruff/mypy có phần dùng được ở ĐẦU
+    (dòng lỗi đầu tiên), pytest có kết luận ở CUỐI. Cắt nhầm chiều là mất
+    đúng thứ cần đọc."""
+    from ops.ci_bao_cao import bao_cao_cong_cu
+
+    bao_cao_cong_cu(
+        "\n".join(["DONG-DAU-TIEN"] + [f"rac {i}" for i in range(500)]),
+        ten="MYPY", ma_thoat=1,
+    )
+    ra = capsys.readouterr().out
+
+    assert "DONG-DAU-TIEN" in ra
+    assert "còn 48" in ra or "còn " in ra
+
+
+def test_dau_van_tay_chay_o_job_fast_ca_hai_phien_ban() -> None:
+    """Dấu vân tay tốn ~0 giây và là dữ liệu NỀN. Để nó trong slow-gate
+    nghĩa là nó vắng mặt ở đúng những lần chạy cần nó nhất — mọi lần diff
+    không chạm `core/`.
+
+    Job `fast` chạy matrix 3.9 + 3.11, nên đặt ở đó cũng cho hai bản ghi
+    so được với nhau: bất đối xứng giữa hai phiên bản có thể nằm ngay
+    trong bảng này.
+    """
+    d = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+    fast = d["jobs"]["fast"]
+
+    lenh = " ".join(s.get("run", "") for s in fast["steps"])
+    assert "kiem_tat_dinh.py --runs 0" in lenh, "job fast không in dấu vân tay"
+
+    ver = fast["strategy"]["matrix"]["python-version"]
+    assert set(ver) == {"3.9", "3.11"}, f"matrix đổi thành {ver} — cập nhật test này"
+
+
+def test_do_tat_dinh_2_lan_van_o_slow_gate() -> None:
+    """~4 phút. Đúng chỗ của nó — không kéo job fast dài ra."""
+    d = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+
+    fast = " ".join(s.get("run", "") for s in d["jobs"]["fast"]["steps"])
+    slow = " ".join(s.get("run", "") for s in d["jobs"]["slow-gate"]["steps"])
+
+    assert "--runs 2" in slow
+    assert "--runs 2" not in fast, "phép đo 4 phút lọt vào job chạy mọi commit"

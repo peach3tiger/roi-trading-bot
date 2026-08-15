@@ -152,6 +152,32 @@ def bao_cao_pytest(dau_ra: str, *, nhan: str) -> list[str]:
     return ra
 
 
+def bao_cao_cong_cu(dau_ra: str, *, ten: str, ma_thoat: int, so_dong: int = 20) -> list[str]:
+    """Báo cáo một công cụ NGOÀI pytest (ruff, mypy, ...).
+
+    Khác `bao_cao_pytest` ở chỗ cắt: output của ruff/mypy có phần dùng
+    được ở ĐẦU (dòng lỗi đầu tiên), còn pytest có kết luận ở CUỐI. Cắt
+    nhầm đầu là mất đúng thứ cần đọc.
+
+    Tồn tại vì `ruff`/`mypy` chạy TRƯỚC `pytest` trong job. Một job đỏ ở
+    mypy thì pytest KHÔNG BAO GIỜ CHẠY, nên không có annotation nào — và
+    trang run trông y hệt trường hợp kênh báo cáo hỏng. Đó chính là câu
+    hỏi đang mở về `2f1c961`, và là lần thứ tư của mẫu "lỗi bị che bởi
+    lỗi đứng trước".
+    """
+    if ma_thoat == 0:
+        them_summary(f"### {ten}\n\nOK")
+        return [notice(f"{ten} OK")]
+
+    dong = dau_ra.strip().splitlines()
+    dau = "\n".join(dong[:so_dong])
+    con = len(dong) - so_dong
+    if con > 0:
+        dau += f"\n... (còn {con} dòng, xem log)"
+    them_summary(f"### {ten}: **ĐỎ** (mã thoát {ma_thoat})\n\n```\n{dau}\n```")
+    return [error(f"{ten} FAILED", f"mã thoát {ma_thoat}:\n{dau}")]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tu-pytest", type=Path, help="file chứa output pytest")
@@ -159,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--notice", metavar="TITLE", help="phát một ::notice; các cặp k=v theo sau")
     ap.add_argument("--summary", metavar="TIEU_DE", help="thêm một mục vào step summary")
     ap.add_argument("--tu-file", type=Path, help="nội dung cho --summary (khối code)")
+    ap.add_argument("--loi-cong-cu", metavar="TEN", help="báo cáo ruff/mypy từ --tu-file")
+    ap.add_argument("--ma-thoat", type=int, default=0, help="mã thoát của công cụ đó")
     ap.add_argument("truong", nargs="*", help="cặp k=v cho --notice")
     args = ap.parse_args(argv)
 
@@ -168,6 +196,13 @@ def main(argv: list[str] | None = None) -> int:
             k, _, v = t.partition("=")
             cap[k.strip()] = v.strip()
         notice(args.notice, **cap)
+        return 0
+
+    if args.loi_cong_cu:
+        noi = ""
+        if args.tu_file and args.tu_file.exists():
+            noi = args.tu_file.read_text(encoding="utf-8", errors="replace")
+        bao_cao_cong_cu(noi, ten=args.loi_cong_cu, ma_thoat=args.ma_thoat)
         return 0
 
     if args.summary:

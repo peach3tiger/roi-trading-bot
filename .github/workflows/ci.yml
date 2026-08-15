@@ -79,8 +79,22 @@ jobs:
           cat tools.txt
           python ops/ci_bao_cao.py --summary "Phiên bản công cụ (py${{ matrix.python-version }})" --tu-file tools.txt || true
 
+      # ~0 giây. Trước đây nằm trong slow-gate nên chỉ chạy khi diff chạm
+      # `core/` — tức là vắng mặt ở đúng những lần chạy cần nó nhất. Phần
+      # ĐO tất định (4 phút) vẫn ở slow-gate, đúng chỗ của nó.
+      - name: Dấu vân tay số học (mọi lần chạy)
+        run: python ops/kiem_tat_dinh.py --runs 0
+
       - name: ruff
-        run: ruff check .
+        run: |
+          set +e
+          ruff check . > ruff.log 2>&1
+          rc=$?
+          set -e
+          cat ruff.log
+          python ops/ci_bao_cao.py --loi-cong-cu "RUFF py${{ matrix.python-version }}" \
+            --tu-file ruff.log --ma-thoat $rc || true
+          exit $rc
 
       # `--python-version` theo MATRIX, không theo `pyproject.toml`.
       #
@@ -92,7 +106,15 @@ jobs:
       # Đo 2026-08-15: mypy SẠCH dưới CẢ 3.9 lẫn 3.11 (108 file). Nên đây
       # là phòng xa, không phải vá một lỗi đang có. Xem docs/DECISIONS.md.
       - name: mypy (theo phiên bản của job)
-        run: mypy --python-version ${{ matrix.python-version }} .
+        run: |
+          set +e
+          mypy --python-version ${{ matrix.python-version }} . > mypy.log 2>&1
+          rc=$?
+          set -e
+          cat mypy.log
+          python ops/ci_bao_cao.py --loi-cong-cu "MYPY py${{ matrix.python-version }}" \
+            --tu-file mypy.log --ma-thoat $rc || true
+          exit $rc
 
       - name: pytest (mặc định, -m 'not slow')
         run: |
