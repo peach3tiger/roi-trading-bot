@@ -3151,3 +3151,51 @@ Thêm ba test đi qua `scan_bic`/`select_and_train` với một `GaussianHMM`
 giả (không có cách nào ép EM thật phân kỳ một cách tất định — một test
 dựa vào "nó thường xảy ra" là test ngẫu nhiên đội lốt). Vòng hai: **8/8
 đỏ**.
+
+## Cổng §E — kiểm chứng HAI CHIỀU trên CI thật (2026-08-16)
+
+Cổng §E giờ đã được kiểm chứng bằng THÍ NGHIỆM trên CI thật, không bằng
+đọc code. Hai chiều, hai commit khác nhau trên nhánh `test-cong-e-doi-core`:
+
+| chiều | commit chạm | kỳ vọng | quan sát |
+|---|---|---|---|
+| (a) | `core/signal_generator.py` | chạy `pytest -m slow` | **chạy** — và ĐỎ ở `test_regression_vs_phase7_baseline`, một test slow thật |
+| (b) | chỉ `docs/`, `ops/` | bỏ qua | **bỏ qua**, job 36s |
+
+Chiều (a) tự chứng minh theo cách mạnh hơn cả kỳ vọng: cổng không chỉ
+chạy, nó còn BẮT được một khác biệt thật (harness đỏ trên Ubuntu). Chiều
+(b) là chiều hay bị bỏ quên — **một cổng LUÔN chạy cũng vô dụng như một
+cổng không bao giờ chạy**, vì nó sẽ bị tắt trong tuần đầu.
+
+### Nguyên nhân gốc của CI #8 và CI #14 vẫn KHÔNG BIẾT
+
+Cổng hoạt động, nhưng **không có nghĩa là đã hiểu vì sao nó từng không
+hoạt động**. Bản sửa gộp ba khiếm khuyết độc lập cùng lúc (mốc so tính
+trong cùng bước; không xác định được mốc thì `exit 1`; `git diff` không đi
+vào pipe), nên nó không phân biệt được cái nào là nguyên nhân thật.
+
+Ba giả thuyết đều đã bị làm yếu bằng bằng chứng, không cái nào bị loại
+hẳn:
+
+| | trạng thái |
+|---|---|
+| H1 `before` = 40 số 0 | không giải thích được CI #8 — `before` ở đó là `a488ccd`, SHA thật |
+| H2 checkout nông | `slow-gate` ĐÃ có `fetch-depth: 0` (đọc từ YAML đã parse) |
+| H3 biến shell không sống qua bước | SAI — `BASE` đi qua `$GITHUB_OUTPUT` |
+| H4 `before` mồ côi sau force-push | chỉ áp cho CI #14, không cho CI #8 |
+
+Bước "CHẨN ĐOÁN (tạm)" được thêm vào job §E để trả lời đúng câu này và
+**chưa ai đọc output của nó**. Máy làm việc không có `gh`, nên mọi thông
+tin CI trong phiên này đều phải do người dùng dán vào.
+
+**Giữ bước chẩn đoán lại.** Gỡ nó bây giờ là đóng hồ sơ bằng "đã sửa,
+không rõ vì sao" — đúng thứ CLAUDE.md #18 cấm. Ghi đây thành một khoảng
+trống ĐÃ BIẾT thay vì để nó im lặng biến mất khi cổng đã xanh.
+
+### Sửa bản ghi sai trước đó
+
+Mục "3. Cổng §E đỏ ở commit chạm tầng quyết định" ở trên **SAI**: nó nói
+job "Cổng §E" chạy đúng vai và đỏ ở `c7fb25b`. Thực tế job đó SUCCEEDED
+trong 1m55s và bước cuối ghi "Bỏ qua (diff không chạm tầng quyết định)" —
+cổng chưa từng chạy `pytest -m slow` ở commit đó. Nguyên nhân bản ghi sai:
+đọc nhầm ảnh chụp CI #1 thành CI #8.
