@@ -396,7 +396,20 @@ def test_bat_dau_do_va_ket_thuc_do_nam_trong_MOT_buoc() -> None:
     chỗ giá trị có thể đi lạc mà không ai thấy."""
     buoc = _buoc_do_pham_vi()
 
-    assert "github.event.before" in buoc["run"], "mốc so phải xác định TRONG cùng bước"
+    # BIỂU THỨC, không phải tên. Bản đầu của test này so `"github.event.before"`
+    # và một đột biến tách mốc-so ra bước khác vẫn XANH — vì chuỗi đó cũng
+    # nằm trong `SRC="github.event.before"`, một NHÃN để in ra cho người
+    # đọc. Lại đúng chế độ hỏng "khớp tài liệu chứ không khớp cấu hình",
+    # lần thứ hai trong cùng file. Đo được bằng đột biến, và đã đo.
+    assert "${{ github.event.before }}" in buoc["run"], "mốc so phải tính TRONG cùng bước"
+
+    # Ràng buộc MẠNH HƠN và không né được bằng comment: bước dò không được
+    # đọc output của bước nào khác. Đây chính là H3 phát biểu thành khẳng
+    # định kiểm được — mọi `steps.*.outputs` là một ranh giới shell.
+    assert "steps." not in buoc["run"], (
+        "bước dò phụ thuộc output của bước khác — mỗi `run:` là một shell riêng"
+    )
+
     assert buoc.get("shell") == "bash"
     assert "set -euo pipefail" in buoc["run"]
 
