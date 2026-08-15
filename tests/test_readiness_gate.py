@@ -428,15 +428,12 @@ def test_git_diff_khong_bao_gio_di_thang_vao_pipe() -> None:
             assert "|" not in dong, f"git diff đi vào pipe, exit code bị nuốt: {dong.strip()}"
 
 
-def test_khong_xac_dinh_duoc_moc_so_thi_DO_khong_phai_bo_qua() -> None:
-    """Chế độ hỏng CLAUDE.md #19: một cổng không kiểm được phải HỎNG TO,
-    không được rơi vào nhánh "không chạm" rồi in "Bỏ qua". Bản cũ làm đúng
-    điều đó và trông xanh suốt."""
-    buoc = _buoc_do_pham_vi()
-
-    assert buoc["run"].count("exit 1") >= 2, (
-        "cần ÍT NHẤT hai lối thoát đỏ: BASE không xác định được, và git diff chết"
-    )
+# `test_khong_xac_dinh_duoc_moc_so_thi_DO_khong_phai_bo_qua` đã BỎ ở đây.
+# Nó đếm chuỗi (`run.count("exit 1") >= 2`) — `exit 2`, một hàm bọc, hay
+# một `exit 1` ở nhánh vô can đều lọt qua. Thay bằng phép kiểm HÀNH VI:
+# `tests/test_cong_e_hanh_vi.py::test_khong_co_moc_so_nao_thi_EXIT_1_khong_phai_false`
+# CHẠY kịch bản trong một repo không có mốc nào xác định được và đọc exit
+# code thật.
 
 
 def test_readiness_gate_co_trong_tai_lieu() -> None:
