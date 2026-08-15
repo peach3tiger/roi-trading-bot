@@ -149,6 +149,56 @@ jobs:
           mypy --version
           python -c "import importlib.metadata as m; [print(f'{p}=={m.version(p)}') for p in ('pandas-stubs','pytest','hypothesis','ruff')]"
 
+      # ══════════════════════════════════════════════════════════════
+      # BƯỚC CHẨN ĐOÁN TẠM — CHỈ TỒN TẠI TRÊN NHÁNH test-cong-e-doi-core.
+      # Xoá trước khi merge. Mục đích: phân biệt dứt khoát hai giả thuyết
+      # về việc vì sao cổng §E không bao giờ kích hoạt.
+      #   H1: `github.event.before` = 40 số 0 (push đầu vào nhánh)
+      #   H2: BASE không tồn tại trong clone của runner
+      # Mọi lệnh đều được bọc để bước này KHÔNG BAO GIỜ làm job đỏ — nó chỉ
+      # quan sát, không phán xét.
+      # ══════════════════════════════════════════════════════════════
+      - name: CHẨN ĐOÁN (tạm) — clone của runner có gì
+        run: |
+          echo "── sự kiện ──"
+          echo "  event_name          = ${{ github.event_name }}"
+          echo "  event.before        = '${{ github.event.before }}'"
+          echo "  event.after         = '${{ github.event.after }}'"
+          echo "  pull_request.base   = '${{ github.event.pull_request.base.sha }}'"
+          echo "  github.sha          = '${{ github.sha }}'"
+          echo
+          echo "── clone sâu bao nhiêu ──"
+          echo "  số commit trong clone: $(git rev-list --count HEAD 2>&1 || echo 'REV-LIST FAIL')"
+          echo "  có phải shallow không: $(git rev-parse --is-shallow-repository 2>&1 || echo '?')"
+          echo
+          echo "── 5 commit đầu ──"
+          git log --oneline -5 2>&1 | sed 's/^/    /' || echo "    LOG FAIL"
+          echo
+          echo "── BASE có resolve được không ──"
+          BASE="${{ github.event.before }}"
+          if [ -z "$BASE" ]; then
+            echo "    BASE RỖNG"
+          elif [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "    BASE = 40 SỐ 0  -> H1 ĐÚNG"
+          elif git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "    BASE resolve OK  -> H2 SAI, tìm nguyên nhân khác"
+          else
+            echo "    BASE KHONG TON TAI trong clone  -> H2 ĐÚNG"
+          fi
+          echo
+          echo "── git diff thật sự trả về gì ──"
+          if git diff --name-only "$BASE..HEAD" > /tmp/d.txt 2>/tmp/e.txt; then
+            echo "    git diff THÀNH CÔNG, $(wc -l < /tmp/d.txt) file:"
+            sed 's/^/      /' /tmp/d.txt
+          else
+            echo "    git diff THẤT BẠI (mã thoát khác 0). stderr:"
+            sed 's/^/      /' /tmp/e.txt
+          fi
+          echo
+          echo "── và đây là lý do bước dò diff cũ không thấy gì ──"
+          n=$(git diff --name-only "$BASE..HEAD" 2>/dev/null | grep -cE '^(core|backtest)/' || true)
+          echo "    n = '$n'   <- grep -c in ra 0 kể cả khi git diff chết"
+
       - name: Xác định mốc so sánh
         id: base
         run: |
