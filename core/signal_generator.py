@@ -24,6 +24,9 @@ from core.trend_gate import StructuralTrendGate
 
 
 @dataclass(frozen=True)
+# File này nằm trong phạm vi cổng §E (`GATED_PREFIXES = core/, backtest/`):
+# mọi thay đổi ở đây BẮT BUỘC chạy `pytest -m slow` trước khi merge.
+# Xem `ops/readiness_gate.py` và job `slow-gate` trong `.github/workflows/ci.yml`.
 class SignalGeneratorResult:
     """`RiskDecision` một mình không đủ cho caller (main loop, Phase 10):
     cần cả `regime_state`/`is_flickering` để log và ghi `state_snapshot.json`
