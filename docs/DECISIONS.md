@@ -3199,3 +3199,83 @@ job "Cổng §E" chạy đúng vai và đỏ ở `c7fb25b`. Thực tế job đó
 trong 1m55s và bước cuối ghi "Bỏ qua (diff không chạm tầng quyết định)" —
 cổng chưa từng chạy `pytest -m slow` ở commit đó. Nguyên nhân bản ghi sai:
 đọc nhầm ảnh chụp CI #1 thành CI #8.
+
+## Số liệu CI phải ra NGOÀI log — sửa chữa QUY TRÌNH (2026-08-16)
+
+### Nút thắt
+
+Máy làm việc không có `gh`. Mọi số liệu CI trong phiên 2026-08-15/16 chỉ
+tới được nơi cần nó bằng cách người dùng mở trang GitHub và **chép tay
+từng bước**. Điều đó chặn công việc ít nhất năm lần, và mỗi lần chặn lại
+đẻ ra một vòng đoán mò:
+
+| lần chặn | hệ quả |
+|---|---|
+| cổng §E không kích hoạt | 4 vòng giả thuyết (H1, H2, H3, H4) — **ba cái sai** |
+| bước CHẨN ĐOÁN chưa ai đọc | nguyên nhân gốc CI #8/#14 tới giờ **vẫn không biết** |
+| harness đỏ trên Ubuntu | phải đoán từ hai dòng người dùng chép lại |
+| tất định nội máy trên Ubuntu | chưa có số liệu |
+| bất đối xứng py3.9 vs py3.11 | chặn hoàn toàn — không có tên test đỏ |
+
+Đây không phải năm sự cố riêng lẻ. Đó là **một** khiếm khuyết kiến trúc
+lặp lại: phép đo chạy ở nơi A, người cần nó ở nơi B, và giữa hai nơi chỉ
+có thao tác thủ công.
+
+### Sửa
+
+GitHub Actions có hai kênh hiện ra NGOÀI log, đọc được không cần đăng
+nhập và không cần công cụ:
+
+- `::notice title=X::...` → mục **Annotations** ngay trang run
+- `$GITHUB_STEP_SUMMARY` → trang **Summary**, hỗ trợ markdown
+
+`ops/ci_bao_cao.py` gói cả hai. Bốn phép đo giờ phát ra cả hai kênh:
+
+| phép đo | annotation |
+|---|---|
+| tất định nội máy | `TAT DINH NOI MAY` — `run1=… run2=… giong=yes/no` |
+| môi trường số học | `DAU VAN TAY` — `blas=… arch=… python=… numpy=…` |
+| chẩn đoán cổng §E | `CHAN DOAN E` — `before=… base_resolve=… ket_luan=H1/H2/H2-SAI` |
+| pytest đỏ | `PYTEST FAILED <job>` — **tên test, không traceback** |
+
+Step summary nhận bảng chi tiết: phiên bản công cụ (mỗi job matrix riêng),
+phạm vi đã kiểm, dấu vân tay đầy đủ, và danh sách test đỏ.
+
+### Ràng buộc phải tôn trọng
+
+GitHub hiện **tối đa 10** annotation mỗi run, cắt mỗi cái ở **~4000 ký
+tự**. Nên kênh này chỉ chở **KẾT LUẬN ĐÃ RÚT GỌN**. Đổ log thô vào đây
+làm chính nó vô dụng: 10 annotation đầy chữ, không cái nào trả lời được
+câu hỏi nào. Chi tiết đi vào step summary, nơi không có giới hạn đó.
+
+Khi cắt, cắt ở **ĐẦU** chứ không ở cuối — kết luận nằm cuối một danh
+sách, và một annotation mất kết luận thì không khác gì không có.
+
+### Ba chi tiết đã suýt làm kênh hỏng IM LẶNG
+
+1. **Thứ tự escape.** `%` phải escape TRƯỚC `\n`; ngược lại `%0A` do
+   escape xuống dòng sinh ra bị escape lần hai thành `%250A`.
+2. **Tiêu đề có dấu tiếng Việt.** GitHub không hiện, và nó không báo lỗi
+   — annotation đơn giản không xuất hiện. `notice()` giờ `raise` với
+   tiêu đề không phải ASCII, biến lỗi vô hình thành lỗi thấy lúc viết.
+3. **`pytest | tee`.** Mã thoát sau pipe là của `tee` (CLAUDE.md #17).
+   Ghi ra file, đọc `$?`, rồi mới báo cáo — và bộ báo cáo LUÔN trả 0, vì
+   một bộ báo cáo tự làm job đỏ sẽ che mất nguyên nhân thật.
+
+### `bash -n` cho mọi bước `run:`
+
+Mất một vòng vì chuyện này: một lần sửa `ci.yml` bằng script tự động làm
+hỏng thụt lề của hai khối `{ … }`. **YAML vẫn parse được** — lỗi chỉ lộ
+ra khi runner chạy. `tests/test_ci_bao_cao.py` giờ chạy `bash -n` từng
+bước: 200ms ở local thay cho một vòng push-chờ-đọc-log.
+
+### Đột biến
+
+12 phép, hai vòng. Vòng đầu 11/12; sống sót là *"gỡ báo cáo pytest khỏi
+job fast"* — test chỉ kiểm `"--tu-pytest" in lenh`, và job slow-gate vẫn
+còn một cái. **Một trong hai job mù mà cổng vẫn xanh** — đúng chế độ hỏng
+file này sinh ra để gác.
+
+Thay bằng ràng buộc cấu trúc: mỗi `pytest … > X.log` phải đi kèm
+`--tu-pytest X.log` TRONG CÙNG bước, và cả hai job đều phải có. Vòng hai
+**12/12 đỏ**.

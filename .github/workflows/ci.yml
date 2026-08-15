@@ -71,9 +71,13 @@ jobs:
       # khẳng định cho tới khi nói rõ sạch THEO PHIÊN BẢN NÀO.
       - name: Phiên bản công cụ
         run: |
+          {
           python -V
           mypy --version
           python -c "import importlib.metadata as m; [print(f'{p}=={m.version(p)}') for p in ('pandas-stubs','types-PyYAML','types-requests','pytest','hypothesis','ruff')]"
+          } > tools.txt 2>&1
+          cat tools.txt
+          python ops/ci_bao_cao.py --summary "Phiên bản công cụ (py${{ matrix.python-version }})" --tu-file tools.txt || true
 
       - name: ruff
         run: ruff check .
@@ -91,7 +95,17 @@ jobs:
         run: mypy --python-version ${{ matrix.python-version }} .
 
       - name: pytest (mặc định, -m 'not slow')
-        run: pytest -q
+        run: |
+          # KHÔNG `pytest | tee`: mã thoát sau pipe là của `tee`
+          # (CLAUDE.md #17). Ghi ra file, đọc mã thoát, rồi mới báo cáo.
+          set +e
+          pytest -q > pytest-fast.log 2>&1
+          rc=$?
+          set -e
+          cat pytest-fast.log
+          python ops/ci_bao_cao.py --tu-pytest pytest-fast.log \
+            --nhan "mac dinh py${{ matrix.python-version }}" || true
+          exit $rc
 
       # CLAUDE.md #19 — "CI xanh" mà không nói đã kiểm những gì thì không
       # phải bằng chứng. Bước này chạy SAU cùng và không được phép im lặng
@@ -100,6 +114,7 @@ jobs:
       # "sạch").
       - name: PHẠM VI ĐÃ KIỂM
         run: |
+          {
           echo "── interpreter ──────────────────────────────────────"
           echo "  job này chạy Python: $(python -V 2>&1)"
           echo "  (matrix: 3.9 = bản forward test THẬT dùng qua launchd;"
@@ -125,6 +140,9 @@ jobs:
           echo
           echo "── phạm vi ruff / mypy / đường dẫn nghiệm thu ───────"
           python ops/verify_scope.py
+          } > scope.txt 2>&1
+          cat scope.txt
+          python ops/ci_bao_cao.py --summary "PHẠM VI ĐÃ KIỂM py${{ matrix.python-version }} (CLAUDE.md #19)" --tu-file scope.txt || true
 
   slow-gate:
     name: Cổng §E — test chậm khi chạm tầng quyết định
@@ -154,9 +172,13 @@ jobs:
 
       - name: Phiên bản công cụ
         run: |
+          {
           python -V
           mypy --version
           python -c "import importlib.metadata as m; [print(f'{p}=={m.version(p)}') for p in ('pandas-stubs','pytest','hypothesis','ruff')]"
+          } > tools.txt 2>&1
+          cat tools.txt
+          python ops/ci_bao_cao.py --summary "Phiên bản công cụ (slow-gate)" --tu-file tools.txt || true
 
       # ══════════════════════════════════════════════════════════════
       # BƯỚC CHẨN ĐOÁN TẠM — CHỈ TỒN TẠI TRÊN NHÁNH test-cong-e-doi-core.
@@ -207,6 +229,24 @@ jobs:
           echo "── và đây là lý do bước dò diff cũ không thấy gì ──"
           n=$(git diff --name-only "$BASE..HEAD" 2>/dev/null | grep -cE '^(core|backtest)/' || true)
           echo "    n = '$n'   <- grep -c in ra 0 kể cả khi git diff chết"
+
+          # KẾT LUẬN ra NGOÀI log. Bước này in ~30 dòng và chỉ MỘT trong số
+          # đó trả lời được câu hỏi — đúng dòng chưa ai đọc được suốt bốn
+          # vòng đoán mò.
+          if [ -z "$BASE" ]; then KL="BASE-RONG"; RS="FAIL"
+          elif [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            KL="H1-DUNG-before-40-so-0"; RS="FAIL"
+          elif git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            KL="H2-SAI-base-resolve-duoc"; RS="OK"
+          else KL="H2-DUNG-base-khong-co-trong-clone"; RS="FAIL"; fi
+          if git diff --name-only "$BASE..HEAD" >/dev/null 2>&1; then DIFF=OK; else DIFF=FAIL; fi
+          python ops/ci_bao_cao.py --notice "CHAN DOAN E" \
+            "event=${{ github.event_name }}" \
+            "before=${BASE:-<rong>}" \
+            "base_resolve=$RS" "git_diff=$DIFF" "n_files_in_scope=$n" \
+            "shallow=$(git rev-parse --is-shallow-repository 2>&1)" \
+            "n_commit=$(git rev-list --count HEAD 2>&1)" \
+            "ket_luan=$KL" || true
 
       # MỘT bước duy nhất. Bản cũ tách "xác định mốc" khỏi "dò diff" và
       # truyền BASE qua `$GITHUB_OUTPUT`; gộp lại để không còn ranh giới
@@ -276,7 +316,13 @@ jobs:
         run: |
           echo "── test slow sẽ chạy ────────────────────────────────"
           pytest --collect-only -q -m slow 2>/dev/null | tail -1
-          pytest -m slow -q
+          set +e
+          pytest -m slow -q > pytest-slow.log 2>&1
+          rc=$?
+          set -e
+          cat pytest-slow.log
+          python ops/ci_bao_cao.py --tu-pytest pytest-slow.log --nhan "slow" || true
+          exit $rc
 
       - name: Cổng §E
         if: steps.scope.outputs.touched == 'true'

@@ -141,11 +141,32 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--runs", type=int, default=0, help="số lần chạy backtest ghim (0 = chỉ in môi trường)")
     args = ap.parse_args(argv)
 
+    from ops.ci_bao_cao import notice, them_summary
+
     print("=" * 72)
     print("DẤU VÂN TAY MÔI TRƯỜNG SỐ HỌC")
     print("=" * 72)
-    for k, v in dau_van_tay().items():
+    vt = dau_van_tay()
+    for k, v in vt.items():
         print(f"  {k:24} {v}")
+
+    # Ra NGOÀI log: đây là bộ trường phải kèm MỌI khẳng định tất định
+    # (CLAUDE.md #19), và nó vô dụng nếu chỉ đọc được bằng cách chép tay.
+    notice(
+        "DAU VAN TAY",
+        blas=vt["blas_name"],
+        arch=vt["machine"],
+        python=vt["python"],
+        numpy=vt["numpy"],
+        scipy=vt["scipy"],
+        hmmlearn=vt["hmmlearn"],
+        threads=vt["OMP_NUM_THREADS"],
+        threadpool=vt["threadpool"],
+    )
+    them_summary(
+        "### Dấu vân tay môi trường số học\n\n| trường | giá trị |\n|---|---|\n"
+        + "\n".join(f"| `{k}` | `{v}` |" for k, v in vt.items())
+    )
 
     if args.runs <= 0:
         print("\n(--runs 0: không chạy backtest)")
@@ -156,7 +177,22 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 72)
     hashes = chay_nhieu_lan(args.runs)
 
-    if len(set(hashes)) == 1:
+    giong = len(set(hashes)) == 1
+    notice(
+        "TAT DINH NOI MAY",
+        **{f"run{i}": h for i, h in enumerate(hashes, 1)},
+        giong="yes" if giong else "no",
+        so_hash_khac_nhau=len(set(hashes)),
+    )
+    them_summary(
+        f"### Tất định nội máy — {args.runs} lần chạy\n\n"
+        f"**{'ĐẠT' if giong else 'TRƯỢT'}** — {len(set(hashes))} hash khác nhau.\n\n"
+        "| lần | sha256(equity) |\n|---|---|\n"
+        + "\n".join(f"| {i} | `{h}` |" for i, h in enumerate(hashes, 1))
+        + "\n\nPHẠM VI: chỉ nói về máy/cấu hình ở bảng dấu vân tay trên."
+    )
+
+    if giong:
         print(f"\nĐẠT — {args.runs}/{args.runs} lần cho CÙNG hash. Tất định NỘI MÁY.")
         print("     PHẠM VI: chỉ nói về máy này, cấu hình này. KHÔNG nói gì về máy khác.")
         return 0
