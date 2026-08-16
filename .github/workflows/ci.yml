@@ -173,13 +173,15 @@ jobs:
     # thực KHÔNG kết hợp được. Đây là nguồn bất định phổ biến nhất và rẻ
     # nhất để loại — đặt ở tầng JOB vì phải có TRƯỚC khi numpy nạp.
     env:
-      OMP_NUM_THREADS: 1
-      # TẠM — THÍ NGHIỆM 2026-08-16, sẽ revert.
-      # Giả thuyết: số luồng OpenBLAS là nguyên nhân regression_harness
-      # đỏ ở CI #18. Cộng dồn đa luồng không cố định thứ tự -> lệch chữ
-      # số cuối -> EM khuếch đại -> equity rẽ ở bar 1845.
+      # TẠM — THÍ NGHIỆM 2026-08-16 vòng HAI, sẽ revert.
+      # Vòng một (OPENBLAS=4) đã BÁC BỎ giả thuyết OpenBLAS: hash không
+      # đổi. Ứng viên còn lại: hmmlearn gọi qua scikit-learn, và sklearn
+      # dùng OpenMP chứ không phải BLAS cho phần lớn vòng lặp. Ở CI #18
+      # threadpool là openmp=4, và OMP_NUM_THREADS là biến DUY NHẤT còn
+      # khác giữa hai lần chạy.
       # Chỉ đổi MỘT biến này; bốn biến kia giữ nguyên 1.
-      OPENBLAS_NUM_THREADS: 4
+      OMP_NUM_THREADS: 4
+      OPENBLAS_NUM_THREADS: 1
       MKL_NUM_THREADS: 1
       NUMEXPR_NUM_THREADS: 1
       VECLIB_MAXIMUM_THREADS: 1

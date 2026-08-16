@@ -3446,3 +3446,56 @@ Chi phí duy trì: `tests/test_ci_bao_cao.py` ghim rằng mỗi
 `pytest … > X.log` phải kèm `--tu-pytest X.log` trong CÙNG bước, và cả
 hai job đều phải có. Không có ràng buộc đó thì kênh mất dần theo từng lần
 sửa `ci.yml`, và mất im lặng.
+
+## Giả thuyết "số luồng OpenBLAS" — BỊ BÁC BỎ bằng đo (2026-08-16)
+
+**Một giả thuyết bị bác bỏ là KẾT QUẢ, không phải thất bại.** Ghi lại để
+ba tháng nữa không có người thử lại đúng nó.
+
+### Giả thuyết
+
+`regression_harness` đỏ ở CI #18 và xanh ở CI #26; khác biệt duy nhất
+thấy được là `*_NUM_THREADS=1`. Lập luận: cộng dồn đa luồng không cố định
+thứ tự → lệch chữ số cuối → EM khuếch đại (10.5% số fit phân kỳ, 62.534
+lần tràn số trong `matmul`) → equity rẽ ở bar 1845. Accelerate trên macOS
+không nhạy với số luồng nên phép đo ở local không thấy.
+
+Nghe rất hợp lý. Và sai.
+
+### Thí nghiệm (CI #27, `cf17c27`) — đúng MỘT biến
+
+`OPENBLAS_NUM_THREADS: 1 → 4` ở `slow-gate`. Bốn biến thread kia giữ
+nguyên `1`, để cô lập đúng OpenBLAS chứ không phải "đa luồng nói chung".
+
+```
+DAU VAN TAY      omp=1 openblas=4 threadpool=openblas=4; openmp=1
+TAT DINH NOI MAY run1=470fdff6… run2=470fdff6… giong=yes
+PYTEST OK slow   9 passed
+```
+
+**Biến ĐÃ có hiệu lực** — `threadpool` xác nhận `openblas=4`, không phải
+một thí nghiệm rỗng. Nhưng hash vẫn `470fdff6…`: giống hệt 1 luồng, giống
+hệt macOS/Accelerate. `regression_harness` XANH.
+
+**Số luồng OpenBLAS KHÔNG phải nguyên nhân.**
+
+### Vì sao vẫn đáng làm
+
+Việc cô lập đúng một biến biến một câu trả lời "không" thành thông tin:
+
+- Loại hẳn OpenBLAS khỏi danh sách, thay vì loại "đa luồng" một cách mơ hồ.
+- Làm lộ ứng viên tiếp theo: `omp=1` VẪN CÒN. `hmmlearn` gọi qua
+  `scikit-learn`, và sklearn dùng **OpenMP** chứ không phải BLAS cho phần
+  lớn vòng lặp. Ở CI #18, `threadpool` là `openmp=4`.
+  `OMP_NUM_THREADS` là biến DUY NHẤT còn khác giữa hai lần chạy.
+- Củng cố tính tất định liên máy: hash `470fdff6…` giờ khớp qua **ba** cấu
+  hình — macOS/Accelerate/arm64/numpy 2.0.2, Ubuntu/OpenBLAS/x86_64/numpy
+  2.4.6 với 1 luồng, và cùng Ubuntu với OpenBLAS 4 luồng.
+
+### Nếu thí nghiệm OMP cũng xanh
+
+Thì cả hai giả thuyết luồng sai, và khác biệt nằm trong **mã**, không phải
+môi trường — phải bisect sáu commit giữa `76c380e` (CI #18, đỏ) và
+`2ae254a` (CI #26, xanh). Ứng viên hàng đầu: `99babef` (hợp đồng phân kỳ
+EM — `EMDivergenceError` + `MIN_N_INIT=6`), vì nó chạm thẳng vào đường
+chọn model.

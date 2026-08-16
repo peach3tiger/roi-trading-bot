@@ -12,7 +12,8 @@ tồn tại của các tầng khác.
 ## TẠM — chạm file này để kích hoạt cổng §E cho thí nghiệm số luồng
 
 Commit mang dòng này SẼ ĐƯỢC REVERT. Nó tồn tại để `slow-gate` chạy
-với `OPENBLAS_NUM_THREADS=4` và tái hiện `regression_harness` đỏ.
+với `OMP_NUM_THREADS=4` và tái hiện `regression_harness` đỏ. Vòng một
+(`OPENBLAS_NUM_THREADS=4`) đã bác bỏ giả thuyết OpenBLAS.
 Nếu bạn đọc thấy nó trên `main`, việc revert đã bị bỏ sót.
 
 ## File này nằm trong phạm vi cổng §E
