@@ -174,7 +174,12 @@ jobs:
     # nhất để loại — đặt ở tầng JOB vì phải có TRƯỚC khi numpy nạp.
     env:
       OMP_NUM_THREADS: 1
-      OPENBLAS_NUM_THREADS: 1
+      # TẠM — THÍ NGHIỆM 2026-08-16, sẽ revert.
+      # Giả thuyết: số luồng OpenBLAS là nguyên nhân regression_harness
+      # đỏ ở CI #18. Cộng dồn đa luồng không cố định thứ tự -> lệch chữ
+      # số cuối -> EM khuếch đại -> equity rẽ ở bar 1845.
+      # Chỉ đổi MỘT biến này; bốn biến kia giữ nguyên 1.
+      OPENBLAS_NUM_THREADS: 4
       MKL_NUM_THREADS: 1
       NUMEXPR_NUM_THREADS: 1
       VECLIB_MAXIMUM_THREADS: 1

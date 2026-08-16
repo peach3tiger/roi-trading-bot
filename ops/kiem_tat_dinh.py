@@ -85,9 +85,16 @@ def dau_van_tay() -> dict[str, str]:
     # `show_config` in ra stdout thay vì trả chuỗi ở phần lớn phiên bản —
     # lấy dạng dict nếu có, vì đó là thứ so sánh được giữa hai máy.
     try:
-        # numpy >= 2 trả dict; các bản cũ in ra stdout rồi trả `None` —
-        # nên phải kiểm kiểu, không tin chữ ký hàm.
-        cfg: Any = np.show_config(mode="dicts")  # type: ignore[call-arg,func-returns-value]
+        # Gọi QUA MỘT BIẾN kiểu `Any`, không dùng `# type: ignore`.
+        #
+        # Lý do rất cụ thể: chữ ký `show_config` khác nhau giữa numpy
+        # 2.0 và 2.4, nên một `# type: ignore[...]` đúng ở phiên bản này
+        # là "unused ignore" ở phiên bản kia — và `warn_unused_ignores`
+        # biến nó thành lỗi. Đã làm job mypy py3.11 ĐỎ trong khi py3.9
+        # xanh. Một chỉ thị câm cho type checker không nên là thứ phụ
+        # thuộc phiên bản thư viện.
+        show_config: Any = np.show_config
+        cfg: Any = show_config(mode="dicts")
         blas = (cfg or {}).get("Build Dependencies", {}).get("blas", {})
         ra["blas_name"] = str(blas.get("name", "(không rõ)"))
         ra["blas_version"] = str(blas.get("version", "(không rõ)"))
@@ -160,7 +167,12 @@ def main(argv: list[str] | None = None) -> int:
         numpy=vt["numpy"],
         scipy=vt["scipy"],
         hmmlearn=vt["hmmlearn"],
-        threads=vt["OMP_NUM_THREADS"],
+        # Cả hai, không chỉ OMP: thí nghiệm 2026-08-16 thao tác riêng
+        # `OPENBLAS_NUM_THREADS`, và một biến bị thao tác mà không hiện
+        # trong dấu vân tay thì phép đo không tự mô tả được điều kiện của
+        # nó.
+        omp=vt["OMP_NUM_THREADS"],
+        openblas=vt["OPENBLAS_NUM_THREADS"],
         threadpool=vt["threadpool"],
     )
     them_summary(
