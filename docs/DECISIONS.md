@@ -2988,11 +2988,16 @@ Phân kỳ tăng theo số trạng thái — đúng như kỳ vọng với
 | 6 | 7/130 (5.4%) |
 | 7 | 13/130 (10.0%) |
 
-### Kết luận cho Phase 7: lựa chọn KHÔNG do nhiễu quyết định
+### Kết luận cho Phase 7 (CHỈ với pruned-8): lựa chọn không do nhiễu quyết định
 
 **0/13 cửa sổ chọn phải một model phân kỳ.** Ở cả 13 cửa sổ, model được
 BIC chọn có `0` cảnh báo `|delta|>1` và không chạm trần lặp — dù 10/13
 cửa sổ CÓ chứa ít nhất một restart phân kỳ trong số 50 lần thử.
+
+> **SỬA PHẠM VI 2026-08-16.** Câu trên đo trên **pruned-8** và được viết
+> ra KHÔNG kèm phạm vi. Với bộ feature đầy đủ (14) thì nó **SAI**: BIC
+> chọn phải model phân kỳ với `n_components=7`, `|delta|` 271.5. Xem mục
+> "Hợp đồng EM nổ trên cấu hình mặc định" bên dưới.
 
 Cơ chế bảo vệ là vòng random restart: `scan_bic` giữ restart có
 log-likelihood **cao nhất**, và một fit đã phân kỳ thì log-likelihood
@@ -3499,3 +3504,87 @@ môi trường — phải bisect sáu commit giữa `76c380e` (CI #18, đỏ) v�
 `2ae254a` (CI #26, xanh). Ứng viên hàng đầu: `99babef` (hợp đồng phân kỳ
 EM — `EMDivergenceError` + `MIN_N_INIT=6`), vì nó chạm thẳng vào đường
 chọn model.
+
+## Giả thuyết "số luồng OpenMP" — BỊ BÁC BỎ. Cả hai giả thuyết luồng sai (2026-08-16)
+
+CI #28 (`5e69527`), đúng một biến đổi so với vòng một:
+
+```
+DAU VAN TAY      omp=4 openblas=1 threadpool=openblas=1; openblas=1; openmp=4
+TAT DINH NOI MAY run1=470fdff6… run2=470fdff6… giong=yes
+PYTEST OK slow   9 passed in 110.26s
+```
+
+`OMP_NUM_THREADS=4` có hiệu lực thật (`threadpool` xác nhận `openmp=4`),
+hash không đổi, `regression_harness` xanh.
+
+**Hash `470fdff6…` giờ khớp qua BỐN cấu hình môi trường:**
+
+| # | môi trường |
+|---|---|
+| 1 | macOS · Accelerate · arm64 · numpy 2.0.2 · 1 luồng |
+| 2 | macOS · Accelerate · arm64 · numpy 2.0.2 · 10 luồng (mặc định) |
+| 3 | Ubuntu · OpenBLAS · x86_64 · numpy 2.4.6 · 1 luồng |
+| 4 | Ubuntu · OpenBLAS · x86_64 · numpy 2.4.6 · `openblas=4` rồi `openmp=4` |
+
+Tất định của backtest ghim mạnh hơn nhiều so với những gì dự án từng dám
+khẳng định — nhưng vẫn là **khẳng định có phạm vi**: bốn cấu hình này,
+không phải "mọi máy".
+
+Cả hai giả thuyết luồng sai, nên khác biệt ở CI #18 nằm trong **mã** hoặc
+trong một biến chưa nghĩ tới.
+
+## Hợp đồng EM nổ trên cấu hình MẶC ĐỊNH — và forward test chạy cấu hình đó (2026-08-16)
+
+`ops/compare_versions.py` (chạy `main_mod.load_settings()`, tức cấu hình
+SẢN XUẤT) dừng ngay ở ref `2ae254a`:
+
+```
+EMDivergenceError: Model được BIC chọn (n_components=7, BIC=6002.95)
+phân kỳ: log-likelihood GIẢM 271.5
+```
+
+### Ba cấu hình, ba số feature khác nhau
+
+| cấu hình | số feature |
+|---|---|
+| pruned-8 — bộ **ĐÃ KIỂM ĐỊNH**, ghim trong `regression_harness` | **8** |
+| `config/settings.yaml` — sản xuất | **14** |
+| `forward/config_frozen.yaml` — **ĐANG CHẠY THẬT từ 2026-08-06** | **14** |
+
+Sáu feature thừa: `atr_norm_14`, `distance_to_sma200_pct`,
+`log_return_20`, `roc_10`, `roc_20`, `rsi_zscore_14` — đúng những cái
+ablation đã LOẠI để ra pruned-8.
+
+`covariance_type="full"` làm số tham số tăng bậc hai theo số feature, nên
+8 → 14 không nhỏ. Đó là lý do BIC chọn phải model phân kỳ ở bộ đầy đủ mà
+không ở pruned-8.
+
+### Lần thứ NĂM của mẫu "khẳng định hẹp hơn nó tự nhận"
+
+Bốn lần trước là phát hiện về code hoặc công cụ. **Lần này do chính bản
+ghi trong file này gây ra** — mục "Phân kỳ EM trong backtest kiểm định"
+viết `0/13 cửa sổ chọn phải model phân kỳ` mà không nói phạm vi pruned-8,
+và `CLAUDE.md` #13b chép lại y nguyên. Trong đúng mục lập luận cho kỷ
+luật #19.
+
+Vì sao không test nào đỏ: `regression_harness` ghim pruned-8, nên **không
+phép kiểm nào chạm cấu hình mặc định**. Bán kính ảnh hưởng của hợp đồng
+`EMDivergenceError` chưa từng được đo trước khi commit.
+
+### Hệ quả CHƯA XỬ LÝ, cần quyết định của người
+
+1. **Merge nhánh tạm vào `main` sẽ làm thí nghiệm forward RAISE.**
+   `forward/logger.py:564` gọi `select_and_train`, và tuy `logger.py` đóng
+   băng thì `core/hmm_engine.py` KHÔNG — hợp đồng nằm ở đó. Lần retrain kế
+   tiếp sau merge sẽ ném `EMDivergenceError`.
+2. **Thí nghiệm forward 12 tháng đang kiểm định một cấu hình chưa từng
+   được kiểm định.** `VALIDATION_REPORT` (Sharpe 0.94, §4.9) nói về 8
+   feature; thứ đang chạy là 14. Khoảng trống này có TỪ TRƯỚC hợp đồng EM;
+   hợp đồng chỉ làm nó lộ ra.
+3. `forward/config_frozen.yaml` ghim SHA256 — sửa nó = kết thúc thí nghiệm
+   hiện tại (CLAUDE.md #15). Nên đây không phải thứ sửa lặng lẽ được.
+
+Ba lựa chọn cho (2), chưa chọn: chấp nhận và ghi rõ thí nghiệm đang đo cấu
+hình chưa kiểm định; kết thúc và khởi động lại với pruned-8; hoặc thu hẹp
+`n_candidates` bỏ 7.

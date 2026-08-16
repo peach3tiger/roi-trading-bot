@@ -133,10 +133,19 @@ Toàn bộ lớp bảo vệ chống model HMM phân kỳ nằm ở vòng random 
 `scan_bic` giữ restart có log-likelihood **cao nhất**, và một fit đã phân
 kỳ thì log-likelihood tệ nên luôn thua. Không có cơ chế nào khác.
 
-Đo trên backtest kiểm định (650 lần `.fit()`, 13 cửa sổ): **10.5% số lần
-fit phân kỳ** (`|delta|` cực đại 128.8), nhưng **0/13 cửa sổ chọn phải
-model phân kỳ** — dù 10/13 cửa sổ CÓ chứa restart phân kỳ. Vòng restart
-làm đúng việc của nó.
+Đo trên backtest kiểm định **với bộ feature pruned-8** (650 lần `.fit()`,
+13 cửa sổ): **10.5% số lần fit phân kỳ** (`|delta|` cực đại 128.8), nhưng
+**0/13 cửa sổ chọn phải model phân kỳ** — dù 10/13 cửa sổ CÓ chứa restart
+phân kỳ.
+
+**`0/13` CHỈ ĐÚNG VỚI pruned-8.** Với bộ feature ĐẦY ĐỦ (14 feature — thứ
+`config/settings.yaml` và `forward/config_frozen.yaml` thật sự dùng), BIC
+**CÓ** chọn phải model phân kỳ: `n_components=7`, `|delta|` 271.5. Đo
+2026-08-16 qua `ops/compare_versions.py`.
+
+`covariance_type="full"` làm số tham số tăng **bậc hai** theo số feature,
+nên 8 → 14 không phải một khác biệt nhỏ. Vòng restart làm đúng việc của nó
+**trong phạm vi đã đo**, không phải ở mọi cấu hình.
 
 Đó là quan sát về dữ liệu đã thấy, không phải bảo đảm. Giảm `n_init` làm
 lớp bảo vệ mỏng đi theo hàm mũ, và trước 2026-08-15 **không phép kiểm nào
