@@ -9,13 +9,6 @@ cộng, không "hoà giải" giữa các tầng (xem CLAUDE.md bất biến #2).
 này là nơi DUY NHẤT ba tầng gặp nhau; mỗi tầng bên dưới không biết về sự
 tồn tại của các tầng khác.
 
-## TẠM — chạm file này để kích hoạt cổng §E cho thí nghiệm số luồng
-
-Commit mang dòng này SẼ ĐƯỢC REVERT. Nó tồn tại để `slow-gate` chạy
-với `OMP_NUM_THREADS=4` và tái hiện `regression_harness` đỏ. Vòng một
-(`OPENBLAS_NUM_THREADS=4`) đã bác bỏ giả thuyết OpenBLAS.
-Nếu bạn đọc thấy nó trên `main`, việc revert đã bị bỏ sót.
-
 ## File này nằm trong phạm vi cổng §E
 
 `GATED_PREFIXES = ("core/", "backtest/")`: mọi thay đổi ở đây BẮT BUỘC

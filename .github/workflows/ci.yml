@@ -169,18 +169,19 @@ jobs:
   slow-gate:
     name: Cổng §E — test chậm khi chạm tầng quyết định
     runs-on: ubuntu-latest
-    # Số thread BLAS đổi thứ tự cộng dồn trong `matmul`, và cộng dồn số
-    # thực KHÔNG kết hợp được. Đây là nguồn bất định phổ biến nhất và rẻ
-    # nhất để loại — đặt ở tầng JOB vì phải có TRƯỚC khi numpy nạp.
+    # Ghim số thread về 1. ĐO ĐƯỢC 2026-08-16: việc này KHÔNG sửa lỗi nào —
+    # hai thí nghiệm cô lập (`OPENBLAS_NUM_THREADS=4`, rồi
+    # `OMP_NUM_THREADS=4`) đều cho hash equity y hệt, và `regression_harness`
+    # xanh ở cả hai. Số luồng không đổi kết quả trên đường này.
+    #
+    # Giữ lại vì lý do KHÁC: một môi trường số học ít bậc tự do hơn thì dễ
+    # tái hiện hơn. Khi lần sau có một khác biệt liên máy, đây là một biến
+    # đã bị loại sẵn thay vì một biến phải đi đo lại.
+    #
+    # Đặt ở tầng JOB vì phải có TRƯỚC khi numpy nạp; đặt trong Python thì
+    # đã muộn. Xem docs/DECISIONS.md hai mục "BỊ BÁC BỎ".
     env:
-      # TẠM — THÍ NGHIỆM 2026-08-16 vòng HAI, sẽ revert.
-      # Vòng một (OPENBLAS=4) đã BÁC BỎ giả thuyết OpenBLAS: hash không
-      # đổi. Ứng viên còn lại: hmmlearn gọi qua scikit-learn, và sklearn
-      # dùng OpenMP chứ không phải BLAS cho phần lớn vòng lặp. Ở CI #18
-      # threadpool là openmp=4, và OMP_NUM_THREADS là biến DUY NHẤT còn
-      # khác giữa hai lần chạy.
-      # Chỉ đổi MỘT biến này; bốn biến kia giữ nguyên 1.
-      OMP_NUM_THREADS: 4
+      OMP_NUM_THREADS: 1
       OPENBLAS_NUM_THREADS: 1
       MKL_NUM_THREADS: 1
       NUMEXPR_NUM_THREADS: 1
