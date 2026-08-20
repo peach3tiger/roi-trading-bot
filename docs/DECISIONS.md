@@ -3546,15 +3546,43 @@ phân kỳ: log-likelihood GIẢM 271.5
 
 ### Ba cấu hình, ba số feature khác nhau
 
-| cấu hình | số feature |
-|---|---|
-| pruned-8 — bộ **ĐÃ KIỂM ĐỊNH**, ghim trong `regression_harness` | **8** |
-| `config/settings.yaml` — sản xuất | **14** |
-| `forward/config_frozen.yaml` — **ĐANG CHẠY THẬT từ 2026-08-06** | **14** |
+| cấu hình | số feature | đọc theo đường nào |
+|---|---|---|
+| pruned-8 — bộ **ĐÃ KIỂM ĐỊNH**, ghim trong `regression_harness` | **8** | `_FEATURE_SUBSET` trong file test |
+| `forward/logger.py` — **ĐANG CHẠY THẬT từ 2026-08-06** | **8** | `FEATURE_SUBSET` hardcode, dòng 122 |
+| `config/settings.yaml` — backtest chạy tay | **14** | `build_feature_config()` không truyền subset |
 
-Sáu feature thừa: `atr_norm_14`, `distance_to_sma200_pct`,
-`log_return_20`, `roc_10`, `roc_20`, `rsi_zscore_14` — đúng những cái
-ablation đã LOẠI để ra pruned-8.
+> ### SỬA BẢN GHI SAI — 2026-08-16
+>
+> Bản đầu của bảng này ghi **`forward/config_frozen.yaml` -> 14 feature**.
+> **SAI.** Forward test chạy **pruned-8**, khớp đúng bộ đã kiểm định.
+>
+> **Phép đo sai ở đâu:** tôi gọi `main.build_feature_config(settings)`
+> trên `config_frozen.yaml` rồi đọc kết quả là "cấu hình forward". Nhưng
+> `forward/logger.py` **không dùng** `build_feature_config` — nó dựng
+> `FeatureConfig` trực tiếp (dòng 482–488) và truyền `feature_subset=
+> FEATURE_SUBSET`, một hằng số hardcode trong chính file đóng băng đó.
+> Khối `features:` trong `config_frozen.yaml` chỉ mang cờ tier, **không**
+> quyết định subset. Tôi đo một đường mã mà forward test không bao giờ đi
+> qua.
+>
+> **Bằng chứng đúng — artifact thật, không phải suy luận từ config:**
+> `forward/state/hmm_model.pkl` của chính thí nghiệm đang chạy có
+> `feature_names` = đúng 8 tên pruned-8, và `means_.shape = (7, 8)`.
+>
+> **Hệ quả của bản ghi sai:** nó dẫn tới quyết định KHỞI ĐỘNG LẠI thí
+> nghiệm 12 tháng. Đã dừng ở bước 1 (`launchctl bootout`) và khôi phục
+> ngay khi phép đo đúng xuất hiện; `log_v2.csv` và `hmm_model.pkl` nguyên
+> vẹn, lần chạy 2026-08-16T01:24Z đã hoàn tất trước khi dừng, **không mất
+> bar nào**.
+>
+> Bài học không phải "kiểm kỹ hơn" mà cụ thể hơn thế: **đọc một cấu hình
+> phải đi đúng đường mã mà hệ thống thật sự dùng.** Một hàm tiện tay cho
+> ra con số hợp lý, và một con số hợp lý không tự tố cáo mình đến từ nhầm
+> chỗ. Đây là lần thứ BẢY của mẫu "khẳng định hẹp/sai hơn nó tự nhận"
+> trong dự án, lần thứ ba do tôi.
+
+Khoảng trống THẬT, nhỏ hơn nhiều: chỉ `config/settings.yaml` lệch.
 
 `covariance_type="full"` làm số tham số tăng bậc hai theo số feature, nên
 8 → 14 không nhỏ. Đó là lý do BIC chọn phải model phân kỳ ở bộ đầy đủ mà
@@ -3588,3 +3616,192 @@ phép kiểm nào chạm cấu hình mặc định**. Bán kính ảnh hưởng 
 Ba lựa chọn cho (2), chưa chọn: chấp nhận và ghi rõ thí nghiệm đang đo cấu
 hình chưa kiểm định; kết thúc và khởi động lại với pruned-8; hoặc thu hẹp
 `n_candidates` bỏ 7.
+
+## Hợp đồng EM: LOẠI trong lúc chọn, thay vì RAISE sau khi đã chọn (2026-08-16)
+
+### Hợp đồng ban đầu đúng về Ý ĐỊNH, sai về CƠ CHẾ
+
+Bản đầu (`99babef`) để mọi restart dự thi, để BIC chọn, rồi `raise` nếu
+model được chọn phân kỳ. **Một phòng thủ làm hệ thống dừng hẳn thì trong
+vận hành thực tế sẽ bị gỡ** — và một bot 24/7 không ai canh cần suy giảm
+có kiểm soát, không cần dừng cứng.
+
+Cơ chế mới, hai tầng:
+
+1. **Mức restart** — restart phân kỳ (`|delta| > 1.0`) bị LOẠI ngay, không
+   dự phép so log-likelihood. Kèm `logger.warning` nêu `n_components` và
+   `random_state`.
+2. **Mức ứng viên** — nếu MỌI restart của một `n_components` đều phân kỳ,
+   ứng viên đó bị loại khỏi phép so BIC (`bic=inf`, `loai_bo=True`), kèm
+   cảnh báo. Chọn model tốt nhất trong số còn lại.
+3. **Đáy** — chỉ `raise EMDivergenceError` khi TOÀN BỘ ứng viên bị loại.
+   Suy giảm có kiểm soát phải có đáy: trả về một model bất kỳ ở đó nghĩa
+   là giao dịch bằng tham số vô nghĩa.
+
+`_assert_chosen_model_converged()` giữ lại làm **hậu điều kiện**: theo cấu
+tạo mới `scan_bic` không thể trả model phân kỳ, nên nó không kích hoạt
+trên đường thật. Nếu logic loại bỏ trôi đi, đây là thứ bắt được.
+
+### Merge có giết thí nghiệm forward không — ĐO TRƯỚC
+
+Phát lại các lần retrain THẬT, đúng đường mã `forward/logger.py`
+(`FeatureConfig` dựng trực tiếp với `FEATURE_SUBSET`, KHÔNG qua
+`build_feature_config`), dữ liệu = fixture nối 12 bar thật từ endpoint
+klines công khai của Binance (`fetch_ohlcv` của ccxt không trả
+`trade_count`, mà hai trong tám feature pruned-8 cần nó — phải dùng
+endpoint thô, chỉ số 8).
+
+| | |
+|---|---|
+| số lần retrain thật từ 2026-08-06 | 2 (2026-08-08, 2026-08-15) |
+| **phạm vi**: phát lại khớp `hmm_train_bars` trong log | **2/2** (2660, 2667) |
+| sẽ raise | **0/2** |
+| model được chọn | `n_components=7`, `max_em_divergence = 0.0` |
+
+Vòng đầu lấy biên cửa sổ `< D` và ra 2659/2666 — lệch đúng 1 bar. Phép
+kiểm chứng nội tại (so với `hmm_train_bars` mà log đã ghi) bắt được;
+không có nó thì "0/2, an toàn" đã được báo từ một phép phát lại sai cửa
+sổ. Biên đúng là `<= D`: dòng log `date=D` được xử lý SAU khi bar D đóng.
+
+### Tỷ lệ trên 52 lần retrain hàng tuần — VÀ GIỚI HẠN CỠ MẪU
+
+**0/52 sẽ raise. 0/52 có bất kỳ ứng viên nào phân kỳ.**
+
+> **CỠ MẪU HIỆU DỤNG KHÔNG PHẢI 52.** Cửa sổ IS là 365 ngày trượt 7 ngày,
+> nên hai lần retrain liên tiếp dùng chung **358/365** dữ liệu. 52 quan
+> sát đó gần như hoàn toàn tương quan; cỡ mẫu hiệu dụng khoảng **2–3**.
+>
+> Đọc đúng con số này là: *"trong một năm dữ liệu này KHÔNG có vùng thời
+> gian nào gây raise"* — **không phải** "xác suất raise là 0%". Một chế độ
+> thị trường chưa từng xuất hiện trong 365 ngày qua vẫn có thể gây ra nó.
+
+Cơ chế mới chỉ có thể AN TOÀN HƠN con số này: nó raise trong tập con thực
+sự của các tình huống bản cũ raise.
+
+**→ Merge không giết thí nghiệm forward**, trong phạm vi đã đo.
+
+### Đột biến — hai nhánh quan trọng nhất KHÔNG BAO GIỜ chạy tự nhiên
+
+Với pruned-8, ứng viên BIC tốt nhất chưa bao giờ phân kỳ (0/52). Nên
+đường "loại ứng viên rồi chọn cái kế" sẽ xanh một cách RỖNG nếu chỉ dựa
+vào dữ liệu thật — đúng mẫu hỏng đã gặp sáu lần trong phiên này. Hai ca
+dựng tay bằng `GaussianHMM` giả khoá theo `(n_components, random_state)`:
+
+- **(a)** ứng viên BIC tốt nhất phân kỳ hoàn toàn → chọn ứng viên kế VÀ
+  phát cảnh báo `LOẠI HOÀN TOÀN`.
+- **(b)** toàn bộ ứng viên phân kỳ → `raise`, thông điệp nêu từng ứng viên
+  hỏng bao nhiêu.
+
+9 phép đột biến, hai vòng. Vòng đầu 7/9; hai sống sót đều là lỗ hổng thật:
+*"loại restart nhưng KHÔNG cảnh báo"* (loại IM LẶNG là chế độ hỏng riêng —
+hệ thống vẫn chạy, kết quả vẫn ra, và không ai biết một phần không gian
+tìm kiếm đã bị vứt), và *"bỏ hậu điều kiện"* (không kích hoạt trên đường
+thật, phải ép bằng cách thay `scan_bic` bằng bản trả về đúng thứ nó lẽ ra
+không được trả). Vòng hai **9/9 đỏ**.
+
+### Cảnh báo đi đâu — KHÔNG thêm cột vào `forward/log_v2.csv`
+
+Thêm cột là đổi schema một bản ghi append-only; lần trước việc đó đẻ ra vụ
+v1/v2 và reset lịch retrain. Cảnh báo đi vào `logger.warning` của
+`core.hmm_engine` (log vận hành), và `bic_results` mang `loai_bo` +
+`so_restart_loai` để caller đọc được. Muốn lưu theo thời gian thì file
+riêng trong `${STATE_DIR}`, không đụng bản ghi thí nghiệm.
+
+## Hợp nhất bộ feature: ba nguồn thành MỘT (2026-08-16)
+
+| nguồn | trước | sau |
+|---|---|---|
+| `tests/regression_harness.py::_FEATURE_SUBSET` | 8 | 8 |
+| `forward/logger.py::FEATURE_SUBSET` (đóng băng) | 8 | 8 |
+| `config/settings.yaml` | **14** | **8** |
+
+`config/settings.yaml` giờ có `features.subset` tường minh, và
+`main.build_feature_config()` đọc nó khi không được truyền subset (tham số
+tường minh vẫn thắng — `--feature-subset` là ý định trước mắt, config là
+mặc định dự án).
+
+`tests/test_feature_set_thong_nhat.py` ghim ba nguồn trùng nhau, đọc **hằng
+số** bằng AST chứ không gọi `build_feature_config` — đúng bài học từ phép
+đo sai ở trên. 8 phép đột biến, 8/9... **8/8 đỏ**.
+
+### `tests/snapshots/smoke_7d.json` sinh lại — CỐ Ý
+
+`test_snapshot.py` dùng `load_settings()`, nên nó vốn đang ghim hành vi
+của cấu hình **14 feature chưa kiểm định**. Đổi sang pruned-8 làm nó đỏ
+(`final_equity` 9145.877864780847 → 9164.461257199705).
+
+Đây là thay đổi CỐ Ý, ghi trước khi sinh lại theo đúng quy tắc trong
+docstring của chính file đó. Điều đáng chú ý: một canary chạy 8 giây đã
+ghim sai cấu hình suốt nhiều tuần mà không ai thấy, vì nó chỉ so với
+CHÍNH NÓ.
+
+Chênh lệch đo được sau khi sinh lại:
+
+| | 14 feature (cũ) | pruned-8 (mới) |
+|---|---|---|
+| `final_equity` | 9145.877864780847 | **9164.461257199705** |
+| `n_trades` | 10 | **8** |
+| `total_fee_usdt` | 4.02971753781 | **3.72332397715** |
+| nhãn regime | `NEUTRAL/EUPHORIA/CRASH` | `BULL/NEUTRAL/BEAR` |
+| số bar nhãn khác nhau | — | **15/15** |
+
+**Nhãn regime đổi ở TOÀN BỘ 15 bar.** Đây không phải sai lệch chữ số cuối
+— hai cấu hình cho hai cách phân chia chế độ thị trường khác hẳn nhau
+trên cùng dữ liệu. Con số đó là thước đo trực tiếp cho việc cấu hình sai
+đã ảnh hưởng bao nhiêu tới `main.py --backtest`.
+
+Cửa sổ smoke (2022-06, giai đoạn sập) cũng là nơi ĐẦU TIÊN cơ chế loại bỏ
+mới chạy trên dữ liệu THẬT, không phải ca dựng tay:
+
+```
+HMM restart bị LOẠI vì phân kỳ EM: n_components=5 random_state=1 |delta|=104.9
+HMM restart bị LOẠI vì phân kỳ EM: n_components=7 random_state=5 |delta|=35.5
+```
+
+Đáng ghi vì nó bổ khuyết đúng chỗ 0/52 để lại: một năm dữ liệu gần đây
+KHÔNG có vùng gây phân kỳ, nhưng 2022-06 thì CÓ. Cỡ mẫu hiệu dụng 2–3 của
+phép đo 52 tuần là có thật, và đây là ví dụ.
+
+`regression_harness` KHÔNG đổi — nó truyền `_FEATURE_SUBSET` tường minh
+nên vốn đã chạy pruned-8. `pytest -m slow` xanh, và nhanh hơn hẳn
+(185s → 41s) vì các test khác dùng `load_settings()` giờ chạy 8 feature
+thay vì 14.
+
+### Sửa một khẳng định của chính tôi: forward test chạy CÂY LÀM VIỆC, không phải `main`
+
+Trong lượt trước tôi viết *"merge nhánh tạm vào `main` sẽ làm thí nghiệm
+forward raise"*. Cách diễn đạt đó SAI về cơ chế, và cái sai làm người đọc
+tưởng `main` là hàng rào bảo vệ.
+
+Đo:
+
+```
+com.regime-trader-crypto.forward-test.plist
+  WorkingDirectory  /Users/lbeyewear/regime-trader-crypto
+  ProgramArguments  .venv/bin/python -m forward.runner
+```
+
+`WorkingDirectory` là **cây làm việc của repo**, và cây làm việc đang ở
+nhánh `test-cong-e-doi-core`. `forward/logger.py` đóng băng, nhưng nó
+import `core/hmm_engine.py` **từ cây làm việc** — tức là từ bất cứ nhánh
+nào đang được checkout.
+
+Hệ quả: thí nghiệm forward **đã** chạy dưới mã của nhánh tạm suốt phiên
+này, kể cả trong khoảng `99babef` (bản raise-sau-khi-chọn) còn nằm trong
+cây. `main` chưa bao giờ là hàng rào.
+
+Điều này KHÔNG đổi kết luận an toàn — 0/2 lần retrain thật và 0/52 lần
+hàng tuần đều không raise, và cơ chế mới chỉ có thể an toàn hơn. Nhưng nó
+đổi hai thứ:
+
+1. **Rủi ro không nằm ở lúc merge, mà ở lúc CHECKOUT.** Mọi lần đổi nhánh
+   trong repo này là một lần đổi mã của một thí nghiệm 12 tháng đang
+   chạy, im lặng và không có bản ghi nào.
+2. **Ở lại nhánh tạm lâu KHÔNG an toàn hơn merge.** Nó chỉ làm mã đang
+   chạy khó truy vết hơn.
+
+Việc cần làm (chưa làm, cần quyết định): tách môi trường chạy forward
+khỏi cây làm việc phát triển — chạy nó từ một `git worktree` riêng ghim
+vào `main`, hoặc từ một bản sao chỉ-đọc. Bất biến #20 nói về hai tiến
+trình cùng đặt lệnh; đây là một họ hàng của nó ở tầng MÃ NGUỒN, và chưa
+có bất biến nào phủ.

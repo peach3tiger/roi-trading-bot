@@ -290,6 +290,18 @@ def build_feature_config(settings: dict[str, Any], *, feature_subset: tuple[str,
     """
     from data.feature_engineering import FeatureConfig
 
+    # Tham số TƯỜNG MINH thắng config: `--feature-subset` trên dòng lệnh là
+    # ý định trước mắt, `features.subset` là mặc định của dự án.
+    #
+    # Trước 2026-08-16 không có nhánh này, nên gọi không truyền subset =
+    # dùng TOÀN BỘ 14 feature. Đó là cách `main.py --backtest` và
+    # `ops/compare_versions.py` chạy một cấu hình chưa từng được kiểm định
+    # trong nhiều tuần mà không phép kiểm nào phát hiện.
+    if feature_subset is None:
+        khai_bao = settings["features"].get("subset")
+        if khai_bao:
+            feature_subset = tuple(khai_bao)
+
     return FeatureConfig(
         zscore_lookback=settings["hmm"]["zscore_lookback"],
         use_trade_count_not_volume=settings["features"]["use_trade_count_not_volume"],

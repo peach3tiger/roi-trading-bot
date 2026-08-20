@@ -1,33 +1,33 @@
 {
   "_ghi_chu": "Snapshot smoke test — Phase 12b §A.3. KHÔNG sinh lại file này để 'cho xanh'. Đọc docstring tests/test_snapshot.py trước khi đụng vào.",
-  "_sinh_luc": "2026-08-13",
+  "_sinh_luc": "2026-08-16",
   "_cau_hinh": {
     "symbol": "BTCUSDT",
     "start": "2022-06-10",
     "end": "2022-06-24",
     "data_start": "2018-01-01",
-    "ghi_chu": "config/settings.yaml MẶC ĐỊNH — is_bars=365, oos_bars=182, n_candidates=[3,4,5,6,7], n_init=10, covariance_type=full, hmm.seed=0"
+    "ghi_chu": "config/settings.yaml MẶC ĐỊNH — is_bars=365, oos_bars=182, n_candidates=[3,4,5,6,7], n_init=10, covariance_type=full, hmm.seed=0, features.subset=pruned-8 (THÊM 2026-08-16; trước đó KHÔNG có khoá này nên file này ghim hành vi của cấu hình 14 feature CHƯA KIỂM ĐỊNH)"
   },
   "_vi_sao_cua_so_nay": "Chọn bằng ĐO, không phải tiện tay. Cửa sổ đầu (2024-01-01..08) chỉ có MỘT regime và MỘT lệnh. Cửa sổ này có ba regime (NEUTRAL/EUPHORIA/CRASH), 10 lệnh, và RẺ HƠN (7.9s so với 8.8s). GIỚI HẠN ĐÃ ĐO: cả hai cửa sổ đều KHÔNG bắt được đột biến _EMA_PERIOD 50->40 (đường allocation), dù regression_harness bắt được ngay. Bắt được: taker_fee 0.10->0.15, hmm.seed 0->1. Xem docstring tests/test_snapshot.py.",
   "n_bars": 15,
-  "final_equity": "9145.877864780847",
-  "n_trades": 10,
-  "total_fee_usdt": "4.02971753781",
+  "final_equity": "9164.461257199705",
+  "n_trades": 8,
+  "total_fee_usdt": "3.72332397715",
   "regime_labels": [
+    "BULL",
+    "BULL",
+    "BULL",
+    "BULL",
+    "BULL",
     "NEUTRAL",
     "NEUTRAL",
     "NEUTRAL",
     "NEUTRAL",
     "NEUTRAL",
-    "EUPHORIA",
-    "EUPHORIA",
-    "EUPHORIA",
-    "EUPHORIA",
-    "EUPHORIA",
-    "EUPHORIA",
-    "CRASH",
-    "CRASH",
-    "CRASH",
-    "CRASH"
+    "NEUTRAL",
+    "NEUTRAL",
+    "NEUTRAL",
+    "BEAR",
+    "BEAR"
   ]
 }

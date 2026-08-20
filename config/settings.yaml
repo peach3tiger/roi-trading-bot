@@ -76,6 +76,28 @@ features:
   tier3_temporal: false          # cẩn trọng — dễ overfit
   use_trade_count_not_volume: true
 
+  # Bộ "pruned-8" — bộ ĐÃ KIỂM ĐỊNH (docs/VALIDATION_REPORT.md, Sharpe
+  # 0.94, §4.9). Trước 2026-08-16 khoá này KHÔNG tồn tại, nên
+  # `main.py --backtest` mặc định chạy 14 feature: một cấu hình chưa từng
+  # được kiểm định, và là cấu hình duy nhất mà BIC được chứng minh là chọn
+  # phải model phân kỳ (n_components=7, |delta| 271.5).
+  #
+  # Ba nguồn phải TRÙNG NHAU và `tests/test_feature_set_thong_nhat.py` ghim
+  # điều đó: khoá này, `forward/logger.py::FEATURE_SUBSET` (đóng băng), và
+  # `tests/regression_harness.py::_FEATURE_SUBSET`.
+  #
+  # `covariance_type: full` làm số tham số tăng BẬC HAI theo số feature —
+  # thêm một feature ở đây không phải một thay đổi nhỏ (CLAUDE.md #13).
+  subset:
+    - log_return_1
+    - log_return_5
+    - realized_vol_20
+    - vol_ratio_5_20
+    - adx_14
+    - sma50_slope
+    - trade_count_zscore_50
+    - trade_count_sma10_slope
+
 trend_gate:
   enabled: true
   sma_period: 200

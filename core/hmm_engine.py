@@ -220,6 +220,11 @@ class BICCandidateResult:
     # THẮNG cuộc. 0.0 = không có cảnh báo nào. Mặc định để mọi caller cũ
     # (test dựng thẳng dataclass) không phải đổi.
     max_em_divergence: float = 0.0
+    #: Số restart bị LOẠI vì phân kỳ, trong `n_init` lần thử.
+    so_restart_loai: int = 0
+    #: True khi MỌI restart của ứng viên này đều phân kỳ — ứng viên bị loại
+    #: khỏi phép so BIC. `bic` khi đó là `inf`, không phải một BIC thật.
+    loai_bo: bool = False
 
 
 @dataclass
@@ -385,6 +390,8 @@ class HMMRegimeEngine:
             # cùng dữ liệu phải cho cùng model. Đo thật ở
             # tests/test_determinism.py, không suy luận.
             best_restart_divergence = 0.0
+            so_loai = 0
+            phan_ky_lon_nhat = 0.0
             for restart in range(self.n_init):
                 candidate = GaussianHMM(
                     n_components=n_components,
@@ -399,19 +406,70 @@ class HMMRegimeEngine:
                 # kỳ, và khẳng định ở `select_and_train` thành vô dụng.
                 with _theo_doi_phan_ky() as thu:
                     candidate.fit(X)
+
+                # LOẠI restart phân kỳ NGAY, trước khi nó dự phép so.
+                #
+                # Bản đầu để mọi restart dự thi rồi mới `raise` sau khi BIC
+                # đã chọn. Nó đúng về Ý ĐỊNH nhưng sai về CƠ CHẾ: một phòng
+                # thủ làm hệ thống DỪNG HẲN thì trong vận hành thực tế sẽ bị
+                # gỡ — và một bot 24/7 không ai canh cần suy giảm có kiểm
+                # soát, không cần dừng cứng.
+                #
+                # Trên thực tế điều này KHÔNG đổi lựa chọn với pruned-8: đo
+                # được 0/13 cửa sổ có restart thắng phân kỳ. Nó chỉ đổi hành
+                # vi ở đúng những chỗ trước đây sẽ nổ.
+                phan_ky_lon_nhat = max(phan_ky_lon_nhat, thu.phan_ky_max)
+                if thu.phan_ky_max > _EM_DIVERGENCE_DELTA:
+                    so_loai += 1
+                    logger.warning(
+                        "HMM restart bị LOẠI vì phân kỳ EM: n_components=%d "
+                        "random_state=%d |delta|=%.1f (ngưỡng %.1f)",
+                        n_components,
+                        self.seed + restart,
+                        thu.phan_ky_max,
+                        _EM_DIVERGENCE_DELTA,
+                    )
+                    continue
+
                 score = candidate.score(X)
                 if score > best_restart_score:
                     best_restart_score = score
                     best_restart = candidate
                     best_restart_divergence = thu.phan_ky_max
 
-            assert best_restart is not None
+            if best_restart is None:
+                # MỌI restart của ứng viên này đều phân kỳ. Ghi lại để nhìn
+                # thấy được, nhưng loại khỏi phép so BIC — `bic=inf` không
+                # phải một BIC thật, và `loai_bo` là thứ caller phải đọc.
+                logger.warning(
+                    "HMM ứng viên n_components=%d bị LOẠI HOÀN TOÀN: cả %d "
+                    "restart đều phân kỳ (|delta| lớn nhất %.1f)",
+                    n_components,
+                    self.n_init,
+                    phan_ky_lon_nhat,
+                )
+                bic_results.append(
+                    BICCandidateResult(
+                        n_components=n_components,
+                        bic=float("inf"),
+                        log_likelihood=float("-inf"),
+                        converged=False,
+                        n_iter=0,
+                        n_params=0,
+                        max_em_divergence=phan_ky_lon_nhat,
+                        so_restart_loai=so_loai,
+                        loai_bo=True,
+                    )
+                )
+                continue
+
             bic = best_restart.bic(X)
             n_params = sum(best_restart._get_n_fit_scalars_per_param().values())  # noqa: SLF001
             result = BICCandidateResult(
                 n_components=n_components,
                 bic=bic,
                 max_em_divergence=best_restart_divergence,
+                so_restart_loai=so_loai,
                 log_likelihood=best_restart_score,
                 converged=bool(best_restart.monitor_.converged),
                 n_iter=best_restart.monitor_.iter,
@@ -435,7 +493,15 @@ class HMMRegimeEngine:
                 best_bic = bic
                 best_model = best_restart
 
-        assert best_model is not None
+        if best_model is None:
+            raise EMDivergenceError(
+                f"MỌI ứng viên n_components trong {self.n_candidates} đều bị "
+                f"loại vì phân kỳ EM ở cả {self.n_init} restart. Không có model "
+                f"nào dùng được. |delta| lớn nhất theo ứng viên: "
+                + ", ".join(f"n={r.n_components}:{r.max_em_divergence:.1f}" for r in bic_results)
+                + ". Giảm n_components, đổi covariance_type, hoặc tăng n_init. "
+                "Xem docs/DECISIONS.md 'Phân kỳ EM trong backtest kiểm định'."
+            )
         logger.info(
             "BIC thấp nhất: n_components=%d covariance_type=%s (BIC=%.2f)",
             best_model.n_components,

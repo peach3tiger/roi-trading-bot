@@ -247,23 +247,33 @@ class _HmmGia:
     "thường xảy ra" là một test ngẫu nhiên đội lốt.
     """
 
-    #: `random_state` sẽ phát cảnh báo phân kỳ, và mức delta.
-    phan_ky_o: dict[int, float] = {}
-    #: `random_state` -> log-likelihood, quyết định restart nào THẮNG.
-    diem: dict[int, float] = {}
+    #: `(n_components, random_state)` -> mức |delta| sẽ phát ra.
+    phan_ky_o: dict[tuple[int, int], float] = {}
+    #: `(n_components, random_state)` -> log-likelihood, quyết định restart
+    #: nào THẮNG trong cùng một `n_components`.
+    diem: dict[tuple[int, int], float] = {}
 
     def __init__(self, *, n_components: int, random_state: int, **_: object) -> None:
+        import numpy as np
+
         self.n_components = n_components
         self.random_state = random_state
         self.monitor_ = type("M", (), {"converged": True, "iter": 5, "n_iter": 100})()
+        # `_build_regime_infos()` xếp hạng regime theo `means_[:, return_idx]`
+        # và đọc phương sai — stub phải có, nếu không `select_and_train`
+        # chết ở bước gán nhãn thay vì ở bước đang được kiểm.
+        self.means_ = np.linspace(-1.0, 1.0, n_components).reshape(n_components, 1)
+        self.covars_ = np.ones((n_components, 1, 1))
+        self.startprob_ = np.full(n_components, 1.0 / n_components)
+        self.transmat_ = np.full((n_components, n_components), 1.0 / n_components)
 
     def fit(self, X: object) -> None:
-        d = self.phan_ky_o.get(self.random_state)
+        d = self.phan_ky_o.get((self.n_components, self.random_state))
         if d is not None:
             _phat(-d)
 
     def score(self, X: object) -> float:
-        return self.diem.get(self.random_state, -1000.0)
+        return self.diem.get((self.n_components, self.random_state), -1000.0)
 
     def bic(self, X: object) -> float:
         return 100.0 * self.n_components
@@ -282,56 +292,153 @@ def hmm_gia(monkeypatch: pytest.MonkeyPatch) -> type[_HmmGia]:
     return _HmmGia
 
 
-def test_scan_bic_DIEN_muc_phan_ky_cua_restart_THANG(
-    hmm_gia: type[_HmmGia], hmm_engine_rong: HMMRegimeEngine
+def test_restart_phan_ky_bi_LOAI_khong_bao_gio_thang(
+    hmm_gia: type[_HmmGia], hmm_engine_rong: HMMRegimeEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Đột biến "phân kỳ của restart thắng luôn = 0" SỐNG SÓT ở vòng đầu:
-    không test nào kiểm trường này được ĐIỀN từ fit thật. Cả cổng đứng
-    trên nó, nên một hằng số 0 làm mọi khẳng định phía sau thành vô nghĩa
-    mà vẫn xanh."""
+    """Restart phân kỳ bị loại NGAY, kể cả khi log-likelihood của nó cao
+    nhất. Trước bản này nó vẫn thắng rồi mới bị `raise` sau — đúng ý định,
+    sai cơ chế."""
     import pandas as pd
 
-    hmm_gia.phan_ky_o = {0: 128.8}
-    hmm_gia.diem = {0: -10.0}  # restart 0 phân kỳ NHƯNG thắng điểm
+    hmm_gia.phan_ky_o = {(4, 0): 128.8}
+    hmm_gia.diem = {(4, 0): -10.0, (4, 1): -50.0}  # restart 0 phân kỳ NHƯNG điểm cao nhất
+    e = hmm_engine_rong
+    e.n_candidates = [4]
+
+    with caplog.at_level(logging.WARNING, logger="core.hmm_engine"):
+        _, kq = e.scan_bic(pd.DataFrame({"log_return_1": [0.1] * 20}))
+
+    assert kq[0].max_em_divergence == 0.0, "restart phân kỳ vẫn thắng"
+    assert kq[0].so_restart_loai == 1
+    assert kq[0].loai_bo is False
+
+    # Loại IM LẶNG là chế độ hỏng riêng: hệ thống vẫn chạy, kết quả vẫn ra,
+    # và không ai biết một phần không gian tìm kiếm đã bị vứt đi.
+    ban_ghi = " ".join(r.getMessage() for r in caplog.records)
+    assert "restart bị LOẠI" in ban_ghi, "loại restart mà KHÔNG cảnh báo"
+    assert "random_state=0" in ban_ghi, "cảnh báo không nói restart nào"
+
+
+def test_restart_THUA_phan_ky_khong_lam_ung_vien_bi_loai(
+    hmm_gia: type[_HmmGia], hmm_engine_rong: HMMRegimeEngine
+) -> None:
+    """10/13 cửa sổ CÓ restart phân kỳ. Nếu một restart hỏng làm cả ứng
+    viên bị loại thì cổng đỏ ở mọi cửa sổ, và một cổng luôn đỏ sẽ bị tắt."""
+    import pandas as pd
+
+    hmm_gia.phan_ky_o = {(4, 1): 128.8}
+    hmm_gia.diem = {(4, 0): -10.0, (4, 1): -999.0}
     e = hmm_engine_rong
     e.n_candidates = [4]
 
     _, kq = e.scan_bic(pd.DataFrame({"log_return_1": [0.1] * 20}))
 
-    assert kq[0].max_em_divergence == pytest.approx(128.8)
-
-
-def test_restart_THUA_phan_ky_KHONG_duoc_quy_cho_restart_thang(
-    hmm_gia: type[_HmmGia], hmm_engine_rong: HMMRegimeEngine
-) -> None:
-    """Mặt kia của cùng phép nối dây. Bọc cả cụm thay vì từng restart làm
-    cổng đỏ ở mọi cửa sổ — 10/13 cửa sổ có restart phân kỳ — và một cổng
-    luôn đỏ sẽ bị tắt trong tuần đầu."""
-    import pandas as pd
-
-    hmm_gia.phan_ky_o = {1: 128.8}
-    hmm_gia.diem = {0: -10.0, 1: -999.0}  # restart 1 phân kỳ VÀ thua
-    e = hmm_engine_rong
-    e.n_candidates = [4]
-
-    _, kq = e.scan_bic(pd.DataFrame({"log_return_1": [0.1] * 20}))
-
+    assert kq[0].loai_bo is False
     assert kq[0].max_em_divergence == 0.0
 
 
-def test_select_and_train_THAT_SU_goi_khang_dinh(
-    hmm_gia: type[_HmmGia], hmm_engine_rong: HMMRegimeEngine
+# ----------------------------------------------------------------------
+# HAI CA DỰNG TAY — đường "loại rồi chọn cái kế" KHÔNG BAO GIỜ chạy tự nhiên
+# ----------------------------------------------------------------------
+#
+# Với pruned-8, ứng viên BIC tốt nhất chưa bao giờ phân kỳ (đo: 0/13 cửa
+# sổ). Nên nhánh quan trọng nhất của cơ chế mới sẽ xanh một cách RỖNG nếu
+# chỉ dựa vào dữ liệu thật — đúng mẫu hỏng đã gặp sáu lần trong dự án này.
+# Hai ca dưới đây tồn tại để nhánh đó thật sự được chạy.
+
+
+def test_CA_A_ung_vien_BIC_tot_nhat_phan_ky_thi_chon_cai_NHI(
+    hmm_gia: type[_HmmGia], hmm_engine_rong: HMMRegimeEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Đột biến "bỏ khẳng định trong `select_and_train`" SỐNG SÓT ở vòng
-    đầu: mọi test gọi THẲNG `_assert_chosen_model_converged()`, nên không
-    ai kiểm nó ĐƯỢC GỌI. Một cổng không được nối vào đường thật là một
-    cổng không tồn tại — đúng mẫu hỏng của cổng §E."""
+    """Ca (a). `_HmmGia.bic = 100 * n_components`, nên n=4 luôn thắng BIC.
+    Cho TOÀN BỘ restart của n=4 phân kỳ -> phải chọn n=5, và phải CẢNH BÁO.
+
+    Suy giảm có kiểm soát: hệ thống vẫn cho ra một model dùng được thay vì
+    dừng hẳn, nhưng việc đó không được im lặng.
+    """
     import pandas as pd
 
-    hmm_gia.phan_ky_o = {0: 128.8}
-    hmm_gia.diem = {0: -10.0}
+    hmm_gia.phan_ky_o = {(4, r): 200.0 for r in range(hmm_engine_rong.n_init)}
+    hmm_gia.diem = {(5, 0): -10.0}
     e = hmm_engine_rong
-    e.n_candidates = [4]
+    e.n_candidates = [4, 5]
+
+    with caplog.at_level(logging.WARNING, logger="core.hmm_engine"):
+        model, kq = e.scan_bic(pd.DataFrame({"log_return_1": [0.1] * 20}))
+
+    theo_n = {r.n_components: r for r in kq}
+    assert theo_n[4].loai_bo is True, "ứng viên phân kỳ hoàn toàn vẫn dự phép so BIC"
+    assert theo_n[4].bic == float("inf")
+    assert theo_n[5].loai_bo is False
+    assert model.n_components == 5, "không lùi sang ứng viên kế"
+
+    ban_ghi = " ".join(r.getMessage() for r in caplog.records)
+    assert "LOẠI HOÀN TOÀN" in ban_ghi, "loại ứng viên mà KHÔNG cảnh báo"
+    assert "n_components=4" in ban_ghi
+
+
+def test_CA_B_toan_bo_ung_vien_phan_ky_thi_RAISE(
+    hmm_gia: type[_HmmGia], hmm_engine_rong: HMMRegimeEngine
+) -> None:
+    """Ca (b). Suy giảm có kiểm soát có ĐÁY: khi không còn ứng viên nào
+    dùng được thì dừng là đúng. Trả về một model bất kỳ ở đây nghĩa là
+    giao dịch bằng tham số vô nghĩa."""
+    import pandas as pd
+
+    hmm_gia.phan_ky_o = {
+        (n, r): 200.0 for n in (4, 5) for r in range(hmm_engine_rong.n_init)
+    }
+    e = hmm_engine_rong
+    e.n_candidates = [4, 5]
+
+    with pytest.raises(EMDivergenceError) as ex:
+        e.scan_bic(pd.DataFrame({"log_return_1": [0.1] * 20}))
+
+    assert "MỌI ứng viên" in str(ex.value)
+    assert "n=4:200.0" in str(ex.value), "thông điệp không nêu ứng viên nào hỏng bao nhiêu"
+
+
+def test_select_and_train_van_giu_khang_dinh_hau_dieu_kien(
+    hmm_gia: type[_HmmGia], hmm_engine_rong: HMMRegimeEngine
+) -> None:
+    """`_assert_chosen_model_converged()` giờ là HẬU ĐIỀU KIỆN, không phải
+    cổng chính — theo cấu tạo `scan_bic` không thể trả về model phân kỳ
+    nữa. Giữ lại vì nếu logic loại bỏ trôi đi, đây là thứ bắt được.
+    """
+    import pandas as pd
+
+    hmm_gia.phan_ky_o = {(4, r): 200.0 for r in range(hmm_engine_rong.n_init)}
+    hmm_gia.diem = {(5, 0): -10.0}
+    e = hmm_engine_rong
+    e.n_candidates = [4, 5]
+
+    e.select_and_train(pd.DataFrame({"log_return_1": [0.1] * 20}))
+
+    assert min(e.bic_results, key=lambda r: r.bic).n_components == 5
+
+
+def test_select_and_train_VAN_GOI_hau_dieu_kien(
+    hmm_engine_rong: HMMRegimeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Đột biến "bỏ hậu điều kiện trong `select_and_train`" SỐNG SÓT ở vòng
+    đầu, và lý do đáng ghi: theo cấu tạo mới `scan_bic` KHÔNG THỂ trả về
+    model phân kỳ, nên hậu điều kiện không bao giờ kích hoạt trên đường
+    thật — gỡ nó đi không đổi hành vi nào quan sát được.
+
+    Nhưng nó vẫn đáng giữ: nếu logic loại bỏ trôi đi, đây là thứ bắt được.
+    Muốn kiểm một phòng thủ chiều sâu thì phải ép nó vào tình huống mà lớp
+    trước đã hỏng — ở đây là thay `scan_bic` bằng một bản trả về đúng thứ
+    nó lẽ ra không được trả.
+    """
+    import pandas as pd
+
+    class _ModelGia:
+        n_components = 4
+
+    def _scan_hong(features: object) -> tuple[object, list[BICCandidateResult]]:
+        return _ModelGia(), [_ket_qua(4, 100.0, phan_ky=128.8)]
+
+    monkeypatch.setattr(hmm_engine_rong, "scan_bic", _scan_hong)
 
     with pytest.raises(EMDivergenceError):
-        e.select_and_train(pd.DataFrame({"log_return_1": [0.1] * 20}))
+        hmm_engine_rong.select_and_train(pd.DataFrame({"log_return_1": [0.1] * 20}))
